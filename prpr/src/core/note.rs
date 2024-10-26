@@ -336,7 +336,7 @@ impl Note {
             }
         }
     }
-}
+//}
 
 pub struct BadNote {
     pub time: f32,
