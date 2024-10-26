@@ -3,8 +3,8 @@ use crate::{judge::JudgeStatus, parse::RPE_HEIGHT};
 use macroquad::prelude::*;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
-const FADEOUT_TIME: f32 = 0.16;
-const BAD_TIME: f32 = 0.5;
+const FADEOUT_TIME: f32 = 0.12;
+const BAD_TIME: f32 = 0.1;
 
 #[derive(Clone, Debug)]
 pub enum NoteKind {
@@ -131,11 +131,11 @@ impl Note {
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
         self.object.set_time(res.time);
-        let mut immediate_particle = false;
-        let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
+        let mut immediate_particle = true;
+        let color = if let JudgeStatus::Hold(perfect, next_particle_time) = ctrl_obj.judge_status {
             if res.time >= *at {
-                immediate_particle = true;  // 立即触发
-                *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;  // 更新触发时间
+                immediate_particle = true;
+                *next_particle_time = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
                 Some(if perfect {
                     res.res_pack.info.fx_perfect()
                 } else {
