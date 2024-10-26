@@ -257,7 +257,7 @@ impl ResourcePack {
             sfx_click: load_clip!("click.ogg"),
             sfx_drag: load_clip!("drag.ogg"),
             sfx_flick: load_clip!("flick.ogg"),
-            ending: load_clip!("ending.mp3"),
+            ending: load_clip!("ending.flac"),
             hit_fx,
         })
     }
