@@ -131,10 +131,12 @@ impl Note {
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
         self.object.set_time(res.time);
-        if let Some(color) = if let JudgeStatus::Hold(perfect, at, ..) = &mut self.judge {
-            if res.time > *at {
-                *at += HOLD_PARTICLE_INTERVAL / res.config.speed;
-                Some(if *perfect {
+        let mut immediate_particle = false;
+        let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
+            if res.time >= *at {
+                immediate_particle = true;  // 立即触发
+                *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;  // 更新触发时间
+                Some(if perfect {
                     res.res_pack.info.fx_perfect()
                 } else {
                     res.res_pack.info.fx_good()
@@ -144,13 +146,16 @@ impl Note {
             }
         } else {
             None
-        } {
+        };
+    
+        if let Some(color) = color {
             self.init_ctrl_obj(ctrl_obj, line_height);
             res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
                 res.emit_at_origin(parent_rot + if self.above { 0. } else { 180. }, color)
             });
         }
     }
+    
 
     pub fn dead(&self) -> bool {
         (!matches!(self.kind, NoteKind::Hold { .. }) || matches!(self.judge, JudgeStatus::Judged)) && self.object.dead()
@@ -175,14 +180,16 @@ impl Note {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
             return;
         }
+
         if config.appear_before.is_finite() {
-            // TODO optimize
+        //if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
             let beat = bpm_list.beat(self.time);
             let time = bpm_list.time_beats(beat - config.appear_before);
             if time > res.time {
                 return;
             }
         }
+        
         if config.invisible_time.is_finite() && self.time - config.invisible_time < res.time {
             return;
         }
@@ -204,6 +211,7 @@ impl Note {
         if !config.draw_below
             && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
             && !matches!(self.kind, NoteKind::Hold { .. })
+        
         {
             return;
         }
