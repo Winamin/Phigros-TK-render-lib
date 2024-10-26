@@ -131,11 +131,12 @@ impl Note {
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
         self.object.set_time(res.time);
-        let mut immediate_particle = true;
-        let color = if let JudgeStatus::Hold(perfect, next_particle_time) = ctrl_obj.judge_status {
-            if res.time >= *at {
+        let mut immediate_particle = false;
+        let color = if let JudgeStatus::Hold(perfect, ref mut next_particle_time) = ctrl_obj.judge_status {
+            if res.time >= *next_particle_time {
                 immediate_particle = true;
                 *next_particle_time = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
+            }
                 Some(if perfect {
                     res.res_pack.info.fx_perfect()
                 } else {
