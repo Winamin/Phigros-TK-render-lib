@@ -144,10 +144,9 @@ impl Note {
                 })
             } else {
                 None
-            }
-        } else {
-            None
         };
+
+    }
     
         if let Some(color) = color {
             self.init_ctrl_obj(ctrl_obj, line_height);
