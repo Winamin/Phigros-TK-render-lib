@@ -144,10 +144,11 @@ impl Note {
             })
         } else {
             None // 非Hold状态时，不生成特效
-        };
+    };
+}
 
         // 这里可以继续编写其他逻辑
-    }
+    
     
         if let Some(color) = color {
             self.init_ctrl_obj(ctrl_obj, line_height);
@@ -336,7 +337,7 @@ impl Note {
             }
         }
     }
-//}
+}
 
 pub struct BadNote {
     pub time: f32,
