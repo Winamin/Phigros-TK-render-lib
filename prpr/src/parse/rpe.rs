@@ -18,7 +18,6 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 pub const RPE_WIDTH: f32 = 1350.;
 pub const RPE_HEIGHT: f32 = 900.;
 const SPEED_RATIO: f32 = 10. / 90. / HEIGHT_RATIO; // Adjusted SPEED_RATIO to reduce bar length growth
-const MAX_HEIGHT: f32 = 1000.0; // Maximum height limit for long bars
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
