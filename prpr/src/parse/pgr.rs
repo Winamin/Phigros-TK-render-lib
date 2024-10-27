@@ -177,21 +177,18 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                     1 => NoteKind::Click,
                     2 => NoteKind::Drag,
                     3 => {
-                        let hold_duration = pgr.hold_time; // 长按时长
-                        let end_time = (pgr.time + hold_duration) * r; // 计算长按结束时间
-                        height.set_time(end_time); // 设置高度动画的结束时间
-                        // 假设 height 是一个线性函数，可以直接计算 end_height
-                        let end_height = height.start_value + (end_time - height.start_time) * height.slope;
+                        Let start_height + (pgr.hold_time * pgr.speed * r / HEIGHT_RATIO)
+                        height.set_time(end_time);
+                        let end_height = height.now();
                         NoteKind::Hold { end_time, end_height }
                     }
                     4 => NoteKind::Flick,
                     _ => ptl!(bail "unknown-note-type", "type" => pgr.kind),
                 },
                 time,
-                let mut hold_start_speed = pgr. speed;
-                if pgr.kind == 3 {
+                speed: if pgr.kind == 3 {
                     speed.set_time(time);
-                    hold.start_speed
+                    pgr.speed / speed.now()
                 } else {
                     pgr.speed
                 },
