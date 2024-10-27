@@ -131,12 +131,11 @@ impl Note {
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
     self.object.set_time(res.time);
-    let tolerance = 1e-6; // 容忍度
+    let tolerance = 1e-6;
 
     if let Some(color) = if let JudgeStatus::Hold(perfect, at, ..) = &mut self.judge {
-        let interval = HOLD_PARTICLE_INTERVAL / res.config.speed as f64; // 使用f64提高精度
-
-        if res.time >= *at - tolerance {
+        let interval = HOLD_PARTICLE_INTERVAL / res.config.speed as f64;
+            if res.time >= *at - tolerance {
             *at += interval;
             Some(if *perfect {
                 res.res_pack.info.fx_perfect()
