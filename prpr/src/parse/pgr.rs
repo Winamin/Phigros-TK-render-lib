@@ -195,7 +195,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
 }
 
 fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32) -> Result<JudgeLine> {
-    let r = 60. / pgr.bpm / 32.;
+    let r = 512. / pgr.bpm / 32.;
     let (mut speed, mut height) = parse_speed_events(r, pgr.speed_events, max_time).context("Failed to parse speed events")?;
     let notes_above = parse_notes(r, pgr.notes_above, &mut speed, &mut height, true).context("Failed to parse notes above")?;
     let mut notes_below = parse_notes(r, pgr.notes_below, &mut speed, &mut height, false).context("Failed to parse notes below")?;
@@ -236,8 +236,7 @@ pub fn parse_phigros(source: &str, extra: ChartExtra) -> Result<Chart> {
                 .map(|note| note.time.not_nan())
                 .max()
                 .unwrap_or_default()
-                * (60. / line.bpm / 32.)
-                * r
+                * (512. / line.bpm / 32.)
         })
         .max()
         .unwrap_or_default()
