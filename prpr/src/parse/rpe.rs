@@ -209,9 +209,9 @@ fn parse_events<T: Tweenable, V: Clone + Into<T>>(
 fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> Result<AnimFloat> {
     let rpe: Vec<_> = rpe.iter().filter_map(|it| it.speed_events.as_ref()).collect();
     if rpe.is_empty() {
-        // TODO or is it?
         return Ok(AnimFloat::default());
-    };
+    }
+
     let anis: Vec<_> = rpe
         .into_iter()
         .map(|it| {
@@ -223,12 +223,15 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
             AnimFloat::new(kfs)
         })
         .collect();
+
     let mut pts: Vec<_> = anis.iter().flat_map(|it| it.keyframes.iter().map(|it| it.time.not_nan())).collect();
     pts.push(max_time.not_nan());
     pts.sort();
     pts.dedup();
+
     let mut sani = AnimFloat::chain(anis);
     sani.map_value(|v| v * SPEED_RATIO);
+    
     for i in 0..(pts.len() - 1) {
         let now_time = *pts[i];
         let end_time = *pts[i + 1];
@@ -242,35 +245,53 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
     }
     pts.sort();
     pts.dedup();
+
     let mut kfs = Vec::new();
     let mut height = 0.0;
+    const MAX_HEIGHT: f32 = 1000.0; // 最大高度限制
+    let mut max_reached = false; // 是否达到最大高度的标志
+
     for i in 0..(pts.len() - 1) {
         let now_time = *pts[i];
         let end_time = *pts[i + 1];
         sani.set_time(now_time);
         let speed = sani.now();
-        // this can affect a lot! do not use end_time...
-        // using end_time causes Hold tween (x |-> 0) to be recognized as Linear tween (x |-> x)
+
         sani.set_time(end_time - 1e-4);
         let end_speed = sani.now();
+        
+        let current_height = if max_reached {
+            MAX_HEIGHT
+        } else {
+            height.min(MAX_HEIGHT)
+        };
+
         kfs.push(if (speed - end_speed).abs() < EPS {
-            Keyframe::new(now_time, height, 2)
+            Keyframe::new(now_time, current_height, 2)
         } else if speed.abs() > end_speed.abs() {
             Keyframe {
                 time: now_time,
-                value: height,
+                value: current_height,
                 tween: Rc::new(ClampedTween::new(7 /*quadOut*/, 0.0..(1. - end_speed / speed))),
             }
         } else {
             Keyframe {
                 time: now_time,
-                value: height,
+                value: current_height,
                 tween: Rc::new(ClampedTween::new(6 /*quadIn*/, (speed / end_speed)..1.)),
             }
         });
-        height += (speed + end_speed) * (end_time - now_time) / 2.;
+
+        if !max_reached {
+            height += (speed + end_speed) * (end_time - now_time) / 2.;
+            if height >= MAX_HEIGHT {
+                height = MAX_HEIGHT;
+                max_reached = true; // 一旦达到最大高度，停止累加
+            }
+        }
     }
-    kfs.push(Keyframe::new(max_time, height, 0));
+
+    kfs.push(Keyframe::new(max_time, MAX_HEIGHT, 0)); // 最后一个关键帧设置为最大高度
     Ok(AnimFloat::new(kfs))
 }
 
