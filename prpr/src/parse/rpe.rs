@@ -259,13 +259,11 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
 
         sani.set_time(end_time - 1e-4);
         let end_speed = sani.now();
-        
         let current_height = if max_reached {
             MAX_HEIGHT
         } else {
             height.min(MAX_HEIGHT)
         };
-
         kfs.push(if (speed - end_speed).abs() < EPS {
             Keyframe::new(now_time, current_height, 2)
         } else if speed.abs() > end_speed.abs() {
@@ -281,7 +279,6 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
                 tween: Rc::new(ClampedTween::new(6 /*quadIn*/, (speed / end_speed)..1.)),
             }
         });
-
         if !max_reached {
             height += (speed + end_speed) * (end_time - now_time) / 2.;
             if height >= MAX_HEIGHT {
@@ -290,7 +287,6 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
             }
         }
     }
-
     kfs.push(Keyframe::new(max_time, MAX_HEIGHT, 0)); // 最后一个关键帧设置为最大高度
     Ok(AnimFloat::new(kfs))
 }
