@@ -121,44 +121,41 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
 
 impl Note {
     pub fn rotation(&self, line: &JudgeLine) -> f32 {
-        line.object.rotation.now() + if self.above { 0.0 } else { 180.0 }
+        line.object.rotation.now() + if self.above { 0. } else { 180. }
     }
 
     pub fn plain(&self) -> bool {
         !self.fake && !matches!(self.kind, NoteKind::Hold { .. }) && self.object.translation.1.keyframes.len() <= 1
-        // && self.ctrl_obj.is_default()
     }
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
-        self.object.set_time(res.time);
+    self.object.set_time(res.time);
 
-        // 检查是否为 Hold 状态并处理
-        if let JudgeStatus::Hold(perfect, at, ..) = &mut self.judge {
-            if res.time <= *at {
-                return; // 早期返回，避免后续逻辑
-            }
-
-            *at += HOLD_PARTICLE_INTERVAL / res.config.speed;
-
-            let color = if *perfect {
-                res.res_pack.info.fx_perfect()
-            } else {
-                res.res_pack.info.fx_good()
-            };
-
-            // 初始化控制对象
-            self.init_ctrl_obj(ctrl_obj);
-
-            // 发射粒子
-            res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0.0, 0.0), |res| {
-                res.emit_at_origin(parent_rot + if self.above { 0.0 } else { 180.0 }, color);
-            });
+    if let JudgeStatus::Hold(perfect, at, ..) = &mut self.judge {
+        if res.time <= *at {
+            return; // 早期返回，避免后续逻辑
         }
+
+        *at += HOLD_PARTICLE_INTERVAL / res.config.speed;
+
+        let color = if *perfect {
+            res.res_pack.info.fx_perfect()
+        } else {
+            res.res_pack.info.fx_good()
+        };
+
+        // 调用 init_ctrl_obj，传入 ctrl_obj 和 line_height 参数
+        self.init_ctrl_obj(ctrl_obj, line_height);
+
+        // 发射粒子
+        res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0.0, 0.0), |res| {
+            res.emit_at_origin(parent_rot + if self.above { 0.0 } else { 180.0 }, color);
+        });
     }
+    
 
     pub fn dead(&self) -> bool {
         (!matches!(self.kind, NoteKind::Hold { .. }) || matches!(self.judge, JudgeStatus::Judged)) && self.object.dead()
-        // && self.ctrl_obj.dead()
     }
 
     fn init_ctrl_obj(&self, ctrl_obj: &mut CtrlObject, line_height: f32) {
@@ -179,14 +176,16 @@ impl Note {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
             return;
         }
+
         if config.appear_before.is_finite() {
-            // TODO optimize
+        //if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
             let beat = bpm_list.beat(self.time);
             let time = bpm_list.time_beats(beat - config.appear_before);
             if time > res.time {
                 return;
             }
         }
+        
         if config.invisible_time.is_finite() && self.time - config.invisible_time < res.time {
             return;
         }
@@ -208,6 +207,7 @@ impl Note {
         if !config.draw_below
             && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
             && !matches!(self.kind, NoteKind::Hold { .. })
+        
         {
             return;
         }
