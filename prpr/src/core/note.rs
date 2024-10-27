@@ -130,9 +130,12 @@ impl Note {
     }
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
+        // 更新对象的时间到当前资源的时间
         self.object.set_time(res.time);
         let mut immediate_particle = false;
+        // 标记是否需要立即触发粒子
         let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
+            // 如果当前时间已经超过触发时间
             if res.time >= *at {
                 immediate_particle = true;  // 立即触发
                 *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;  // 更新触发时间
