@@ -137,18 +137,13 @@ impl Note {
                 immediate_particle = true;
                 *next_particle_time = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
             }
-                Some(if perfect {
-                res.res_pack.info.fx_perfect()
+                })
             } else {
-                res.res_pack.info.fx_good()
-            })
+                None
+            }
         } else {
-            None // 非Hold状态时，不生成特效
-    };
-}
-
-        // 这里可以继续编写其他逻辑
-    
+            None
+        } {
     
         if let Some(color) = color {
             self.init_ctrl_obj(ctrl_obj, line_height);
