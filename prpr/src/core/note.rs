@@ -134,24 +134,23 @@ impl Note {
         let mut immediate_particle = false;
         let color = if let JudgeStatus::Hold(perfect, ref mut next_particle_time) = ctrl_obj.judge_status {
             if res.time >= *next_particle_time {
-                immediate_particle = true;
-                *next_particle_time = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
-            }
-                }
-            } else {
-                None
-            }
+            immediate_particle = true;
+            *next_particle_time = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
+            Some(self.some_color_calculation()) // 假设计算颜色
         } else {
             None
-        } {
-    
-        if let Some(color) = color {
-            self.init_ctrl_obj(ctrl_obj, line_height);
-            res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
-                res.emit_at_origin(parent_rot + if self.above { 0. } else { 180. }, color)
-            });
         }
+    } else {
+        None
+    };
+
+    if let Some(color) = color {
+        self.init_ctrl_obj(ctrl_obj, line_height);
+        res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
+            res.emit_at_origin(parent_rot + if self.above { 0. } else { 180. }, color)
+        });
     }
+}
     
 
     pub fn dead(&self) -> bool {
