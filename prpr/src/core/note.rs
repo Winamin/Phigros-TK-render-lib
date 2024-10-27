@@ -130,21 +130,25 @@ impl Note {
     }
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
-        self.object.set_time(res.time);
-        let mut immediate_particle = false;
-        let color = if let JudgeStatus::Hold(perfect, ref mut next_particle_time) = ctrl_obj.judge_status {
-            if res.time >= *next_particle_time {
-            immediate_particle = true;
-            *next_particle_time = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
-            Some(self.some_color_calculation()) // 假设计算颜色
+    self.object.set_time(res.time);
+    let tolerance = 1e-6; // 容忍度
+
+    if let Some(color) = if let JudgeStatus::Hold(perfect, at, ..) = &mut self.judge {
+        let interval = HOLD_PARTICLE_INTERVAL / res.config.speed as f64; // 使用f64提高精度
+
+        if (res.time - *at).abs() < tolerance {
+            *at += interval;}
+            Some(if *perfect {
+                res.res_pack.info.fx_perfect()
+            } else {
+                res.res_pack.info.fx_good()
+            })
         } else {
             None
         }
     } else {
         None
-    };
-
-    if let Some(color) = color {
+    } {
         self.init_ctrl_obj(ctrl_obj, line_height);
         res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
             res.emit_at_origin(parent_rot + if self.above { 0. } else { 180. }, color)
