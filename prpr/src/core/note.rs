@@ -136,8 +136,8 @@ impl Note {
     if let Some(color) = if let JudgeStatus::Hold(perfect, at, ..) = &mut self.judge {
         let interval = HOLD_PARTICLE_INTERVAL / res.config.speed as f64; // 使用f64提高精度
 
-        if (res.time - *at).abs() < tolerance {
-            *at += interval;}
+        if res.time >= *at - tolerance {
+            *at += interval;
             Some(if *perfect {
                 res.res_pack.info.fx_perfect()
             } else {
@@ -154,7 +154,6 @@ impl Note {
             res.emit_at_origin(parent_rot + if self.above { 0. } else { 180. }, color)
         });
     }
-}
     
 
     pub fn dead(&self) -> bool {
