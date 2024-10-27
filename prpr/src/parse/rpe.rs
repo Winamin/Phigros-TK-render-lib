@@ -17,7 +17,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 pub const RPE_WIDTH: f32 = 1350.;
 pub const RPE_HEIGHT: f32 = 900.;
-const SPEED_RATIO: f32 = 10. / 45. / HEIGHT_RATIO; // Adjusted SPEED_RATIO to reduce bar length growth
+const SPEED_RATIO: f32 = 10. / 45. / HEIGHT_RATIO;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -269,7 +269,6 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
             }
         });
         height += (speed + end_speed) * (end_time - now_time) / 2.;
-if height > MAX_HEIGHT { height = MAX_HEIGHT; } // Apply maximum height limit
     }
     kfs.push(Keyframe::new(max_time, height, 0));
     Ok(AnimFloat::new(kfs))
