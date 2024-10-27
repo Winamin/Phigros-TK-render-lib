@@ -91,21 +91,6 @@ macro_rules! validate_events {
     };
 }
 
-fn is_note_visible(note: &Note, current_time: f32, min_visible_height: f32, max_visible_height: f32) -> bool {
-    let time_visible = note.time >= current_time && note.time <= current_time + visible_duration;
-    let height_visible = note.height >= min_visible_height && note.height <= max_visible_height;
-    !note.hidden && time_visible && height_visible
-}
-
-fn render_notes(notes: Vec<Note>, current_time: f32) {
-    for note in notes {
-        if is_note_visible(&note, current_time, min_visible_height, max_visible_height) {
-            render(note);
-        }
-    }
-}
-//Text
-
 fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
     validate_events!(pgr);
     assert!(!pgr.is_empty(), "PgrSpeedEvent cannot be empty.");
