@@ -137,7 +137,7 @@ impl Note {
                 immediate_particle = true;
                 *next_particle_time = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
             }
-                })
+                }
             } else {
                 None
             }
