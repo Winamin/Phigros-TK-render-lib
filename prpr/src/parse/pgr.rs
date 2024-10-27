@@ -233,10 +233,11 @@ pub fn parse_phigros(source: &str, extra: ChartExtra) -> Result<Chart> {
             line.notes_above
                 .iter()
                 .chain(line.notes_below.iter())
-                .map(|note| note.time.not_nan() * r)
+                .map(|note| note.time.not_nan())
                 .max()
                 .unwrap_or_default()
                 * (60. / line.bpm / 32.)
+                * r
         })
         .max()
         .unwrap_or_default()
