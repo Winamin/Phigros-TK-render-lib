@@ -92,7 +92,7 @@ fn sanitize_events(events: &mut [PECEvent], id: usize, desc: &str) {
                 "Overlap detected in {desc} events: [{last_start}, {last_end}) and [{}, {}). Clipping the last one to [{last_end}, {})",
                 e.start_time,
                 e.end_time,
-                e.end_time
+                last_end
             );
             e.start_time = last_end;
         }
