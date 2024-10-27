@@ -209,10 +209,6 @@ fn parse_events<T: Tweenable, V: Clone + Into<T>>(
 
 fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> Result<AnimFloat> {
     let rpe: Vec<_> = rpe.iter().filter_map(|it| it.speed_events.as_ref()).collect();
-    let speed_threshold = 0.1; // 设置一个速度阈值，用于区分普通音符和长条
-    if speed.abs() > speed_threshold && end_speed.abs() > speed_threshold {
-    height += (speed + end_speed) * (end_time - now_time) / 2.;
-    }
     if rpe.is_empty() {
         // TODO or is it?
         return Ok(AnimFloat::default());
