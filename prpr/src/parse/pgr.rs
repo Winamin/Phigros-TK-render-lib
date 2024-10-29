@@ -4,7 +4,7 @@ use super::process_lines;
 use crate::{
     core::{
         Anim, AnimFloat, AnimVector, BpmList, Chart, ChartExtra, ChartSettings, JudgeLine, JudgeLineCache, JudgeLineKind, Keyframe, Note, NoteKind,
-        Object, HEIGHT_RATIO, HEIGHT_FECTOR
+        Object, HEIGHT_RATIO,
     },
     ext::NotNanExt,
     judge::JudgeStatus,
