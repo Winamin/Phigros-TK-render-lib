@@ -4,7 +4,7 @@ use super::process_lines;
 use crate::{
     core::{
         Anim, AnimFloat, AnimVector, BpmList, Chart, ChartExtra, ChartSettings, JudgeLine, JudgeLineCache, JudgeLineKind, Keyframe, Note, NoteKind,
-        Object, HEIGHT_RATIO,
+        Object, HEIGHT_RATIO, HEIGHT_FECTOR
     },
     ext::NotNanExt,
     judge::JudgeStatus,
@@ -91,6 +91,12 @@ macro_rules! validate_events {
     };
 }
 
+fn calculate_height_factor(pgr: &PgrNote, r: f32) -> f32 {
+    // 这里假设 height_factor 与 pgr 的某些属性相关
+    // 例如：与速度成正比
+    pgr.speed * r 
+}
+
 fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
     validate_events!(pgr);
     assert_eq!(pgr[0].start_time, 0.0);
@@ -168,11 +174,12 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                     1 => NoteKind::Click,
                     2 => NoteKind::Drag,
                     3 => {
-                        let start_height = height.now();
-                        let end_time = (pgr.time + pgr.hold_time) * r;
-                        height.set_time(end_time);
-                        let end_height = start_height + (end_time - pgr.time * r) * HEIGHT_RATIO;
-                        NoteKind::Hold { end_time, end_height }
+                    let height_factor = calculate_height_factor(pgr, r);
+                    let start_height = height.now();
+                    let end_time = (pgr.time + pgr.hold_time) * r;
+                    height.set_time(end_time);
+                    let end_height = start_height + (end_time - pgr.time * r) * HEIGHT_RACTOR;
+                    NoteKind::Hold { end_time, end_height }
                     }
                     4 => NoteKind::Flick,
                     _ => ptl!(bail "unknown-note-type", "type" => pgr.kind),
@@ -187,8 +194,8 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                 height: pgr.floor_position / HEIGHT_RATIO,
 
                 above,
-                multiple_hint: false,
-                fake: false,
+                multiple_hint: true,
+                fake: true,
                 judge: JudgeStatus::NotJudged,
             })
         })
