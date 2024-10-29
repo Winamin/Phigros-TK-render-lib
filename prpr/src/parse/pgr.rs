@@ -93,21 +93,30 @@ macro_rules! validate_events {
 
 fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
     validate_events!(pgr);
+    assert!(!pgr.is_empty(), "PgrSpeedEvent cannot be empty.");
     assert_eq!(pgr[0].start_time, 0.0);
+
     let mut kfs = Vec::new();
-    let mut pos = 0.;
-    kfs.extend(pgr[..pgr.len().saturating_sub(1)].iter().map(|it| {
+    let mut pos = 0.0;
+
+    for it in &pgr[..pgr.len() - 1] {
         let from_pos = pos;
         pos += (it.end_time - it.start_time) * r * it.value;
-        Keyframe::new(it.start_time * r, from_pos, 2)
-    }));
+        kfs.push(Keyframe::new(it.start_time * r, from_pos, 2));
+    }
+
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
     kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
+
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO;
     }
-    Ok((AnimFloat::new(pgr.iter().map(|it| Keyframe::new(it.start_time * r, it.value, 0)).collect()), AnimFloat::new(kfs)))
+
+    Ok((
+        AnimFloat::new(pgr.iter().map(|it| Keyframe::new(it.start_time * r, it.value, 0)).collect()),
+        AnimFloat::new(kfs),
+    ))
 }
 
 fn parse_float_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimFloat> {
