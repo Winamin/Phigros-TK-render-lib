@@ -196,7 +196,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                 height: pgr.floor_position / HEIGHT_RATIO,
 
                 above,
-                multiple_hint: true,
+                multiple_hint: false,
                 fake: true,
                 judge: JudgeStatus::NotJudged,
             })
