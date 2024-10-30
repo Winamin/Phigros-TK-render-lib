@@ -833,7 +833,8 @@ impl Judge {
             };
             let line = &chart.lines[line_id];
             res.with_model(line.now_transform(res, &chart.lines) * note_transform, |res| {
-                res.emit_at_origin(line.notes[id as usize].rotation(line), res.res_pack.info.fx_perfect())
+                if :{mathes!(note_kind, NoteKind::Hold{..}){                                       
+                    res.emit_at_origin(line.notes[id as usize].rotation(line), res.res_pack.info.fx_perfect())
             });
             if let Some(sfx) = match note_kind {
                 NoteKind::Click => Some(&mut res.sfx_click),
