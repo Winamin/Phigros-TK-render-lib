@@ -126,19 +126,15 @@ impl Note {
 
     pub fn plain(&self) -> bool {
         !self.fake && !matches!(self.kind, NoteKind::Hold { .. }) && self.object.translation.1.keyframes.len() <= 1
-        // && self.ctrl_obj.is_default()
     }
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
-        // 更新对象的时间到当前资源的时间
         self.object.set_time(res.time);
-        let mut immediate_particle = false;
-        // 标记是否需要立即触发粒子
+        let mut _immediate_particle = false;
         let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
-            // 如果当前时间已经超过触发时间
             if res.time >= *at {
-                immediate_particle = true;  // 立即触发
-                *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;  // 更新触发时间
+                _immediate_particle = true;
+                *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
                 Some(if perfect {
                     res.res_pack.info.fx_perfect()
                 } else {
@@ -184,8 +180,7 @@ impl Note {
             return;
         }
 
-        if config.appear_before.is_finite() {
-        //if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
+        if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
             let beat = bpm_list.beat(self.time);
             let time = bpm_list.time_beats(beat - config.appear_before);
             if time > res.time {
@@ -209,10 +204,10 @@ impl Note {
 
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
-
         let base = height - line_height;
+
         if !config.draw_below
-            && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
+            && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base < 0.))
             && !matches!(self.kind, NoteKind::Hold { .. })
         
         {
@@ -258,13 +253,13 @@ impl Note {
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
                     let top = end_height - line_height;
-                    if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
+                    // Hold .pgr failed
+                    //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
+                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }){
                         return;
                     }
                     let tex = &style.hold;
                     let ratio = style.hold_ratio();
-                    // body
-                    // TODO (end_height - height) is not always total height
                     draw_tex(
                         res,
                         **(if res.res_pack.info.hold_repeat {
