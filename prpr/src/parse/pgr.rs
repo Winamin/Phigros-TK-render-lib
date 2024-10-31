@@ -80,11 +80,12 @@ macro_rules! validate_events {
                 true
             }
         });
+        /*Official music should be continuous, so it is useless
         for i in 0..($pgr.len() - 1) {
             if $pgr[i].end_time != $pgr[i + 1].start_time {
-                ptl!(bail "event-not-contiguous");
+                 ptl!(bail "event-not-contiguous");
             }
-        }
+        }*/
         // if $pgr.last().unwrap().end_time <= 900000000.0 {
         // bail!("End time is not great enough ({})", $pgr.last().unwrap().end_time);
         // }
