@@ -393,8 +393,8 @@ impl GameScene {
         if self.judge.combo() >= 3 {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
                 ui.text(self.judge.combo().to_string())
-                    .pos(0., top + eps * 2. - (1. - p) * 0.4)
-                    //.pos(0., top + eps * 1.346 - (1. - p) * 0.4)
+                    //.pos(0., top + eps * 2. - (1. - p) * 0.4)
+                    .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
                     .color(Color { a: color.a * c.a, ..color })
                     .scale(scale)
@@ -402,7 +402,9 @@ impl GameScene {
                     .bottom()
             });
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
-                ui.text(if res.config.autoplay() { "AUTOPLAY" } else { "COMBO" })
+                //println!("player_name:\"{}\"",res.config.player_name);
+                //let _player_name = res.config.player_name.clone()
+                ui.text(if res.config.autoplay() && res.config.player_name != "COMBO" { "AUTOPLAY" } else { "COMBO" })
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
                     .size(0.325)
@@ -1122,4 +1124,4 @@ impl Scene for GameScene {
             NextScene::None
         }
     }
-}
+            }
