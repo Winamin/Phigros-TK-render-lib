@@ -3,7 +3,7 @@ crate::tl_file!("scene" ttl);
 mod ending;
 pub use ending::{EndingScene, RecordUpdateState};
 
-mod game;
+pub mod game;
 pub use game::{GameMode, GameScene, SimpleRecord};
 
 mod loading;
@@ -490,8 +490,6 @@ impl Main {
             set_camera(&ui.camera());
             let mut gl = unsafe { get_internal_gl() };
             gl.flush();
-            // gl.quad_gl.render_pass(None);
-            // gl.quad_gl.viewport(None);
             BILLBOARD.with(|it| {
                 let mut guard = it.borrow_mut();
                 let t = guard.1.now() as f32;
