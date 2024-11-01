@@ -185,9 +185,11 @@ impl JudgeLine {
             }
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| match &self.kind {
-                    JudgeLineKind::Normal => {
+                    JudgeLineKind::Normal => {                       
+                         // 获取颜色，如果没有提供则使用默认颜色
                         let mut color = color.unwrap_or(res.judge_line_color);
-                        color.a *= alpha.max(0.0);
+                        let desired_alpha = 0.5; // 设置为您想要的透明度值，例如 0.5 表示 50% 不透明度
+                        color.a = desired_alpha.max(0.0).min(1.0);
                         let len = res.info.line_length;
                         draw_line(-len, 0., len, 0., 0.01, color);
                     }
