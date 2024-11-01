@@ -104,7 +104,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
         let from_pos = pos;
 
         // 如果是 hold 事件，则不计算变速
-        if it.is_hold {
+        if it.3 {
             // 使用上一个位置进行插值
             kfs.push(Keyframe::new(it.start_time * r, pos, 2));
             continue;
