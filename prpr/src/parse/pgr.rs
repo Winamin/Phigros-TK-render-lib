@@ -92,29 +92,19 @@ macro_rules! validate_events {
     };
 }
 
-fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32, smooth_value: f32) -> Result<(AnimFloat, AnimFloat)> {
+fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
     validate_events!(pgr);
     assert_eq!(pgr[0].start_time, 0.0);
     let mut kfs = Vec::new();
     let mut pos = 0.;
-
     kfs.extend(pgr[..pgr.len().saturating_sub(1)].iter().map(|it| {
         let from_pos = pos;
         pos += (it.end_time - it.start_time) * r * it.value;
-        
         Keyframe::new(it.start_time * r, from_pos, 2)
     }));
-
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
     kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
-
-    // -_________________
-    for i in 0..kfs.len() - 1 {
-        let current = &mut kfs[i];
-        let next = &mut kfs[i + 1];
-        current.value = current.value * (1.0 - smooth_value) + next.value * smooth_value;
-    }
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO;
     }
@@ -130,12 +120,20 @@ fn parse_float_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimFloat> {
     validate_events!(pgr);
     let mut kfs = Vec::<Keyframe<f32>>::new();
     for e in pgr {
-        if !kfs.last().map_or(false, |it| it.value == e.start) {
-            kfs.push(Keyframe::new((e.start_time * r).max(0.), e.start, 2));
+        let st = (e.start_time * r).max(0.); // 处理开始时间
+        let en = (e.end_time * r).max(0.); // 处理结束时间
+        if kfs.is_empty() || kfs.last().unwrap().value != e.start {
+            kfs.push(Keyframe::new(st, e.start, 2));
         }
-        kfs.push(Keyframe::new(e.end_time * r, e.end, 2));
+        kfs.push(Keyframe::new(en, e.end, 2));
     }
-    kfs.pop();
+    // 只在非空情况下移除最后一个关键帧
+    if !kfs.is_empty() {
+        kfs.pop();
+    }
+    if kfs.is_empty() {
+        return Err(Error::new("No keyframes generated")); // 根据需求返回合适的错误
+    }
     Ok(AnimFloat::new(kfs))
 }
 
