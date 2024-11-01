@@ -114,6 +114,129 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
         DrawTextureParams {
             dest_size: Some(hf * 2.),
             ..Default::default()
+use super::{
+    chart::ChartSettings, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource
+};
+use crate::{
+    judge::JudgeStatus, 
+    parse::RPE_HEIGHT,
+};
+
+
+use macroquad::prelude::*;
+
+const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
+const FADEOUT_TIME: f32 = 0.16;
+const BAD_TIME: f32 = 0.5;
+
+#[derive(Clone, Debug)]
+pub enum NoteKind {
+    Click,
+    Hold { end_time: f32, end_height: f32 },
+    Flick,
+    Drag,
+}
+
+impl NoteKind {
+    pub fn order(&self) -> i8 {
+        match self {
+            Self::Hold { .. } => 0,
+            Self::Drag => 1,
+            Self::Click => 2,
+            Self::Flick => 3,
+        }
+    }
+}
+
+pub struct Note {
+    pub object: Object,
+    pub kind: NoteKind,
+    pub time: f32,
+    pub height: f32,
+    pub speed: f32,
+
+    pub above: bool,
+    pub multiple_hint: bool,
+    pub fake: bool,
+    pub judge: JudgeStatus,
+}
+
+pub struct RenderConfig<'a> {
+    pub settings: &'a ChartSettings,
+    pub ctrl_obj: &'a mut CtrlObject,
+    pub line_height: f32,
+    pub appear_before: f32,
+    pub invisible_time: f32,
+    pub draw_below: bool,
+    pub incline_sin: f32,
+}
+
+fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color: Color, mut params: DrawTextureParams, clip: bool) {
+    let Vec2 { x: w, y: h } = params.dest_size.unwrap();
+    if h < 0. {
+        return;
+    }
+    let mut p = [Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)];
+    if clip {
+        if y + h <= 0. {
+            return;
+        }
+        if y <= 0. {
+            let r = -y / (y + h);
+            p[0].y = 0.;
+            p[1].y = 0.;
+            let mut source = params.source.unwrap_or_else(|| Rect::new(0., 0., 1., 1.));
+            source.y += source.h * r;
+            params.source = Some(source);
+        }
+    }
+    params.flip_y = true;
+    draw_tex_pts(res, texture, order, p, color, params);
+}
+fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], color: Color, params: DrawTextureParams) {
+    let mut p = p.map(|it| res.world_to_screen(it));
+    if p[0].x.min(p[1].x.min(p[2].x.min(p[3].x))) > 1.
+        || p[0].x.max(p[1].x.max(p[2].x.max(p[3].x))) < -1.
+        || p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) > 1.
+        || p[0].y.max(p[1].y.max(p[2].y.max(p[3].y))) < -1.
+    {
+        return;
+    }
+    let Rect { x: sx, y: sy, w: sw, h: sh } = params.source.unwrap_or(Rect { x: 0., y: 0., w: 1., h: 1. });
+
+    if params.flip_x {
+        p.swap(0, 1);
+        p.swap(2, 3);
+    }
+    if params.flip_y {
+        p.swap(0, 3);
+        p.swap(1, 2);
+    }
+
+    #[rustfmt::skip]
+    let vertices = [
+        Vertex::new(p[0].x, p[0].y, 0., sx     , sy     , color),
+        Vertex::new(p[1].x, p[1].y, 0., sx + sw, sy     , color),
+        Vertex::new(p[2].x, p[2].y, 0., sx + sw, sy + sh, color),
+        Vertex::new(p[3].x, p[3].y, 0., sx     , sy + sh, color),
+    ];
+    res.note_buffer
+        .borrow_mut()
+        .push((order, texture.raw_miniquad_texture_handle().gl_internal_id()), vertices);
+}
+
+fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Color) {
+    let hf = vec2(scale, tex.height() * scale / tex.width());
+    draw_tex(
+        res,
+        tex,
+        order,
+        -hf.x,
+        -hf.y,
+        color,
+        DrawTextureParams {
+            dest_size: Some(hf * 2.),
+            ..Default::default()
         },
         false,
     );
@@ -126,6 +249,7 @@ impl Note {
 
     pub fn plain(&self) -> bool {
         !self.fake && !matches!(self.kind, NoteKind::Hold { .. }) && self.object.translation.1.keyframes.len() <= 1
+        // && self.ctrl_obj.is_default()
     }
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
@@ -133,8 +257,8 @@ impl Note {
         let mut _immediate_particle = false;
         let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
             if res.time >= *at {
-                _immediate_particle = true;
-                *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
+                _immediate_particle = true;  // 立即触发
+                *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;  // 更新触发时间
                 Some(if perfect {
                     res.res_pack.info.fx_perfect()
                 } else {
@@ -180,6 +304,7 @@ impl Note {
             return;
         }
 
+        // if config.appear_before.is_finite() {
         if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
             let beat = bpm_list.beat(self.time);
             let time = bpm_list.time_beats(beat - config.appear_before);
@@ -205,8 +330,11 @@ impl Note {
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
+        //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
 
+        // show_below的判断
         if !config.draw_below
+            // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
             && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base < 0.))
             && !matches!(self.kind, NoteKind::Hold { .. })
         
@@ -253,13 +381,15 @@ impl Note {
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
                     let top = end_height - line_height;
-                    // Hold .pgr failed
+                    // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format
                     //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
                     if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }){
                         return;
                     }
                     let tex = &style.hold;
                     let ratio = style.hold_ratio();
+                    // body
+                    // TODO (end_height - height) is not always total height
                     draw_tex(
                         res,
                         **(if res.res_pack.info.hold_repeat {
