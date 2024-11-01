@@ -99,12 +99,10 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut kfs = Vec::new();
     let mut pos = 0.0;
 
-    // 生成关键帧，忽略 hold 判定的变速
     for it in &pgr[..pgr.len().saturating_sub(1)] {
         let from_pos = pos;
 
-        // 如果是 hold 事件，则不计算变速
-        if it.3 {
+        if it.end_time {
             // 使用上一个位置进行插值
             kfs.push(Keyframe::new(it.start_time * r, pos, 2));
             continue;
