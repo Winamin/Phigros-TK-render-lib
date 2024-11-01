@@ -219,7 +219,7 @@ impl Note {
         // show_below的判断
         if !config.draw_below
             // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
-            && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base < 0.))
+            && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base < -1e-3))
             && !matches!(self.kind, NoteKind::Hold { .. })
         
         {
