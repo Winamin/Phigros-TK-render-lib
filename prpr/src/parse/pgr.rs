@@ -131,9 +131,6 @@ fn parse_float_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimFloat> {
     if !kfs.is_empty() {
         kfs.pop();
     }
-    if kfs.is_empty() {
-        return Err(Error::new("No keyframes generated")); // 根据需求返回合适的错误
-    }
     Ok(AnimFloat::new(kfs))
 }
 
