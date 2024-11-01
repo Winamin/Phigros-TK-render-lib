@@ -99,8 +99,8 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut kfs = Vec::new();
     let mut pos = 0.0;
 
-    // 遍历 PgrSpeedEvent 以计算关键帧
-    for it in pgr.iter().take(pgr.len().saturating_sub(1)) {
+    // 遍历 PgrSpeedEvent 以计算关键帧，并过滤掉 Hold 类型的事件
+    for it in pgr.iter().take(pgr.len().saturating_sub(1)).filter(|e| !matches!(e.kind, NoteKind::Hold { .. })) {
         let from_pos = pos;
         // 确保 it.value 合理且不为零
         let delta_time = (it.end_time - it.start_time) * r;
@@ -109,7 +109,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
         kfs.push(Keyframe::new(it.start_time * r, from_pos, 2));
     }
 
-    if let Some(last) = pgr.last() {
+    if let Some(last) = pgr.last().filter(|e| !matches!(e.kind, NoteKind::Hold { .. })) {
         kfs.push(Keyframe::new(last.start_time * r, pos, 2));
         pos += (max_time - last.start_time * r) * last.value;
         kfs.push(Keyframe::new(max_time, pos, 0));
@@ -120,10 +120,11 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     }
 
     Ok((
-        AnimFloat::new(pgr.iter().map(|it| Keyframe::new(it.start_time * r, it.value, 0)).collect()),
+        AnimFloat::new(pgr.iter().filter(|e| !matches!(e.kind, NoteKind::Hold { .. })).map(|it| Keyframe::new(it.start_time * r, it.value, 0)).collect()),
         AnimFloat::new(kfs)
     ))
 }
+
 
 fn parse_float_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimFloat> {
     validate_events!(pgr);
