@@ -5,7 +5,6 @@ use crate::{
     judge::{JudgeStatus, LIMIT_BAD},
     ui::Ui,
 };
-
 use macroquad::prelude::*;
 use miniquad::{RenderPass, Texture, TextureParams, TextureWrap};
 use nalgebra::Rotation2;
