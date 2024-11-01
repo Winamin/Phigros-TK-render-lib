@@ -97,16 +97,20 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     assert_eq!(pgr[0].start_time, 0.0);
     let mut kfs = Vec::new();
     let mut pos = 0.;
+    
+    // 生成关键帧，去除速度值的计算
     kfs.extend(pgr[..pgr.len().saturating_sub(1)].iter().map(|it| {
         let from_pos = pos;
-        pos += (it.end_time - it.start_time) * r * it.value;
+        pos += (it.end_time - it.start_time) * r;
         Keyframe::new(it.start_time * r, from_pos, 2)
     }));
+    
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
-    kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
+    kfs.push(Keyframe::new(max_time, pos, 0)); // 去除最后的速度影响
+    
     for kf in &mut kfs {
-        kf.value /= HEIGHT_RATIO;
+        kf.value /= HEIGHT_RATIO; // 这一步可以保留，取决于 HEIGHT_RATIO 是否需要
     }
     Ok((
         AnimFloat::new(pgr.iter().map(
