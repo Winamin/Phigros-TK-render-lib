@@ -95,36 +95,27 @@ macro_rules! validate_events {
 fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
     validate_events!(pgr);
     assert_eq!(pgr[0].start_time, 0.0);
-    
     let mut kfs = Vec::new();
-    let mut pos = 0.0;
-
-    // 遍历 PgrSpeedEvent 以计算关键帧，并过滤掉 Hold 类型的事件
-    for it in pgr.iter().take(pgr.len().saturating_sub(1)).filter(|e| !matches!(e.kind, NoteKind::Hold { .. })) {
+    let mut pos = 0.;
+    kfs.extend(pgr[..pgr.len().saturating_sub(1)].iter().map(|it| {
         let from_pos = pos;
-        // 确保 it.value 合理且不为零
-        let delta_time = (it.end_time - it.start_time) * r;
-        pos += delta_time * it.value;
-
-        kfs.push(Keyframe::new(it.start_time * r, from_pos, 2));
-    }
-
-    if let Some(last) = pgr.last().filter(|e| !matches!(e.kind, NoteKind::Hold { .. })) {
-        kfs.push(Keyframe::new(last.start_time * r, pos, 2));
-        pos += (max_time - last.start_time * r) * last.value;
-        kfs.push(Keyframe::new(max_time, pos, 0));
-    }
+        pos += (it.end_time - it.start_time) * r * it.value;
+        Keyframe::new(it.start_time * r, from_pos, 2)
+    }));
+    let last = pgr.last().unwrap();
+    kfs.push(Keyframe::new(last.start_time * r, pos, 2));
+    kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
     
     for kf in &mut kfs {
-        kf.value /= HEIGHT_RATIO;
+        kf.value /= HEIGHT_RATIO；
     }
-
     Ok((
-        AnimFloat::new(pgr.iter().filter(|e| !matches!(e.kind, NoteKind::Hold { .. })).map(|it| Keyframe::new(it.start_time * r, it.value, 0)).collect()),
+        AnimFloat::new(pgr.iter().map(
+            |it| Keyframe::new(it.start_time * r, it.value, 0)
+        ).collect()), 
         AnimFloat::new(kfs)
     ))
 }
-
 
 fn parse_float_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimFloat> {
     validate_events!(pgr);
@@ -185,7 +176,8 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                     2 => NoteKind::Drag,
                     3 => {
                         let end_time = (pgr.time + pgr.hold_time) * r;
-                        height.set_time(end_time);
+                        height.set_time(time);
+                        let start_height = height.now();
                         let end_height = start_height + (pgr.hold_time * pgr.speed * r / HEIGHT_RATIO);
                         NoteKind::Hold { end_time, end_height }
                     }
