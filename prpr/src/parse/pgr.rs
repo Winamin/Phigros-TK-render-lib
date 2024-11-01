@@ -31,6 +31,7 @@ struct PgrEvent {
 #[serde(rename_all = "camelCase")]
 struct PgrSpeedEvent {
     pub start_time: f32,
+    pub note_kind f32,
     pub end_time: f32,
     pub value: f32,
 }
