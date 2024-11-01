@@ -96,8 +96,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     validate_events!(pgr);
     assert_eq!(pgr[0].start_time, 0.0);
     let mut kfs = Vec::new();
-    let mut pos = 0.0;
-    // 遍历事件，处理非最后一个事件
+    let mut pos = 0.;
     kfs.extend(pgr[..pgr.len().saturating_sub(1)].iter().map(|it| {
         let from_pos = pos;
         pos += (it.end_time - it.start_time) * r * it.value;
@@ -105,17 +104,14 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     }));
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
-    // 处理 Hold 类型判定，固定 Speed
-    if let Some(last_hold) = pgr.iter().find(|it| matches!(it.kind, PgrEventKind::Hold)) {
-        kfs.push(Keyframe::new(max_time, pos + (max_time - last_hold.start_time * r) * last_hold.value, 0));
-    } else {
-        kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
-    }
+    kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO;
     }
     Ok((
-        AnimFloat::new(pgr.iter().map(|it| Keyframe::new(it.start_time * r, it.value, 0)).collect()),
+        AnimFloat::new(pgr.iter().map(
+            |it| Keyframe::new(it.start_time * r, it.value, 0)
+        ).collect()), 
         AnimFloat::new(kfs)
     ))
 }
