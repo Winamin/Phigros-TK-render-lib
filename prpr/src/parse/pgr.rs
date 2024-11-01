@@ -93,7 +93,7 @@ macro_rules! validate_events {
 }
 
 fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
-    validate_events!(pgr);
+    validate_events!(mut pgr);
     assert!(!pgr.is_empty(), "PgrSpeedEvent cannot be empty.");
     assert_eq!(pgr[0].start_time, 0.0);
 
