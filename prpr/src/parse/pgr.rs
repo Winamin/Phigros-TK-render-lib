@@ -92,36 +92,34 @@ macro_rules! validate_events {
     };
 }
 
-fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
+fn parse_speed_events(r: f32, pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
     validate_events!(pgr);
     assert!(!pgr.is_empty(), "PgrSpeedEvent cannot be empty.");
     assert_eq!(pgr[0].start_time, 0.0);
 
-    pgr.retain(|event| event.value != 1.0);
-    
     let mut kfs = Vec::new();
     let mut pos = 0.0;
 
-    // 生成关键帧
+    // 生成关键帧，忽略变速，将速度值固定为1.0
     for it in &pgr[..pgr.len() - 1] {
         let from_pos = pos; // 记录当前的位置
-        pos += (it.end_time - it.start_time) * r * it.value; // 更新位置
+        pos += (it.end_time - it.start_time) * r; // 更新位置，忽略it.value
         // 生成关键帧
         kfs.push(Keyframe::new(it.start_time * r, from_pos, 2));
     }
 
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2)); // 添加最后一个关键帧
-    kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0)); // 计算并添加结束关键帧
+    kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r), 0)); // 计算并添加结束关键帧，忽略last.value
 
     // 调整关键帧值
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO; // 确保 height 是正确的
     }
 
-    // 返回生成的动画
+    // 返回生成的动画，将速度值固定为1.0
     Ok((
-        AnimFloat::new(pgr.iter().map(|it| Keyframe::new(it.start_time * r, it.value, 0)).collect()),
+        AnimFloat::new(pgr.iter().map(|it| Keyframe::new(it.start_time * r, 1.0, 0)).collect()),
         AnimFloat::new(kfs),
     ))
 }
