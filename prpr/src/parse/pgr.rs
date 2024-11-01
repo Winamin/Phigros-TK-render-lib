@@ -102,7 +102,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     for it in &pgr[..pgr.len().saturating_sub(1)] {
         let from_pos = pos;
 
-        if it.end_time {
+        if it.value == 0.0 {
             // 使用上一个位置进行插值
             kfs.push(Keyframe::new(it.start_time * r, pos, 2));
             continue;
