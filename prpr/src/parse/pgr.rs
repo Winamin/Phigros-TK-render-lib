@@ -100,7 +100,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut pos = 0.0;
 
     // 遍历 PgrSpeedEvent 以计算关键帧，并过滤掉 Hold 类型的事件
-    for it in pgr.iter().take(pgr.len().saturating_sub(1)).filter(|e| !matches!(e.kind, NoteKind::Hold { .. })) {
+    for it in pgr.iter().take(pgr.len().saturating_sub(1)).filter(|e| !matches!(note_kind, NoteKind::Hold { .. })){
         let from_pos = pos;
         // 确保 it.value 合理且不为零
         let delta_time = (it.end_time - it.start_time) * r;
@@ -109,21 +109,16 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
         kfs.push(Keyframe::new(it.start_time * r, from_pos, 2));
     }
 
-    // 最后一个非 Hold 事件的处理
-    if let Some(last) = pgr.iter().rev().find(|e| !matches!(e.kind, NoteKind::Hold { .. })) {
-        kfs.push(Keyframe::new(last.start_time * r, pos, 2));
-        pos += (max_time - last.start_time * r) * last.value;
-        kfs.push(Keyframe::new(max_time, pos, 0));
-    }
-
     // 对关键帧进行值缩放
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO;
     }
 
-    // 生成结果，过滤掉 Hold 类型的事件
+    // 生成结果
     Ok((
-        AnimFloat::new(pgr.iter().filter(|e| !matches!(e.kind, NoteKind::Hold { .. })).map(|it| Keyframe::new(it.start_time * r, it.value, 0)).collect()),
+        AnimFloat::new(pgr.iter().map(
+            |it| Keyframe::new(it.start_time * r, it.value, 0)
+        ).collect()), 
         AnimFloat::new(kfs)
     ))
 }
