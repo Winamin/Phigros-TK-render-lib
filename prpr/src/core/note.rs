@@ -44,7 +44,7 @@ pub struct Note {
     pub judge: JudgeStatus,
 }
 
-// info.rs
+#[derive(PartialEq)]
 pub enum ChartFormat {
     Pgr,
     CustomFormat, // 确保拼写正确
