@@ -6,12 +6,14 @@ use crate::{
     parse::RPE_HEIGHT,
 };
 
+
 use macroquad::prelude::*;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
 
+#[derive(Clone, Debug)]
 pub enum NoteKind {
     Click,
     Hold { end_time: f32, end_height: f32 },
@@ -77,10 +79,10 @@ fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color
 }
 fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], color: Color, params: DrawTextureParams) {
     let mut p = p.map(|it| res.world_to_screen(it));
-    if p[0].x.min(p[1].x.min(p[2].x.min(p[3].x))) > 1.
-        || p[0].x.max(p[1].x.max(p[2].x.max(p[3].x))) < -1.
-        || p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) > 1.
-        || p[0].y.max(p[1].y.max(p[2].y.max(p[3].y))) < -1.
+    if p[0].x.min(p[1].x.min(p[2].x.min(p[3].x))) > 1. / res.config.chart_ratio
+        || p[0].x.max(p[1].x.max(p[2].x.max(p[3].x))) < -1. / res.config.chart_ratio
+        || p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) > 1. / res.config.chart_ratio
+        || p[0].y.max(p[1].y.max(p[2].y.max(p[3].y))) < -1. / res.config.chart_ratio
     {
         return;
     }
@@ -217,11 +219,11 @@ impl Note {
         // show_below的判断
         if !config.draw_below
             // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
-            //&& !matches!(self.kind, NoteKind::Hold { .. })
-            && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-3))
-            && !matches!(self.kind, NoteKind::Hold { .. })
             && ((res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-3))
+            //&& !matches!(self.kind, NoteKind::Hold { .. })
+        
         {
+            //println!("time:{}\tres.time:{}\tbase:{}", self.time, res.time, base);
             return;
         }
         let order = self.kind.order();
@@ -264,10 +266,9 @@ impl Note {
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
                     let top = end_height - line_height;
-                    // Hold在判定前消失的原因
-                    if res.time < self.time 
-                    && bottom < -1e-6 
-                    && !(matches!(self.kind, NoteKind::Hold { .. }) && self.chart_format == ChartInfo::Format::PGR) {
+                    // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format
+                    //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
+                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }){
                         return;
                     }
                     let tex = &style.hold;
