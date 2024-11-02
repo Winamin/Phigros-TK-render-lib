@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use tracing::warn;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PgrEvent {
     pub start_time: f32,
@@ -27,7 +27,7 @@ struct PgrEvent {
     pub end2: f32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PgrSpeedEvent {
     pub start_time: f32,
