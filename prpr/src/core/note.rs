@@ -266,7 +266,7 @@ impl Note {
                     }
                     let end_height = end_height / res.aspect_ratio * spd;
                     let clip = !config.draw_below && config.settings.hold_partial_cover;;
-                    let chart_info = ChartFormat();
+                    let chart_info: ChartFormat = ChartFormat::Pgr;
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
                     let top = end_height - line_height;
