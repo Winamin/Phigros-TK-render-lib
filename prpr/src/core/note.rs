@@ -261,14 +261,14 @@ impl Note {
                     }
                     let end_height = end_height / res.aspect_ratio * spd;
 
-                    let clip = !config.draw_below && config.settings.hold_partial_cover && some_function_or_variable_that_returns_chart_info();;
-
+                    let clip = !config.draw_below && config.settings.hold_partial_cover();;
+                    let chart_info = some_function_or_variable_that_returns_chart_info();
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
                     let top = end_height - line_height;
                     // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format
                     //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
-                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }) && chart_info.format != ChartFormat::PGR {
+                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }) && chart_info.format != ChartFormat::Pgr {
                         return;
                     }
                     let tex = &style.hold;
