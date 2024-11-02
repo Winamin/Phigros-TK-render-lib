@@ -33,7 +33,7 @@ struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
-    kind：notekind,
+    kind: notekind,
 }
 
 #[derive(Deserialize)]
@@ -93,7 +93,7 @@ macro_rules! validate_events {
 }
 
 fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
-    validate_events!(pgr);
+    validate_events!(mut pgr);
     assert_eq!(pgr[0].start_time, 0.0);
     
     let mut kfs = Vec::new();
