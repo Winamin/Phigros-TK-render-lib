@@ -8,7 +8,6 @@ use crate::{
 };
 
 use macroquad::prelude::*;
-use crate::other_module::get_chart_info;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
@@ -23,7 +22,7 @@ pub enum NoteKind {
 }
 
 pub enum ChartFormat {
-    Pgr
+    Pgr,
     CustoFormat,
 }
 
@@ -268,7 +267,7 @@ impl Note {
                     }
                     let end_height = end_height / res.aspect_ratio * spd;
                     let clip = !config.draw_below && config.settings.hold_partial_cover;;
-                    let chart_info = get_chart_info();
+                    let chart_info = ChartFormat();
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
                     let top = end_height - line_height;
