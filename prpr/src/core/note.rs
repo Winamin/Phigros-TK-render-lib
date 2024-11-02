@@ -7,13 +7,12 @@ use crate::{
 };
 
 use macroquad::prelude::*;
-use serde::Deserialize;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum NoteKind {
     Click,
     Hold { end_time: f32, end_height: f32 },
@@ -32,7 +31,6 @@ impl NoteKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
 pub struct Note {
     pub object: Object,
     pub kind: NoteKind,
