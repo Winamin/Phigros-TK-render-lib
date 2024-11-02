@@ -70,12 +70,6 @@ struct PgrChart {
     judge_line_list: Vec<PgrJudgeLine>,
 }
 
-macro_rules! is_hold {
-    ($note_kind:expr) => {
-        matches!($note_kind, NoteKind::Hold { .. })
-    };
-}
-
 macro_rules! validate_events {
     ($pgr:expr) => {
         // 保留有效的事件
@@ -109,12 +103,16 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     assert_eq!(pgr[0].start_time, 0.0);
     let mut kfs = Vec::new();
     let mut pos = 0.;
-    
+
     for event in &pgr {
-        if is_hold!(event.note_kind) {
+        if let NoteKind::Hold { .. } = event.note_kind {
             // 如果是 Hold 事件，不进行速度调整
             continue;
         }
+
+        let from_pos = pos;
+        pos += (event.end_time - event.start_time) * r * event.value;
+        kfs.push(Keyframe::new(event.start_time * r, from_pos, 2));
     }
 
     let last = pgr.last().unwrap();
@@ -132,7 +130,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
         AnimFloat::new(kfs)
     ))
 }
-
+    
 fn parse_float_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimFloat> {
     validate_events!(pgr);
     let mut kfs = Vec::<Keyframe<f32>>::new();
