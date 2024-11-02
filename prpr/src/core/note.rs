@@ -217,9 +217,10 @@ impl Note {
         // show_below的判断
         if !config.draw_below
             // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
-            && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base < -1e-3))
+            //&& !matches!(self.kind, NoteKind::Hold { .. })
+            && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-3))
             && !matches!(self.kind, NoteKind::Hold { .. })
-        
+            && ((res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-3))
         {
             return;
         }
@@ -263,9 +264,10 @@ impl Note {
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
                     let top = end_height - line_height;
-                    // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format
-                    //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
-                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }){
+                    // Hold在判定前消失的原因
+                    if res.time < self.time 
+                    && bottom < -1e-6 
+                    && !(matches!(self.kind, NoteKind::Hold { .. }) && self.chart_format == ChartInfo::Format::PGR) {
                         return;
                     }
                     let tex = &style.hold;
