@@ -74,7 +74,7 @@ struct PgrChart {
 impl PgrSpeedEvent {
     // 这个方法判断是否是 Hold 事件
     fn is_hold(&self) -> bool {
-        self.hold_time // 直接返回 hold_time 字段
+        self.hold_time.is_some() // 直接返回 hold_time 字段
     }
 }
 
