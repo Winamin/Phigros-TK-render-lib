@@ -105,7 +105,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut pos = 0.;
 
     for event in &pgr {
-        if let NoteKind::Hold { .. } = event.note_kind {
+        if let NoteKind::Hold { .. } = event.NoteKind {
             // 如果是 Hold 事件，不进行速度调整
             continue;
         }
