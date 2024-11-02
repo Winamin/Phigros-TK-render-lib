@@ -108,8 +108,8 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
 
     // 处理 pgr 中的每个事件
     for it in &pgr {
-        match &it.hold_time {
-            NoteKind::Hold => {
+        match &it.kind {  // 使用引用避免所有权问题
+            NoteKind::Hold { end_time, end_height } => {
                 // 如果是 Hold 事件，直接记录该事件的 keyframe
                 kfs.push(Keyframe::new(it.start_time * r, pos, 0));
             },
