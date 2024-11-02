@@ -272,7 +272,7 @@ impl Note {
                     let top = end_height - line_height;
                     // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format
                     //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
-                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }) && chart_info.format != ChartFormat::Pgr {
+                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }) && chart_info != ChartFormat::Pgr {
                         return;
                     }
                     let tex = &style.hold;
