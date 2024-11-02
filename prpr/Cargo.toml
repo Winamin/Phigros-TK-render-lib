@@ -13,7 +13,6 @@ log = ["dep:tracing-subscriber", "dep:colored"]
 
 [dependencies]
 anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1"
 base64 = "0.21.0"
 cfg-if = "1.0.0"
@@ -97,7 +96,3 @@ wasm-bindgen-futures = "0.4"
 
 [build-dependencies]
 walkdir = "2.3.2"
-
-["derive"] }
-serde_derive = "1.0"
-serde_json = "1.0"
