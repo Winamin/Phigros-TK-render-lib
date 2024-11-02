@@ -33,7 +33,7 @@ struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
-    kind: notekind,
+    kind: Notekind,
 }
 
 #[derive(Deserialize)]
@@ -100,7 +100,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut pos = 0.0;
 
     // 过滤掉 Hold 类型的事件
-    let filtered_pgr: Vec<_> = pgr.iter().filter(|e| !matches!(e.kind, NoteKind::Hold { .. })).collect();
+    let filtered_pgr: Vec<_> = pgr.iter().filter(|e| !matches!(NoteKind::Hold { end_time, .. })).collect();
 
     for it in filtered_pgr.iter().take(filtered_pgr.len().saturating_sub(1)) {
         let from_pos = pos;
