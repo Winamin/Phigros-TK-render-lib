@@ -10,11 +10,11 @@ use crate::{
     judge::JudgeStatus,
 };
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize};
 use std::cell::RefCell;
 use tracing::warn;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PgrEvent {
     pub start_time: f32,
@@ -27,7 +27,7 @@ struct PgrEvent {
     pub end2: f32,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PgrSpeedEvent {
     pub start_time: f32,
