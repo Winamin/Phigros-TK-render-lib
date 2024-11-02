@@ -32,14 +32,13 @@ impl NoteKind {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Note {
     pub object: Object,
     pub kind: NoteKind,
     pub time: f32,
     pub height: f32,
     pub speed: f32,
-
     pub above: bool,
     pub multiple_hint: bool,
     pub fake: bool,
