@@ -115,6 +115,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
             // 如果是 Hold 事件，不进行速度调整
             continue;
         }
+    }
 
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
