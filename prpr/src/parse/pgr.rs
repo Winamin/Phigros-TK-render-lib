@@ -33,6 +33,7 @@ struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
+    pub note: Note,
 }
 
 #[derive(Deserialize)]
@@ -104,12 +105,10 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut pos = 0.;
 
     for event in &pgr {
-        match event.kind {
-            NoteKind::Hold { end_time, end_height } => {
-                // 处理 Hold 事件，调整 pos 和 kfs
-                let from_pos = pos;
-                pos += (end_time - event.start_time) * r * event.value;
-                kfs.push(Keyframe::new(event.start_time * r, from_pos, 2));
+        match event.note.kind {
+            NoteKind::Hold { .. } => {
+                // 如果是 Hold 事件，不进行速度调整，跳过
+                continue;
             },
             _ => {
                 // 处理其他事件类型
