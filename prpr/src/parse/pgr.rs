@@ -76,7 +76,7 @@ impl PgrSpeedEvent {
         self.hold_time // 直接返回 hold_time 字段
     }
 }
-8
+
 macro_rules! validate_events {
     ($pgr:expr) => {
         // 保留有效的事件
