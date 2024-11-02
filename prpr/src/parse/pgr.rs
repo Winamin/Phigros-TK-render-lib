@@ -10,7 +10,7 @@ use crate::{
     judge::JudgeStatus,
 };
 use anyhow::{Context, Result};
-use serde::Deserialize, Serialize;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use tracing::warn;
 
