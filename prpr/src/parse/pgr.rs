@@ -33,7 +33,6 @@ struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
-    pub note: Note,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +69,17 @@ struct PgrChart {
     judge_line_list: Vec<PgrJudgeLine>,
 }
 
+impl PgrSpeedEvent {
+    // 这个方法判断是否是 Hold 事件
+    fn is_hold(&self) -> bool {
+        match self.note {
+            NoteKind::Hold { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+
 macro_rules! validate_events {
     ($pgr:expr) => {
         // 保留有效的事件
@@ -105,18 +115,14 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut pos = 0.;
 
     for event in &pgr {
-        match event.note.kind {
-            NoteKind::Hold { .. } => {
-                // 如果是 Hold 事件，不进行速度调整，跳过
-                continue;
-            },
-            _ => {
-                // 处理其他事件类型
-                let from_pos = pos;
-                pos += (event.end_time - event.start_time) * r * event.value;
-                kfs.push(Keyframe::new(event.start_time * r, from_pos, 2));
-            }
+        // 使用 is_hold 方法来判断是否为 Hold 事件
+        if event.is_hold() {
+            continue; // 跳过 Hold 事件
         }
+
+        let from_pos = pos;
+        pos += (event.end_time - event.start_time) * r * event.value;
+        kfs.push(Keyframe::new(event.start_time * r, from_pos, 2));
     }
 
     let last = pgr.last().unwrap();
