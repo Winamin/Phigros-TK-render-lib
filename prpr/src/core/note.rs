@@ -8,7 +8,7 @@ use crate::{
 };
 
 use macroquad::prelude::*;
-use crate::info::get_chart_info; // 导入函数
+use crate::other_module::get_chart_info;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
@@ -23,6 +23,7 @@ pub enum NoteKind {
 }
 
 pub enum ChartFormat {
+    Pgr
     CustoFormat,
 }
 
