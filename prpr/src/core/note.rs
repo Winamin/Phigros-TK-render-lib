@@ -6,14 +6,14 @@ use crate::{
     parse::RPE_HEIGHT,
 };
 
-
+use serde::{Deserialize, Serialize};
 use macroquad::prelude::*;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum NoteKind {
     Click,
     Hold { end_time: f32, end_height: f32 },
