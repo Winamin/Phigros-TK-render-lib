@@ -33,6 +33,7 @@ struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
+    pub hold_time: Option<f32>,
     pub is_hold: bool,
 }
 
