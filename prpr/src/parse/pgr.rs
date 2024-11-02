@@ -27,11 +27,6 @@ struct PgrEvent {
     pub end2: f32,
 }
 
-#[derive(Debug)]
-enum NoteKind {
-Hold { end_time: f32, end_height: f32 },
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PgrSpeedEvent {
