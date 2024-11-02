@@ -33,7 +33,7 @@ struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
-    pub hold_time：bool,
+    pub hold_time: kind,
 }
 
 #[derive(Deserialize)]
@@ -73,14 +73,10 @@ struct PgrChart {
 impl PgrSpeedEvent {
     // 这个方法判断是否是 Hold 事件
     fn is_hold(&self) -> bool {
-        match self.hold_time {
-            NoteKind::Hold { .. } => true,
-            _ => false,
-        }
+        self.hold_time // 直接返回 hold_time 字段
     }
 }
-
-
+8
 macro_rules! validate_events {
     ($pgr:expr) => {
         // 保留有效的事件
@@ -112,28 +108,31 @@ macro_rules! validate_events {
 fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
     validate_events!(pgr);
     assert_eq!(pgr[0].start_time, 0.0);
+    
     let mut kfs = Vec::new();
-    let mut pos = 0.;
+    let mut pos = 0.0;
 
-    for event in &pgr {
-        // 使用 is_hold 方法来判断是否为 Hold 事件
-        if event.hold_time() {
-            continue; // 跳过 Hold 事件
+    // 处理 pgr 中的每个事件
+    for it in &pgr {
+        // 仅处理非 Hold 事件
+        if it.kind != EventKind::Hold {
+            let from_pos = pos;
+            pos += (it.end_time - it.start_time) * r * it.value; // 更新 pos
+            kfs.push(Keyframe::new(it.start_time * r, from_pos, 2)); // 记录 keyframe
         }
-
-        let from_pos = pos;
-        pos += (event.end_time - event.start_time) * r * event.value;
-        kfs.push(Keyframe::new(event.start_time * r, from_pos, 2));
     }
-
+    
+    // 处理最后一个 keyframe
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
     kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
     
+    // 标准化 keyframe 的值
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO;
     }
-    
+
+    // 创建动画对象
     Ok((
         AnimFloat::new(pgr.iter().map(
             |it| Keyframe::new(it.start_time * r, it.value, 0)
