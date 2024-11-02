@@ -6,7 +6,6 @@ use crate::{
     parse::RPE_HEIGHT,
 };
 
-use serde::{Deserialize, Serialize};
 use macroquad::prelude::*;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
@@ -20,7 +19,6 @@ pub enum NoteKind {
     Drag,
 }
 
-#[derive(Clone, Debug, Serialize)]
 impl NoteKind {
     pub fn order(&self) -> i8 {
         match self {
