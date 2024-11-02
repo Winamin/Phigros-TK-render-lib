@@ -4,7 +4,6 @@ use super::{
 use crate::{
     judge::JudgeStatus, 
     parse::RPE_HEIGHT,
-    info::ChartFormat,
 };
 
 use macroquad::prelude::*;
