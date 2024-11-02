@@ -260,7 +260,7 @@ impl Note {
                         return;
                     }
                     let end_height = end_height / res.aspect_ratio * spd;
-                    let chart_info = get_chart_info()
+                    let chart_info = get_chart_info();
                     let clip = !config.draw_below && config.settings.hold_partial_cover();;
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
