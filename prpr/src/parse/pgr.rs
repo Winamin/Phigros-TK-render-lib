@@ -70,8 +70,15 @@ struct PgrChart {
     judge_line_list: Vec<PgrJudgeLine>,
 }
 
+macro_rules! is_hold {
+    ($note_kind:expr) => {
+        matches!($note_kind, NoteKind::Hold { .. })
+    };
+}
+
 macro_rules! validate_events {
     ($pgr:expr) => {
+        // 保留有效的事件
         $pgr.retain(|it| {
             if it.start_time > it.end_time {
                 warn!("invalid time range, ignoring");
@@ -80,14 +87,19 @@ macro_rules! validate_events {
                 true
             }
         });
-        /*Official music should be continuous, so it is useless
+        
+        /* Uncomment if needed
+        Official music should be continuous, so it is useless
         for i in 0..($pgr.len() - 1) {
             if $pgr[i].end_time != $pgr[i + 1].start_time {
-                 ptl!(bail "event-not-contiguous");
+                ptl!(bail "event-not-contiguous");
             }
-        }*/
+        }
+        */
+
+        // Uncomment this check if needed
         // if $pgr.last().unwrap().end_time <= 900000000.0 {
-        // bail!("End time is not great enough ({})", $pgr.last().unwrap().end_time);
+        //     bail!("End time is not great enough ({})", $pgr.last().unwrap().end_time);
         // }
     };
 }
@@ -99,12 +111,10 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut pos = 0.;
     
     for event in &pgr {
-        if !matches!(event.note_kind, NoteKind::Hold) { // 如果不是 hold 判定，才进行速度调整
-            let from_pos = pos;
-            pos += (event.end_time - event.start_time) * r * event.value;
-            kfs.push(Keyframe::new(event.start_time * r, from_pos, 2));
+        if is_hold!(event.note_kind) {
+            // 如果是 Hold 事件，不进行速度调整
+            continue;
         }
-    }
 
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
