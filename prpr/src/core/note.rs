@@ -21,12 +21,6 @@ pub enum NoteKind {
     Drag,
 }
 
-pub enum ChartFormat {
-    Pgr,
-    CustoFormat,
-}
-
-
 impl NoteKind {
     pub fn order(&self) -> i8 {
         match self {
@@ -49,6 +43,12 @@ pub struct Note {
     pub multiple_hint: bool,
     pub fake: bool,
     pub judge: JudgeStatus,
+}
+
+// info.rs
+pub enum ChartFormat {
+    Pgr,
+    CustomFormat, // 确保拼写正确
 }
 
 pub struct RenderConfig<'a> {
