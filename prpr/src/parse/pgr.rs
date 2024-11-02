@@ -33,6 +33,7 @@ struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
+    pub hold_time：bool,
 }
 
 #[derive(Deserialize)]
@@ -72,7 +73,7 @@ struct PgrChart {
 impl PgrSpeedEvent {
     // 这个方法判断是否是 Hold 事件
     fn is_hold(&self) -> bool {
-        match self.note {
+        match self.hold_time {
             NoteKind::Hold { .. } => true,
             _ => false,
         }
@@ -116,7 +117,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
 
     for event in &pgr {
         // 使用 is_hold 方法来判断是否为 Hold 事件
-        if event.is_hold() {
+        if event.hold_time() {
             continue; // 跳过 Hold 事件
         }
 
