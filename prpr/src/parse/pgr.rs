@@ -29,12 +29,10 @@ struct PgrEvent {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PgrSpeedEvent {
+struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
-    pub hold_time: Option<f32>,
-    pub kind: Notekind,
 }
 
 #[derive(Deserialize)]
@@ -102,36 +100,25 @@ macro_rules! validate_events {
 fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
     validate_events!(pgr);
     assert_eq!(pgr[0].start_time, 0.0);
-    
     let mut kfs = Vec::new();
-    let mut pos = 0.0;
-
-    // 处理 pgr 中的每个事件
-    for it in &pgr {
-        match &it.hold_time {
-            NoteKind::Hold { end_time, end_height } => {
-                // 如果是 Hold 事件，直接跳过
-                continue;
-            },
-            _ => {
-                // 处理非 Hold 事件
-                let from_pos = pos;
-                pos += (it.end_time - it.start_time) * r * it.value; // 更新 pos
-                kfs.push(Keyframe::new(it.start_time * r, from_pos, 2)); // 记录 keyframe
-            }
-        }
-    }
-    
-    // 处理最后一个 keyframe
+    let mut pos = 0.;
+    let interpolation_steps = 10;
+    kfs.extend(pgr[..pgr.len().saturating_sub(1)].iter().flat_map(|it| {
+        let from_pos = pos;
+        let duration = it.end_time - it.start_time;
+        let value_increment = it.value / interpolation_steps as f32;
+        let mut step_pos = from_pos;
+        (0..interpolation_steps).map(move |step| {
+            step_pos += duration * r * value_increment;
+            Keyframe::new(it.start_time * r + step as f32 * duration * r / interpolation_steps as f32, step_pos, 2)
+        }).collect::<Vec<_>>()
+    }));
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
     kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
-    
-    // 标准化 keyframe 的值
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO;
     }
-
     Ok((
         AnimFloat::new(pgr.iter().map(
             |it| Keyframe::new(it.start_time * r, it.value, 0)
