@@ -27,6 +27,11 @@ struct PgrEvent {
     pub end2: f32,
 }
 
+#[derive(Debug)]
+enum NoteKind {
+    Hold { end_time: f32, end_height: f32 },
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PgrSpeedEvent {
@@ -34,7 +39,7 @@ struct PgrSpeedEvent {
     pub end_time: f32,
     pub value: f32,
     pub hold_time: Option<f32>,
-    pub is_hold: bool,
+    pub kind: Notekind,
 }
 
 #[derive(Deserialize)]
@@ -106,22 +111,28 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut kfs = Vec::new();
     let mut pos = 0.0;
 
+    // 处理 pgr 中的每个事件
     for it in &pgr {
-        // 跳过 Hold 事件的速度处理
-        if let NoteKind::Hold { end_time, end_height } = it.hold_time {
-            continue; // 直接跳过 Hold 事件
-        }
-            _ >= {
+        match &it.kind {
+            NoteKind::Hold { .. } => {
+                // 如果是 Hold 事件，直接跳过
+                continue;
+            },
+            _ => {
+                // 处理非 Hold 事件
                 let from_pos = pos;
-                pos += (it.end_time - it.start_time) * r * it.value;
-                kfs.push(Keyframe::new(it.start_time * r, from_pos, 2));
+                pos += (it.end_time - it.start_time) * r * it.value; // 更新 pos
+                kfs.push(Keyframe::new(it.start_time * r, from_pos, 2)); // 记录 keyframe
             }
         }
+    }
     
+    // 处理最后一个 keyframe
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
     kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
     
+    // 标准化 keyframe 的值
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO;
     }
