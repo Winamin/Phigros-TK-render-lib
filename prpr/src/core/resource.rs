@@ -475,7 +475,7 @@ impl Resource {
             };
         let camera = Camera2D {
             target: vec2(0., 0.),
-            zoom: vec2,
+            zoom: vec2_ratio,
             ..Default::default()
         };
 
