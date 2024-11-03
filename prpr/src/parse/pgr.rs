@@ -107,10 +107,10 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut pos = 0.0;
 
     for it in &pgr {
-        match &hold_time { 
-            NoteKind::Hold { end_time, end_height } => {
-                continue;
-            },
+        // 跳过 Hold 事件的速度处理
+        if let NoteKind::Hold { .. } = it.hold_time {
+            continue; // 直接跳过 Hold 事件
+        }
             _ => {
                 let from_pos = pos;
                 pos += (it.end_time - it.start_time) * r * it.value;
