@@ -108,10 +108,10 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
 
     for it in &pgr {
         // 跳过 Hold 事件的速度处理
-        if let NoteKind::Hold { .. } = it.hold_time {
+        if let NoteKind::Hold { end_time, end_height } = it.hold_time {
             continue; // 直接跳过 Hold 事件
         }
-            _ => {
+            _ >= {
                 let from_pos = pos;
                 pos += (it.end_time - it.start_time) * r * it.value;
                 kfs.push(Keyframe::new(it.start_time * r, from_pos, 2));
