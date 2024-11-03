@@ -626,6 +626,7 @@ impl ChartList {
 struct DebugList {
     chart_debug_btn: DRectButton,
     touch_debug_btn: DRectButton,
+    ratio_slider: Slider,
 }
 
 impl DebugList {
@@ -633,6 +634,7 @@ impl DebugList {
         Self {
             chart_debug_btn: DRectButton::new(),
             touch_debug_btn: DRectButton::new(),
+            ratio_slider: Slider::new(0.05..1.0, 0.05),
         }
     }
 
@@ -650,6 +652,10 @@ impl DebugList {
         if self.touch_debug_btn.touch(touch, t) {
             config.touch_debug ^= true;
             return Ok(Some(true));
+            }
+            if let wt @ Some(_) = self.ratio_slider.touch(touch, t, &mut config.chart_ratio) {
+            return Ok(wt);
+            }
         }
         Ok(None)
     }
