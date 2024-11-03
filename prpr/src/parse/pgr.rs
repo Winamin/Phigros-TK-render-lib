@@ -107,7 +107,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut pos = 0.0;
 
     for it in &pgr {
-        match &it.kind { 
+        match &hold_time { 
             NoteKind::Hold { end_time, end_height } => {
                 continue;
             },
@@ -128,13 +128,9 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     }
 
     Ok((
-        AnimFloat::new(pgr.iter().filter_map(|it| {
-            if let Some(value) = it.value {
-                Some(Keyframe::new(it.start_time * r, value, 0))
-            } else {
-                None
-            }
-        }).collect()), 
+        AnimFloat::new(pgr.iter().map(
+            |it| Keyframe::new(it.start_time * r, it.value, 0)
+        ).collect()), 
         AnimFloat::new(kfs)
     ))
 }
