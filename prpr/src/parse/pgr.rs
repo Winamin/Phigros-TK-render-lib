@@ -106,38 +106,35 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     let mut kfs = Vec::new();
     let mut pos = 0.0;
 
-    // 处理 pgr 中的每个事件
     for it in &pgr {
-        // 检查 hold_time
-        match it.hold_time {
-            Some(_) => {
-                // 如果有 hold_time，直接记录该事件的 keyframe
-                kfs.push(Keyframe::new(it.start_time * r, pos, 0)); // 处理 Hold 事件
+        match &it.kind { 
+            NoteKind::Hold { end_time, end_height } => {
+                continue;
             },
-            None => {
-                // 处理非 Hold 事件
+            _ => {
                 let from_pos = pos;
-                pos += (it.end_time - it.start_time) * r * it.value; // 更新 pos
-                kfs.push(Keyframe::new(it.start_time * r, from_pos, 2)); // 记录 keyframe
+                pos += (it.end_time - it.start_time) * r * it.value;
+                kfs.push(Keyframe::new(it.start_time * r, from_pos, 2));
             }
         }
     }
     
-    // 处理最后一个 keyframe
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
     kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
     
-    // 标准化 keyframe 的值
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO;
     }
 
-    // 创建动画对象
     Ok((
-        AnimFloat::new(pgr.iter().map(
-            |it| Keyframe::new(it.start_time * r, it.value, 0)
-        ).collect()), 
+        AnimFloat::new(pgr.iter().filter_map(|it| {
+            if let Some(value) = it.value {
+                Some(Keyframe::new(it.start_time * r, value, 0))
+            } else {
+                None
+            }
+        }).collect()), 
         AnimFloat::new(kfs)
     ))
 }
