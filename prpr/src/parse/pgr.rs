@@ -102,7 +102,7 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     assert_eq!(pgr[0].start_time, 0.0);
     let mut kfs = Vec::new();
     let mut pos = 0.;
-    let interpolation_steps = 10;
+    let interpolation_steps = 0;
     kfs.extend(pgr[..pgr.len().saturating_sub(1)].iter().flat_map(|it| {
         let from_pos = pos;
         let duration = it.end_time - it.start_time;
