@@ -27,14 +27,9 @@ struct PgrEvent {
     pub end2: f32,
 }
 
-#[derive(Debug)]
-enum NoteKind {
-    Hold { end_time: f32, end_height: f32 },
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PgrSpeedEvent {
+pub struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
@@ -113,8 +108,8 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
 
     // 处理 pgr 中的每个事件
     for it in &pgr {
-        match &it.kind {
-            NoteKind::Hold { .. } => {
+        match &it.hold_time {
+            NoteKind::Hold { end_time, end_height } => {
                 // 如果是 Hold 事件，直接跳过
                 continue;
             },
