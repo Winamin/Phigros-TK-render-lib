@@ -117,7 +117,6 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
                 kfs.push(Keyframe::new(it.start_time * r, from_pos, 2));
             }
         }
-    }
     
     let last = pgr.last().unwrap();
     kfs.push(Keyframe::new(last.start_time * r, pos, 2));
