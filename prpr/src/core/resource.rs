@@ -464,12 +464,18 @@ impl Resource {
                 SafeTexture::from(Texture2D::from_image(&load_image($path).await?))
             };
         }
+        //test
         let res_pack = ResourcePack::from_path(config.res_pack_path.as_ref())
             .await
             .context("Failed to load resource pack")?;
+        let vec2_ratio = if config.chart_debug{
+                vec2(1. * config.chart_ratio,-config.aspect_ratio.unwrap_or(info.aspect_ratio) * config.chart_ratio)
+            }else{
+                vec2(1., -config.aspect_ratio.unwrap_or(info.aspect_ratio))
+            };
         let camera = Camera2D {
             target: vec2(0., 0.),
-            zoom: vec2(1., -config.aspect_ratio.unwrap_or(info.aspect_ratio)),
+            zoom: vec2,
             ..Default::default()
         };
 
