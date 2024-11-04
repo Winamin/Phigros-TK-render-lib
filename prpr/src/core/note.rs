@@ -38,6 +38,7 @@ pub struct Note {
     pub height: f32,
     pub speed: f32,
     pub above: bool,
+    pub end_speed: f32,
     pub multiple_hint: bool,
     pub fake: bool,
     pub judge: JudgeStatus,
@@ -210,6 +211,7 @@ impl Note {
             1.0
         }) * res.note_width;
         let ctrl_obj = &mut config.ctrl_obj;
+        let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
         self.init_ctrl_obj(ctrl_obj, config.line_height);
         let mut color = self.object.now_color();
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
