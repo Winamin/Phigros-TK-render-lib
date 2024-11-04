@@ -322,6 +322,7 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
                 time,
                 height: note_height,
                 speed: note.speed,
+                end_speed: note.speed,          
 
                 above: note.above == 1,
                 multiple_hint: false,
