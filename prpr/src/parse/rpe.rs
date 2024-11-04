@@ -65,7 +65,7 @@ struct RPECtrlEvent {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RPESpeedEvent {
+pub struct RPESpeedEvent {
     // TODO linkgroup
     start_time: Triple,
     end_time: Triple,
