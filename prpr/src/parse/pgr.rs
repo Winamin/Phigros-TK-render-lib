@@ -1,6 +1,8 @@
 crate::tl_file!("parser" ptl);
 
 use super::process_lines;
+use super::rpe::RPESpeedEvent;
+    
 use crate::{
     core::{
         Anim, AnimFloat, AnimVector, BpmList, Chart, ChartExtra, ChartSettings, JudgeLine, JudgeLineCache, JudgeLineKind, Keyframe, Note, NoteKind,
@@ -8,7 +10,6 @@ use crate::{
     },
     ext::NotNanExt,
     judge::JudgeStatus,
-    rpe::RPESpeedEvent
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize};
