@@ -235,7 +235,8 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
         sani.set_time(now_time);
         let speed = sani.now();
         sani.set_time(end_time - 1e-4);
-        let end_speed = sani.now();
+        //let end_speed = sani.now();
+        let end_speed = speed();
         if speed.signum() * end_speed.signum() < 0. {
             pts.push(f32::tween(&now_time, &end_time, speed / (speed - end_speed)).not_nan());
         }
