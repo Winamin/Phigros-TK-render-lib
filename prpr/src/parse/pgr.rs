@@ -35,7 +35,7 @@ struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
-    pub end_speed: PgrSpeedEvent;
+    pub end_speed: RPESpeedEvent;
 }
 
 #[derive(Deserialize)]
