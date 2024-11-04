@@ -8,6 +8,7 @@ use crate::{
     },
     ext::NotNanExt,
     judge::JudgeStatus,
+    rpe::RPESpeedEvent
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize};
