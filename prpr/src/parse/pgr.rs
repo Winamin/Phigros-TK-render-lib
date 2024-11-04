@@ -1,7 +1,6 @@
 crate::tl_file!("parser" ptl);
 
 use super::process_lines;
-use super::rpe::RPESpeedEvent;
     
 use crate::{
     core::{
@@ -35,7 +34,7 @@ struct PgrSpeedEvent {
     pub start_time: f32,
     pub end_time: f32,
     pub value: f32,
-    pub end_speed: RPESpeedEvent,
+    pub end_speed: f32,
 }
 
 #[derive(Deserialize)]
