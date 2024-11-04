@@ -234,9 +234,9 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
         let end_time = *pts[i + 1];
         sani.set_time(now_time);
         let speed = sani.now();
-        sani.set_time(end_time - 1e-4);
-        //let end_speed = sani.now();
-        let end_speed = speed;
+        //msani.set_time(end_time - 1e-4);
+        sani.set_time(end_time);
+        let end_speed = sani.now();
         if speed.signum() * end_speed.signum() < 0. {
             pts.push(f32::tween(&now_time, &end_time, speed / (speed - end_speed)).not_nan());
         }
@@ -252,8 +252,9 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
         let speed = sani.now();
         // this can affect a lot! do not use end_time...
         // using end_time causes Hold tween (x |-> 0) to be recognized as Linear tween (x |-> x)
-        sani.set_time(end_time - 1e-4);
-        let end_speed = speed;
+        //nsani.set_time(end_time - 1e-4);
+        sani.set_time(end_time);
+        let end_speed = sani.now();
         kfs.push(if (speed - end_speed).abs() < EPS {
             Keyframe::new(now_time, height, 2)
         } else if speed.abs() > end_speed.abs() {
