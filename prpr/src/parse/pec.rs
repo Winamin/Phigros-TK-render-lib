@@ -266,6 +266,7 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
                         time,
                         height: 0.0,
                         speed: 1.0,
+			end_speed: 1.0
 
                         above,
                         multiple_hint: false,
