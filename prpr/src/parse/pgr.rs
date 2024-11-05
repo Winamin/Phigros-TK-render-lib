@@ -204,6 +204,10 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                 },
                 end_speed: pgr.speed,
                 height: pgr.floor_position / HEIGHT_RATIO,
+                start_height: {
+                    height.set_time(time);
+                    height.now()
+                },
 
                 above,
                 multiple_hint: false,
