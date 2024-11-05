@@ -215,7 +215,7 @@ impl Note {
         self.init_ctrl_obj(ctrl_obj, config.line_height);
         let mut color = self.object.now_color();
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
-        let spd = self.speed * ctrl_obj.y.now_opt().unwrap_or(1.);
+        let spd = self.speed * ctrl_obj.y.now_opt().unwrap_or(2.2);
 
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
