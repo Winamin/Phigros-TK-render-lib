@@ -45,6 +45,7 @@ pub struct PgrNote {
     position_x: f32,
     hold_time: f32,
     speed: f32,
+    end_speed: f32,
     floor_position: f32,
 }
 
