@@ -266,6 +266,7 @@ impl Note {
                     if res.time >= end_time {
                         return;
                     }
+                    let short = (end_spd - spd).abs();
                     let start_height = self.start_height / res.aspect_ratio * spd;
                     let end_height = end_height / res.aspect_ratio * spd;
                     let hold_height = (end_height - start_height) * end_spd;
