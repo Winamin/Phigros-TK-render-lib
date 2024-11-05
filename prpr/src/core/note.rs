@@ -38,6 +38,7 @@ pub struct Note {
     pub height: f32,
     pub speed: f32,
     pub above: bool,
+    pub start_height: f32,
     pub end_speed: f32,
     pub multiple_hint: bool,
     pub fake: bool,
@@ -265,13 +266,18 @@ impl Note {
                     if res.time >= end_time {
                         return;
                     }
+                    let start_height = self.start_height / res.aspect_ratio * spd;
                     let end_height = end_height / res.aspect_ratio * spd;
+                    let hold_height = (end_height - start_height) * end_spd;
                     let clip = !config.draw_below && config.settings.hold_partial_cover;;
                     let chart_info: ChartFormat = ChartFormat::Pgr;
                     let h = if self.time <= res.time { line_height } else { height };
+
                     let bottom = h - line_height;
-                    let top = end_height - line_height;
-                    // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format
+                    let top = bottom + hold_height;
+                    //let top = end_height - line_height;
+                    
+                    // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format( )
                     //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
                     if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }) && chart_info != ChartFormat::Pgr {
                         return;
