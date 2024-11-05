@@ -268,7 +268,8 @@ impl Note {
                     }
                     let start_height = self.start_height / res.aspect_ratio * spd;
                     let end_height = end_height / res.aspect_ratio * spd;
-                    let hold_height = (end_height - start_height) * end_spd;
+                    
+                    let hold_height = (end_height - start_height) * end_spd / spd;
                     let clip = !config.draw_below && config.settings.hold_partial_cover;;
                     let chart_info: ChartFormat = ChartFormat::Pgr;
                     let h = if self.time <= res.time { line_height } else { height };
