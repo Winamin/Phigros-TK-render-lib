@@ -318,6 +318,7 @@ impl BinaryData for Note {
             time: r.time()?,
             height: r.read()?,
             speed: if r.read()? { r.read::<f32>()? } else { 1. },
+            short; if r.read()? { r.read::<f32>()? } else { 1. },
             end_speed: if r.read()? { r.read::<f32>()? } else { 1. },
             start_height: r.read()?,
             above: r.read()?,
