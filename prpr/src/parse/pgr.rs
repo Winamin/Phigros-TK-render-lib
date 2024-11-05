@@ -45,7 +45,6 @@ pub struct PgrNote {
     position_x: f32,
     hold_time: f32,
     speed: f32,
-    end_speed: f32,
     floor_position: f32,
 }
 
@@ -199,7 +198,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                 time,
                 speed: if pgr.kind == 3 {
                     speed.set_time(time);
-                    pgr.speed / speed.now()
+                    1.
                 } else {
                     pgr.speed
                 },
