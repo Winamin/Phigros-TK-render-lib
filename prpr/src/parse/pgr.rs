@@ -169,6 +169,58 @@ fn parse_move_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimVector> {
 }
 
 fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mut AnimFloat, above: bool) -> Result<Vec<Note>> {
+    if pgr.is_empty() {
+        return Ok(Vec::new());
+    }
+    pgr.sort_by_key(|it| it.time.not_nan());
+
+    pgr.into_iter()
+        .map(|pgr| {
+            let time = pgr.time * r;
+            height.set_time(time);
+            let start_height = height.now();
+
+            let kind = match pgr.kind {
+                1 => NoteKind::Click,
+                2 => NoteKind::Drag,
+                3 => {
+                    let end_time = (pgr.time + pgr.hold_time) * r;
+                    height.set_time(end_time);
+                    let end_height = height.now();
+                    NoteKind::Hold { end_time, end_height }
+                }
+                4 => NoteKind::Flick,
+                _ => ptl!(bail "unknown-note-type", "type" => pgr.kind),
+            };
+
+            let note_speed = if matches!(kind, NoteKind::Hold { .. }) {
+                speed.set_time(time);
+                1.0
+            } else {
+                pgr.speed
+            };
+
+            Ok(Note {
+                object: Object {
+                    translation: AnimVector(AnimFloat::fixed(pgr.position_x * (2.0 * 9.0 / 160.0)), AnimFloat::default()),
+                    ..Default::default()
+                },
+                kind,
+                time,
+                speed: note_speed,
+                end_speed: pgr.speed,
+                height: pgr.floor_position / HEIGHT_RATIO,
+                start_height,
+                above,
+                multiple_hint: false,
+                fake: false,
+                judge: JudgeStatus::NotJudged,
+            })
+        })
+        .collect()
+}
+
+/*fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mut AnimFloat, above: bool) -> Result<Vec<Note>> {
     // is_sorted is unstable...
     if pgr.is_empty() {
         return Ok(Vec::new());
@@ -177,6 +229,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
     pgr.into_iter()
         .map(|pgr| {
             let time = pgr.time * r;
+            height.set_time(time);
             Ok(Note {
                 object: Object {
                     translation: AnimVector(AnimFloat::fixed(pgr.position_x * (2. * 9. / 160.)), AnimFloat::default()),
@@ -186,18 +239,19 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                     1 => NoteKind::Click,
                     2 => NoteKind::Drag,
                     3 => {
-                        let end_time = (pgr.time + pgr.hold_time) * r;
-                        height.set_time(time);
-                        let start_height = height.now();
-                        let end_height = start_height + (pgr.hold_time * pgr.speed * r / HEIGHT_RATIO);
-                        NoteKind::Hold { end_time, end_height }
+                    let end_time = (pgr.time + pgr.hold_time) * r;
+                    height.set_time(end_time);
+                    let end_height = height.now();
+                    NoteKind::Hold { end_time, end_height }
                     }
                     4 => NoteKind::Flick,
                     _ => ptl!(bail "unknown-note-type", "type" => pgr.kind),
                 },
                 time,
-                speed: if pgr.kind == 3 {
-                    speed.set_time(time);
+                height.set_time(time);
+                let start_height = height.now();
+                let note_speed = if matches!(kind, NoteKind::Hold { .. }) {
+                speed.set_time(time);
                     1.
                 } else {
                     pgr.speed
@@ -217,6 +271,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
         })
         .collect()
 }
+*/
 
 fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32) -> Result<JudgeLine> {
     let r = 60. / pgr.bpm / 32.;
