@@ -133,13 +133,6 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
     );
 }
 
-fn main() {
-    let filename = "pgr.rs";
-    let chart_info = ChartFormat::from_filename(filename).unwrap_or_else(|| {
-        return ChartFormat::CustomFormat;
-     });
-}
-
 impl ChartFormat {
     pub fn from_filename(filename: &str) -> Option<Self> {
         if filename.ends_with(".rs") {
@@ -238,7 +231,7 @@ impl Note {
         let mut color = self.object.now_color();
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
         let spd = self.speed * ctrl_obj.y.now_opt().unwrap_or(1.);
-
+        
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
@@ -288,6 +281,10 @@ impl Note {
                         return;
                     }
                     
+                    let filename = "pgr.rs";
+                    let chart_info = ChartFormat::from_filename(filename).unwrap_or_else(|| {
+                    return ChartFormat::CustomFormat;
+                    });
                     let start_height = self.start_height / res.aspect_ratio * spd;
                     let end_height = end_height / res.aspect_ratio * spd;
                     let time = if res.time >= self.time {res.time} else {self.time};
