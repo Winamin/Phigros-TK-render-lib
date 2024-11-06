@@ -231,7 +231,7 @@ impl Note {
         } else {
             1.0
         }) * res.note_width;
-        let chart_info: ChartFormat = ChartFormat::pgr;
+        //let chart_info: ChartFormat = ChartFormat::pgr;
         let ctrl_obj = &mut config.ctrl_obj;
         let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
         self.init_ctrl_obj(ctrl_obj, config.line_height);
@@ -296,9 +296,11 @@ impl Note {
                     let h = if self.time <= res.time { line_height } else { height };
 
                     let bottom = h - line_height;
-                    if top == bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO && chart_info != ChartFormat::pgr {
-                    return;
+                    if chart_info == ChartFormat::Pgr {
+                    let top = bottom + hold_height - (time - self.time) * end_spd / res_aspect_ratio / height_ratio;
+                        return;
                     }
+
                     if top - bottom <= 0.{    
                         //return;
                     }
