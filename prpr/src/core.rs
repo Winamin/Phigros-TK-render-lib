@@ -43,16 +43,6 @@ pub use tween::{easing_from, BezierTween, ClampedTween, StaticTween, TweenFuncti
 mod video;
 pub use video::Video;
 
-mod chare_format;
-use crate::chart_format::ChartFormat;
-
-pub fn core() {
-    let filename = "pgr.rs";
-    let chart_info = ChartFormat::from_filename(filename).unwrap_or_else(|| {
-        return ChartFormat::CustomFormat;
-     });
-}
-
 pub fn init_assets() {
     if let Ok(mut exe) = std::env::current_exe() {
         while exe.pop() {
