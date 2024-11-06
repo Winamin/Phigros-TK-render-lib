@@ -212,7 +212,7 @@ impl Note {
             1.0
         }) * res.note_width;
         let ctrl_obj = &mut config.ctrl_obj;
-        let end_spd = (self.end_speed * 2.2) * ctrl_obj.y.now_opt().unwrap_or(1.);
+        let end_spd = self.end_speed / 0.45 * ctrl_obj.y.now_opt().unwrap_or(1.);
         self.init_ctrl_obj(ctrl_obj, config.line_height);
         let mut color = self.object.now_color();
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
@@ -222,6 +222,9 @@ impl Note {
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
         //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
+        if top - bottom <= 0.{
+            return;
+        }
 
         // show_below的判断
         if !config.draw_below
