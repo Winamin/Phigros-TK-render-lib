@@ -133,6 +133,13 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
     );
 }
 
+fn main() {
+    let filename = "pgr.rs";
+    let chart_info = ChartFormat::from_filename(filename).unwrap_or_else(|| {
+        return ChartFormat::CustomFormat;
+     });
+}
+
 impl ChartFormat {
     pub fn from_filename(filename: &str) -> Option<Self> {
         if filename.ends_with(".rs") {
