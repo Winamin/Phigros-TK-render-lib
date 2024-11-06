@@ -222,9 +222,6 @@ impl Note {
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
         //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
-        if top - bottom <= 0.{
-            return;
-        }
 
         // show_below的判断
         if !config.draw_below
@@ -280,6 +277,9 @@ impl Note {
                     let bottom = h - line_height;
                     let top = bottom + hold_height + (height - h) * end_spd;
                     //let top = end_height - line_height;
+                    if top - bottom <= 0.{    
+                        return;
+                    }
                     
                     // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format( )
                     //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
