@@ -46,7 +46,7 @@ pub use video::Video;
 mod chare_format;
 use crate::chart_format::ChartFormat;
 
-fn main() {
+pub fn core() {
     let filename = "pgr.rs";
     let chart_info = ChartFormat::from_filename(filename).unwrap_or_else(|| {
         return ChartFormat::CustomFormat;
