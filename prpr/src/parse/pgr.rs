@@ -202,9 +202,10 @@ fn parse_move_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimVector> {
     Ok(AnimVector(AnimFloat::new(kf1), AnimFloat::new(kf2)))
 }
 
+fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mut AnimFloat, above: bool) -> Result<Vec<Note>> {
 if pgr.is_empty() {
     return Ok(Vec::new());
-}
+    }
 pgr.sort_by_key(|it| it.time.not_nan());
 pgr.into_iter()
     .map(|pgr| {
