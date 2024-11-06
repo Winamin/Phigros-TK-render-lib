@@ -276,7 +276,7 @@ impl Note {
                     } else {
                         end_height - line_height
                     };
-                    if top - bottom <= 0.{    
+                    //if top - bottom <= 0.{    
                         //return;
                     }
                     
