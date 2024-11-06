@@ -177,8 +177,6 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
     pgr.into_iter()
         .map(|pgr| {
             let time = pgr.time * r;
-            height.set_time(time);
-            let start_height = height.now();
             Ok(Note {
                 object: Object {
                     translation: AnimVector(AnimFloat::fixed(pgr.position_x * (2. * 9. / 160.)), AnimFloat::default()),
@@ -188,19 +186,18 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                     1 => NoteKind::Click,
                     2 => NoteKind::Drag,
                     3 => {
-                    let end_time = (pgr.time + pgr.hold_time) * r;
-                    height.set_time(end_time);
-                    let end_height = height.now();
-                    let start_speed = pgr.speed;
-                    NoteKind::Hold { end_time, end_height }
+                        let end_time = (pgr.time + pgr.hold_time) * r;
+                        height.set_time(time);
+                        let start_height = height.now();
+                        let end_height = start_height + (pgr.hold_time * pgr.speed * r / HEIGHT_RATIO);
+                        NoteKind::Hold { end_time, end_height }
                     }
                     4 => NoteKind::Flick,
                     _ => ptl!(bail "unknown-note-type", "type" => pgr.kind),
                 },
                 time,
-                height.set_time(time);
-                let note_speed = if matches!(kind, NoteKind::Hold { .. }) {
-                speed.set_time(time);
+                speed: if pgr.kind == 3 {
+                    speed.set_time(time);
                     1.
                 } else {
                     pgr.speed
@@ -220,6 +217,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
         })
         .collect()
 }
+
 
 
 fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32) -> Result<JudgeLine> {
