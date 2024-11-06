@@ -270,7 +270,6 @@ impl Note {
                     let clip = !config.draw_below && config.settings.hold_partial_cover;;
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
-                    if chart_info == ChartFormat::pgr {
                     let top = if self.format {
                         bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO
                     } else {
