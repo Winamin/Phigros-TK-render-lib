@@ -4,6 +4,7 @@ use super::{
 use crate::{
     judge::JudgeStatus, 
     parse::RPE_HEIGHT,
+    core::HEIGHT_RATIO,
 };
 
 use macroquad::prelude::*;
@@ -266,19 +267,19 @@ impl Note {
                     if res.time >= end_time {
                         return;
                     }
+                    
                     let start_height = self.start_height / res.aspect_ratio * spd;
                     let end_height = end_height / res.aspect_ratio * spd;
-                    
+                    let time = if res.time >= self.time {res.time} else {self.time};
                     let hold_height = (end_height - start_height) * end_spd / spd;
                     let clip = !config.draw_below && config.settings.hold_partial_cover;;
                     let chart_info: ChartFormat = ChartFormat::Pgr;
                     let h = if self.time <= res.time { line_height } else { height };
 
                     let bottom = h - line_height;
-                    let top = bottom + hold_height + (height - h) * end_spd;
-                    //let top = end_height - line_height;
+                    let top = bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO;
                     if top - bottom <= 0.{    
-                        return;
+                        //return;
                     }
                     
                     // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format( )
