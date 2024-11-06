@@ -231,7 +231,7 @@ impl Note {
         } else {
             1.0
         }) * res.note_width;
-        let chart_info: ChartFormat = ChartFormat::from_filename;
+        let chart_info: ChartFormat = ChartFormat::pgr;
         let ctrl_obj = &mut config.ctrl_obj;
         let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
         self.init_ctrl_obj(ctrl_obj, config.line_height);
