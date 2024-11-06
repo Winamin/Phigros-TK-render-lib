@@ -296,7 +296,9 @@ impl Note {
                     let h = if self.time <= res.time { line_height } else { height };
 
                     let bottom = h - line_height;
-                    let top = bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO;
+                    let top = bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO; && chart_info != ChartFormat::pgr {
+                        return;
+                    }
                     if top - bottom <= 0.{    
                         //return;
                     }
