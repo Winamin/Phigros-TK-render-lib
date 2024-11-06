@@ -292,7 +292,7 @@ impl Note {
                     let time = if res.time >= self.time {res.time} else {self.time};
                     let hold_height = (end_height - start_height) * end_spd / spd;
                     let clip = !config.draw_below && config.settings.hold_partial_cover;;
-                    let chart_info: ChartFormat = ChartFormat::Pgr;
+                    let chart_info: ChartFormat = ChartFormat::pgr;
                     let h = if self.time <= res.time { line_height } else { height };
 
                     let bottom = h - line_height;
