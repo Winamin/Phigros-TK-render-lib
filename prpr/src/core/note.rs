@@ -15,7 +15,7 @@ const BAD_TIME: f32 = 0.5;
 #[derive(Clone, Debug)]
 pub enum NoteKind {
     Click,
-    Hold { end_time: f32, end_height: f32 },
+    Hold { end_time: f32, end_height: f32, start_speed: f32 },
     Flick,
     Drag,
 }
