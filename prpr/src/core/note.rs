@@ -48,7 +48,7 @@ pub struct Note {
 
 #[derive(PartialEq)]
 pub enum ChartFormat {
-    Pgr,
+    pgr,
     CustomFormat, // 确保拼写正确
 }
 
@@ -131,6 +131,18 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
         },
         false,
     );
+}
+
+impl ChartFormat {
+    pub fn from_filename(filename: &str) -> Option<Self> {
+        if filename.ends_with(".rs") {
+            Some(ChartFormat::Pgr)
+        } else if filename.ends_with(".custom") {
+            Some(ChartFormat::CustomFormat)
+        } else {
+            None
+        }
+    }
 }
 
 impl Note {
@@ -284,7 +296,7 @@ impl Note {
                     
                     // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format( )
                     //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
-                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }) && chart_info != ChartFormat::Pgr {
+                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }) && chart_info != ChartFormat::pgr {
                         return;
                     }
                     let tex = &style.hold;
