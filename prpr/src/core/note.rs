@@ -44,12 +44,7 @@ pub struct Note {
     pub multiple_hint: bool,
     pub fake: bool,
     pub judge: JudgeStatus,
-}
-
-#[derive(PartialEq)]
-pub enum ChartFormat {
-    pgr,
-    CustomFormat, // 确保拼写正确
+    pub format: bool
 }
 
 pub struct RenderConfig<'a> {
@@ -133,18 +128,6 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
     );
 }
 
-impl ChartFormat {
-    pub fn from_filename(filename: &str) -> Option<Self> {
-        if filename.ends_with(".rs") {
-            Some(ChartFormat::pgr)
-        } else if filename.ends_with(".custom") {
-            Some(ChartFormat::CustomFormat)
-        } else {
-            None
-        }
-    }
-}
-
 impl Note {
     pub fn rotation(&self, line: &JudgeLine) -> f32 {
         line.object.rotation.now() + if self.above { 0. } else { 180. }
@@ -160,8 +143,8 @@ impl Note {
         let mut _immediate_particle = false;
         let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
             if res.time >= *at {
-                _immediate_particle = true;  // 立即触发
-                *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;  // 更新触发时间
+                _immediate_particle = true;
+                *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
                 Some(if perfect {
                     res.res_pack.info.fx_perfect()
                 } else {
@@ -280,11 +263,6 @@ impl Note {
                     if res.time >= end_time {
                         return;
                     }
-                    
-                    let filename = "pgr.rs";
-                    let chart_info = ChartFormat::from_filename(filename).unwrap_or_else(|| {
-                    return ChartFormat::CustomFormat;
-                    });
                     let start_height = self.start_height / res.aspect_ratio * spd;
                     let end_height = end_height / res.aspect_ratio * spd;
                     let time = if res.time >= self.time {res.time} else {self.time};
@@ -293,16 +271,19 @@ impl Note {
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
                     if chart_info == ChartFormat::pgr {
-                    let top = bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO;
-                    }
+                    let top = if self.format {
+                        bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO
+                    } else {
+                        end_height - line_height
+                    };
                     if top - bottom <= 0.{    
                         //return;
                     }
                     
                     // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format( )
                     //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
-                    if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }) && chart_info != ChartFormat::pgr {
-                        return;
+                    if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !self.format) {
+                        return
                     }
                     let tex = &style.hold;
                     let ratio = style.hold_ratio();
