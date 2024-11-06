@@ -50,7 +50,7 @@ pub fn core() {
     let filename = "pgr.rs";
     let chart_info = ChartFormat::from_filename(filename).unwrap_or_else(|| {
         return ChartFormat::CustomFormat;
-    });
+});
 
 pub fn init_assets() {
     if let Ok(mut exe) = std::env::current_exe() {
