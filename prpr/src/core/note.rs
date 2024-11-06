@@ -136,7 +136,7 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
 impl ChartFormat {
     pub fn from_filename(filename: &str) -> Option<Self> {
         if filename.ends_with(".rs") {
-            Some(ChartFormat::Pgr)
+            Some(ChartFormat::pgr)
         } else if filename.ends_with(".custom") {
             Some(ChartFormat::CustomFormat)
         } else {
