@@ -113,40 +113,6 @@ fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Res
     kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
     for kf in &mut kfs {
         kf.value /= HEIGHT_RATIO;
-        // println!("kf:{}\t{}", kf.time, kf.value)
-    }
-    Ok((
-        AnimFloat::new(pgr.iter().map(
-            |it| Keyframe::new(it.start_time * r, it.value, 0)
-        ).collect()), 
-        AnimFloat::new(kfs)
-    ))
-}
-
-// Example usage for calculating Hold passing value
-fn calculate_hold_value(start_speed: f32, top: f32, bottom: f32) -> f32 {
-    if top - bottom <= 0. {
-        return 0.;
-    }
-    // Your calculation logic here using start_speed
-    // ...
-}
-
-/*fn parse_speed_events(r: f32, mut pgr: Vec<PgrSpeedEvent>, max_time: f32) -> Result<(AnimFloat, AnimFloat)> {
-    validate_events!(pgr);
-    assert_eq!(pgr[0].start_time, 0.0);
-    let mut kfs = Vec::new();
-    let mut pos = 0.;
-    kfs.extend(pgr[..pgr.len().saturating_sub(1)].iter().map(|it| {
-        let from_pos = pos;
-        pos += (it.end_time - it.start_time) * r * it.value;
-        Keyframe::new(it.start_time * r, from_pos, 2)
-    }));
-    let last = pgr.last().unwrap();
-    kfs.push(Keyframe::new(last.start_time * r, pos, 2));
-    kfs.push(Keyframe::new(max_time, pos + (max_time - last.start_time * r) * last.value, 0));
-    for kf in &mut kfs {
-        kf.value /= HEIGHT_RATIO;
         //println!("kf:{}\t{}", kf.time, kf.value)
     }
     Ok((
@@ -201,56 +167,8 @@ fn parse_move_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimVector> {
     }
     Ok(AnimVector(AnimFloat::new(kf1), AnimFloat::new(kf2)))
 }
-
+                     
 fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mut AnimFloat, above: bool) -> Result<Vec<Note>> {
-if pgr.is_empty() {
-    return Ok(Vec::new());
-    }
-pgr.sort_by_key(|it| it.time.not_nan());
-pgr.into_iter()
-    .map(|pgr| {
-        let time = pgr.time * r;
-        height.set_time(time);
-        let kind = match pgr.kind {
-            1 => NoteKind::Click,
-            2 => NoteKind::Drag,
-            3 => {
-                let end_time = (pgr.time + pgr.hold_time) * r;
-                height.set_time(end_time);
-                let end_height = height.now();
-                let start_speed = pgr.speed;
-                NoteKind::Hold { end_time, end_height, start_speed }
-            }
-            4 => NoteKind::Flick,
-            _ => ptl!(bail "unknown-note-type", "type" => pgr.kind),
-        };
-        let start_height = height.now();
-        let note_speed = if matches!(kind, NoteKind::Hold { .. }) {
-            speed.set_time(time);
-            1.
-        } else {
-            pgr.speed
-        };
-        Ok(Note {
-            object: Object {
-                translation: AnimVector(AnimFloat::fixed(pgr.position_x * (2. * 9. / 160.)), AnimFloat::default()),
-                ..Default::default()
-            },
-            kind,
-            time,
-            height: pgr.floor_position / HEIGHT_RATIO,
-            start_height,
-            above,
-            multiple_hint: false,
-            fake: false,
-            judge: JudgeStatus::NotJudged,
-            start_speed: pgr.speed,  // Add this field to store the start speed of Hold notes
-        })
-    })
-    .collect()
-}
-
-/*fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mut AnimFloat, above: bool) -> Result<Vec<Note>> {
     // is_sorted is unstable...
     if pgr.is_empty() {
         return Ok(Vec::new());
@@ -260,6 +178,7 @@ pgr.into_iter()
         .map(|pgr| {
             let time = pgr.time * r;
             height.set_time(time);
+            let start_height = height.now();
             Ok(Note {
                 object: Object {
                     translation: AnimVector(AnimFloat::fixed(pgr.position_x * (2. * 9. / 160.)), AnimFloat::default()),
@@ -272,6 +191,7 @@ pgr.into_iter()
                     let end_time = (pgr.time + pgr.hold_time) * r;
                     height.set_time(end_time);
                     let end_height = height.now();
+                    let start_speed = pgr.speed;
                     NoteKind::Hold { end_time, end_height }
                     }
                     4 => NoteKind::Flick,
@@ -279,7 +199,6 @@ pgr.into_iter()
                 },
                 time,
                 height.set_time(time);
-                let start_height = height.now();
                 let note_speed = if matches!(kind, NoteKind::Hold { .. }) {
                 speed.set_time(time);
                     1.
@@ -301,7 +220,7 @@ pgr.into_iter()
         })
         .collect()
 }
-*/
+
 
 fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32) -> Result<JudgeLine> {
     let r = 60. / pgr.bpm / 32.;
