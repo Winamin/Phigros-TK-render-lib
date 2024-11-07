@@ -207,14 +207,13 @@ impl Note {
         } else {
             1.0
         }) * res.note_width;
-        //let chart_info: ChartFormat = ChartFormat::pgr;
         let ctrl_obj = &mut config.ctrl_obj;
-        let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
         self.init_ctrl_obj(ctrl_obj, config.line_height);
         let mut color = self.object.now_color();
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
         let spd = self.speed * ctrl_obj.y.now_opt().unwrap_or(1.);
-        
+        let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
+
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
@@ -263,28 +262,27 @@ impl Note {
                     if res.time >= end_time {
                         return;
                     }
-                    let start_height = self.start_height / res.aspect_ratio * spd;
                     let end_height = end_height / res.aspect_ratio * spd;
+                    let start_height = self.start_height / res.aspect_ratio * spd;
+                    let hold_height = end_height - start_height;
                     let time = if res.time >= self.time {res.time} else {self.time};
-                    let hold_height = (end_height - start_height) * end_spd / spd;
-                    let clip = !config.draw_below && config.settings.hold_partial_cover;;
+
+                    let clip = !config.draw_below && config.settings.hold_partial_cover;
+
+
                     let h = if self.time <= res.time { line_height } else { height };
-                    let bottom = h - line_height;
+                    let bottom = h - line_height; //StartY
+                    //let top = end_height - line_height; //EndY
                     let top = if self.format {
                         bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO
                     } else {
                         end_height - line_height
                     };
-                    //if top - bottom <= 0.{    
-                        //return;
-                    }
-                    
-                    // Hold在判定前消失的原因 这里得加上谱面格式不是pgr的条件 ChartInfo::format( )
-                    //if res.time < self.time && bottom < -1e-6 && !config.settings.hold_partial_cover {
                     if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !self.format) {
-                        return
+                    //if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }){
+                        return;
                     }
-                    let tex = &style.hold;
+                    let tex = &style.hold
                     let ratio = style.hold_ratio();
                     // body
                     // TODO (end_height - height) is not always total height
