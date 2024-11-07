@@ -226,7 +226,6 @@ impl Note {
             //&& !matches!(self.kind, NoteKind::Hold { .. })
         
         {
-            //println!("time:{}\tres.time:{}\tbase:{}", self.time, res.time, base);
             return;
         }
         let order = self.kind.order();
@@ -266,18 +265,19 @@ impl Note {
                     let start_height = self.start_height / res.aspect_ratio * spd;
                     let hold_height = end_height - start_height;
                     let time = if res.time >= self.time {res.time} else {self.time};
-
                     let clip = !config.draw_below && config.settings.hold_partial_cover;
-
-
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height; //StartY
-                    //let top = end_height - line_height; //EndY
                     let top = if self.format {
                         bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO
                     } else {
                         end_height - line_height
                     };
+                    
+                    if self.format && end_spd == 0. {
+                        return
+                    };
+                    
                     if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !self.format) {
                     //if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }){
                         return;
