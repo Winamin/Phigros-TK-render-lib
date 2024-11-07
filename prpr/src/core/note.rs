@@ -282,7 +282,7 @@ impl Note {
                     //if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }){
                         return;
                     }
-                    let tex = &style.hold
+                    let tex = &style.hold;
                     let ratio = style.hold_ratio();
                     // body
                     // TODO (end_height - height) is not always total height
