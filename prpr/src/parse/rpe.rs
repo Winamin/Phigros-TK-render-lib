@@ -181,9 +181,9 @@ fn parse_events<T: Tweenable, V: Clone + Into<T>>(
     bezier_map: &BezierMap,
 ) -> Result<Anim<T>> {
     let mut kfs = Vec::new();
+    if !rpe.is_empty() && rpe[0].start_time.beats() != 0.0 {
     if let Some(default) = default {
-        if rpe[0].start_time.beats() != 0.0 {
-            kfs.push(Keyframe::new(0.0, default, 0));
+        kfs.push(Keyframe::new(0.0, default, 0));
         }
     }
     for e in rpe {
