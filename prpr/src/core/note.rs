@@ -217,14 +217,10 @@ impl Note {
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
-        //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
 
         // show_below的判断
         if !config.draw_below
-            // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
             && ((res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-3))
-            //&& !matches!(self.kind, NoteKind::Hold { .. })
-        
         {
             return;
         }
@@ -279,8 +275,10 @@ impl Note {
                     };
                     
                     if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !self.format) {
-                    //if res.time < self.time && bottom < -1e-6 && !matches!(self.kind, NoteKind::Hold { .. }){
                         return;
+                    }
+                    if res.config.chart_debug {
+                        color.a *= 0.25;
                     }
                     let tex = &style.hold;
                     let ratio = style.hold_ratio();
