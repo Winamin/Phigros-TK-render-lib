@@ -41,7 +41,7 @@ jobs:
         run: ./gradlew assembleRelease
 
       - name: Upload APK as an artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: phira-apk
           path: app/build/outputs/apk/release/app-release.apk
