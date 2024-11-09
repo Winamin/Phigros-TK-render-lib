@@ -46,6 +46,7 @@ jobs:
 
       - name: Build the Rust project for Android
         run: |
+          export NDK_HOME=$ANDROID_NDK_HOME
           cargo build --target aarch64-linux-android --release
           cargo build --target armv7-linux-androideabi --release
 
