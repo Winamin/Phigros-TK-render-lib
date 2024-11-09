@@ -40,7 +40,8 @@ jobs:
         run: |
           echo "export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/21.4.7075529" >> $GITHUB_ENV
           echo "export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
-
+          echo "export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin" >> $GITHUB_ENV
+          
       - name: Install Rust toolchain for Android
         run: |
           rustup target add aarch64-linux-android
