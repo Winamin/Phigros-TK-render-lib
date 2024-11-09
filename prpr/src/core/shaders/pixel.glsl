@@ -1,6 +1,6 @@
 #version 100
 // Adapted from https://godotshaders.com/shader/pixelate-2/
-precision mediump float;
+precision highp float;
 
 varying lowp vec2 uv;
 uniform vec2 screenSize;
