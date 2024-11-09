@@ -1,26 +1,40 @@
-name: Build Phira APK
-
+name: Build APK
 on:
   push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-20.04]
+    runs-on: ${{ matrix.platform }}
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
       - name: Set up JDK 11
         uses: actions/setup-java@v2
         with:
           java-version: '11'
 
-      - name: Install dependencies
+      - name: Install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-20.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config
+
+      - name: Install Android dependencies
+        if: matrix.platform == 'ubuntu-20.04'
+        run: |
+          sudo apt-get install -y android-sdk
+          echo "sdk.dir=/usr/lib/android-sdk" > local.properties
+
+      - name: Sync Gradle dependencies
         run: ./gradlew clean build
 
       - name: Build APK
