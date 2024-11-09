@@ -8,11 +8,7 @@ on:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [ubuntu-20.04]
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-20.04
 
     steps:
       - name: Checkout repository
@@ -23,28 +19,35 @@ jobs:
         with:
           java-version: '11'
           distribution: 'temurin'
-
+          
       - name: Install Android Studio
         run: |
           wget https://dl.google.com/dl/android/studio/ide-zips/2022.2.1.19/android-studio-2022.2.1.19-linux.tar.gz -O android-studio.tar.gz
           tar -xvf android-studio.tar.gz
           sudo mv android-studio /usr/local/
           export PATH=$PATH:/usr/local/android-studio/bin
+          
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v2
+        with:
+          sdk-version: 'commandlinetools-6609375_latest'
+      
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;30.0.3" "ndk;21.4.7075529"
 
       - name: Set up Android NDK
-        run: |
-          sudo apt-get install -y wget unzip
-          wget https://dl.google.com/android/repository/android-ndk-r21e-linux-x86_64.zip -O ndk.zip
-          unzip -o ndk.zip -d $HOME/ndk
-          echo "export ANDROID_NDK=$HOME/ndk/android-ndk-r21e" >> $GITHUB_ENV
+        run: echo "export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/21.4.7075529" >> $GITHUB_ENV
 
       - name: Install Rust toolchain for Android
-        run: rustup target add aarch64-linux-android armv7-linux-androideabi
-
-      - name: Install dependencies
         run: |
-          cargo build --target aarch64-linux-android
-          cargo build --target armv7-linux-androideabi
+          rustup target add aarch64-linux-android
+          rustup target add armv7-linux-androideabi
+
+      - name: Build the Rust project for Android
+        run: |
+          cargo build --target aarch64-linux-android --release
+          cargo build --target armv7-linux-androideabi --release
 
       - name: Build APK
         run: ./gradlew assembleRelease
