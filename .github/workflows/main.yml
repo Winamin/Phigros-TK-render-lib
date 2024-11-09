@@ -25,7 +25,7 @@ jobs:
           distribution: 'temurin'
 
       - name: Install Android Studio
-         run: |
+        run: |
           wget https://dl.google.com/dl/android/studio/ide-zips/2022.2.1.19/android-studio-2022.2.1.19-linux.tar.gz -O android-studio.tar.gz
           tar -xvf android-studio.tar.gz
           sudo mv android-studio /usr/local/
