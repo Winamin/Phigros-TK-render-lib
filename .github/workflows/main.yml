@@ -25,6 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wget unzip
           sudo apt-get install binutils
+          sudo apt-get install build-essential
 
       - name: Download and set up Android SDK
         run: |
@@ -58,7 +59,6 @@ jobs:
           NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
           sudo apt-get install -y clang
-          sudo apt-get install build-essential
           export CC_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           export AR_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin/ar
           export CC_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
