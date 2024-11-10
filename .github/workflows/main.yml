@@ -51,7 +51,9 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
           sudo apt-get install -y clang
-          sudo apt-get install -y g++ clang++ libc++-dev
+          sudo apt-get remove python-clang python3-clang
+          sudo apt-get update
+          sudo apt-get install -y clang clang++ libc++-dev g++
           export CC_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           export AR_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin/ar
           export CC_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
