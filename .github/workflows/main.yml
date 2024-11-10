@@ -36,7 +36,7 @@ jobs:
           echo "export ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
           echo "export PATH=$PATH:$HOME/android-sdk/cmdline-tools/latest/bin:$HOME/android-sdk/platform-tools" >> $GITHUB_ENV
           yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses
-          $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;30.0.3" "ndk;27.2.12479018"
+          $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;34.0.0" "ndk;27.2.12479018"
 
       - name: Set up Android NDK
         run: |
@@ -58,7 +58,7 @@ jobs:
         env:
           NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
-          sudo apt-get install -y clang binutils
+          sudo apt-get install -y clang binutils build-essential
           export CC_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           export AR_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin/ar
           export CC_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
