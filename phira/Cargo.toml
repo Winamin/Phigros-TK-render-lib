@@ -29,6 +29,7 @@ hex = "0.4.3"
 image = "0.24.0"
 lru = "0.12.1"
 lyon = "*"
+NDK = { git = https://github.com/deepsadness/android-ndk.git", default-features = false }
 macroquad = { git = "https://github.com/Mivik/prpr-macroquad", default-features = false }
 nalgebra = "*"
 once_cell = "*"
