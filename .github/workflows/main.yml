@@ -50,6 +50,10 @@ jobs:
       - name: Install C++ toolchain
         run: |
          sudo apt-get install -y build-essential
+
+      - name: Install binutils
+        run: |
+         sudo apt-get install -y binutils
          
       - name: Build the Rust project for Android
         env:
