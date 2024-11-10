@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y wget unzip
           sudo apt-get install binutils
           sudo apt-get install build-essential
-
+      
       - name: Download and set up Android SDK
         run: |
           wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip -O commandlinetools.zip
@@ -37,7 +37,14 @@ jobs:
           echo "export PATH=$PATH:$HOME/android-sdk/cmdline-tools/latest/bin:$HOME/android-sdk/platform-tools" >> $GITHUB_ENV
           yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses
           $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;34.0.0" "ndk;27.2.12479018"
-
+          
+      - name: Download and set up Android NDK
+        run: |
+          wget https://dl.google.com/android/repository/android-ndk-r27b-linux.zip -O ndk.zip
+          unzip ndk.zip -d $HOME/android-ndk
+          echo "export ANDROID_NDK_HOME=$HOME/android-ndk/android-ndk-r27b" >> $GITHUB_ENV
+          echo "export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+          
       - name: Set up Android NDK
         run: |
          echo "export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
