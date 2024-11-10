@@ -15,7 +15,6 @@ aa = []
 event_debug = []
 
 [dependencies]
-obeo-sys = "0.5.0"
 anyhow = "1.0"
 arc-swap = "1.6.0"
 base64 = "0.22.1"
