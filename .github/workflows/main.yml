@@ -1,4 +1,4 @@
-name: Build Phira Project
+name: Build Phira APK
 
 on:
   push:
@@ -14,15 +14,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Set up JDK 11
+        uses: actions/setup-java@v2
         with:
-          toolchain: stable
-          profile: minimal
-          override: true
+          java-version: '11'
+          distribution: 'temurin'
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y wget unzip build-essential pkg-config clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip build-essential pkg-config clang binutils ar
 
       - name: Download and set up Android SDK
         run: |
@@ -41,17 +42,26 @@ jobs:
           echo "export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
           echo "export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin" >> $GITHUB_ENV
 
-      - name: Install Rust targets for Android
+      - name: Install Rust toolchain for Android
         run: |
           rustup target add aarch64-linux-android
           rustup target add armv7-linux-androideabi
 
-      - name: Build the Rust project for Android
+      - name: Install C++ toolchain
         run: |
-          export CC_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
-          export AR_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin/ar
-          export CC_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
-          export AR_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/arm-linux-androideabi/bin/ar
+          sudo apt-get install -y build-essential
+
+      - name: Build the Rust project for Android
+        env:
+          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          sudo apt-get install -y clang
+          export CC_aarch64_linux_android=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+          export AR_aarch64_linux_android=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin/ar
+          export CC_armv7_linux_androideabi=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
+          export AR_armv7_linux_androideabi=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/arm-linux-androideabi/bin/ar
+          export CXX_aarch64_linux_android=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++
+          export CXX_armv7_linux_androideabi=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang++
           cargo build --target aarch64-linux-android --release
           cargo build --target armv7-linux-androideabi --release
 
