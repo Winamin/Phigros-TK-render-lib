@@ -15,6 +15,7 @@ aa = []
 event_debug = []
 
 [dependencies]
+obeo-sys = "0.5.0"
 anyhow = "1.0"
 arc-swap = "1.6.0"
 base64 = "0.22.1"
@@ -75,6 +76,3 @@ objc-foundation = "*"
 
 [build-dependencies]
 dotenv-build = "0.1"
-
-[target.aarch64-linux-android]
-ar = "/usr/local/lib/android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin/ar"
