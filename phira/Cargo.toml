@@ -74,3 +74,6 @@ objc-foundation = "*"
 
 [build-dependencies]
 dotenv-build = "0.1"
+
+[target.aarch64-linux-android]
+linker = "/path/to/your/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
