@@ -50,7 +50,7 @@ tracing = "0.1.37"
 walkdir = "2.3.3"
 zip = "0.6.4"
 zstd = "0.13"
-zstd-sys = "2.0.13+zstd.1.5.6"
+zstd-sys = "2.0.13"
 
 phira-mp-client = { git = "https://github.com/TeamFlos/phira-mp" }
 phira-mp-common = { git = "https://github.com/TeamFlos/phira-mp" }
