@@ -60,9 +60,9 @@ jobs:
         run: |
           sudo apt-get install -y clang binutils build-essential
           export CC_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
-          export AR_aarch64_linux_android=ndk_bundle/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin/ar
+          export AR_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin/aarch64-linux-android-ar
           export CC_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
-          export AR_armv7_linux_androideabi=ndk_bundle/toolchains/llvm/prebuilt/linux-x86_64/arm-linux-androideabi/bin/ar
+          export AR_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/arm-linux-androideabi/bin/aarch64-linux-android-ar
           export CXX_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++
           export CXX_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang++
           cargo build --target aarch64-linux-android --release
