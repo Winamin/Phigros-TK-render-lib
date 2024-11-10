@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget unzip build-essential pkg-config clang binutils ar
+          sudo apt-get install -y wget unzip build-essential pkg-config clang binutils
 
       - name: Download and set up Android SDK
         run: |
