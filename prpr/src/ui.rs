@@ -588,7 +588,7 @@ impl<'a> Ui<'a> {
             alpha: 1.,
         }
     }
-
+    
     pub fn camera(&self) -> Camera2D {
         Camera2D {
             zoom: vec2(1., -self.viewport.2 as f32 / self.viewport.3 as f32),
