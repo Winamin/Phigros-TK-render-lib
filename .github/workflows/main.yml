@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget unzip cmake ninja-build
-          sudo apt-get install -y binutils build-essential libzstd-dev
+          sudo apt-get install -y libzstd-dev
 
       - name: Download and set up Android Studio command line tools
         run: |
