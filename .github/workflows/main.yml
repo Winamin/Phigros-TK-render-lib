@@ -26,8 +26,12 @@ jobs:
           sudo apt-get install -y wget unzip cmake ninja-build
           sudo apt-get install -y binutils build-essential libzstd-dev
 
-      - name: Download and set up Android SDK
+      - name: Download and set up Android Studio command line tools
         run: |
+          wget https://dl.google.com/dl/android/studio/ide-zips/2023.1.1.23/android-studio-2023.1.1.23-linux.tar.gz -O android-studio.tar.gz
+          tar -xzf android-studio.tar.gz -C $HOME
+          echo "export ANDROID_STUDIO_HOME=$HOME/android-studio" >> $GITHUB_ENV
+          echo "export PATH=$PATH:$ANDROID_STUDIO_HOME/bin" >> $GITHUB_ENV
           wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip -O commandlinetools.zip
           mkdir -p $HOME/android-sdk/cmdline-tools
           unzip commandlinetools.zip -d $HOME/android-sdk/cmdline-tools
