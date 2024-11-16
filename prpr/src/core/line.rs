@@ -182,6 +182,8 @@ impl JudgeLine {
                     ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).size(0.8).draw();
                 });
             }
+        }
+    }
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| match &self.kind {
                     JudgeLineKind::Normal => {
@@ -331,6 +333,7 @@ impl JudgeLine {
                  break;
                  note.render(res, &mut config, bpm_list);
            }
+      }
 }
             
 res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
@@ -348,6 +351,7 @@ res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1
                 break;
             }
             note.render(res, &mut config, bpm_list);
+            }
         }
-    }
-});
+   });
+}
