@@ -329,9 +329,8 @@ impl JudgeLine {
                  }
                 if agg && note.height - config.line_height + note.object.translation.1.now() > limit {
                  break;
-         }
-        note.render(res, &mut config, bpm_list);
-    }
+                 note.render(res, &mut config, bpm_list);
+           }
 }
             
 res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
