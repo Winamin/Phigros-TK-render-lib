@@ -136,6 +136,7 @@ impl JudgeLine {
             }
             _ => {}
         }
+//能正常跑就行
         self.color.set_time(res.time);
         self.cache.above_indices.retain_mut(|index| {
             while *index + 1 < self.notes.len() && matches!(self.notes[*index].judge, JudgeStatus::Judged) {
