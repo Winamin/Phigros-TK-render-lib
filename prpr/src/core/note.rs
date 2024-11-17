@@ -220,7 +220,7 @@ impl Note {
 
         // show_below的判断
         if !config.draw_below
-            && ((res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-3))
+            && ((res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) || (self.time > res.time && base <= -1e-3))
         {
             return;
         }
@@ -241,9 +241,11 @@ impl Note {
         };
         match self.kind {
             NoteKind::Click => {
+                if self.fake && res.time >= self.time {return};
                 draw(res, *style.click);
             }
             NoteKind::Hold { end_time, end_height } => {
+                if self.fake && res.time >= end_time {return};
                 res.with_model(self.now_transform(res, ctrl_obj, 0., 0.), |res| {
                     let style = if res.config.double_hint && self.multiple_hint {
                         &res.res_pack.note_style_mh
@@ -350,9 +352,11 @@ impl Note {
                 });
             }
             NoteKind::Flick => {
+                if self.fake && res.time >= self.time {return};
                 draw(res, *style.flick);
             }
             NoteKind::Drag => {
+                if self.fake && res.time >= self.time {return};
                 draw(res, *style.drag);
             }
         }
