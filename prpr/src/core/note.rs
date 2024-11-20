@@ -128,6 +128,20 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
     );
 }
 
+fn get_judge_color(&mut self, res: &mut Resource) -> Option<Color> {
+    if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
+        if res.time >= *at {
+            *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
+            return Some(if perfect {
+                res.res_pack.info.fx_perfect()
+            } else {
+                res.res_pack.info.fx_good()
+            });
+        }
+    }
+    None
+}
+
 impl Note {
     pub fn rotation(&self, line: &JudgeLine) -> f32 {
         line.object.rotation.now() + if self.above { 0. } else { 180. }
@@ -136,6 +150,11 @@ impl Note {
     pub fn plain(&self) -> bool {
         !self.fake && !matches!(self.kind, NoteKind::Hold { .. }) && self.object.translation.1.keyframes.len() <= 1
         // && self.ctrl_obj.is_default()
+    }
+    
+    pub fn rotation(&self, line: &JudgeLine) -> f32 {
+        line.object.rotation.now() +
+self.above_rotation_offset()
     }
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
@@ -157,10 +176,10 @@ impl Note {
             None
         };
     
-        if let Some(color) = color {
-            self.init_ctrl_obj(ctrl_obj, line_height);
-            res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
-                res.emit_at_origin(parent_rot + if self.above { 0. } else { 180. }, color)
+        if let Some(color) = self.get_judge_color(res) {
+           self.init_ctrl_obj(ctrl_obj, line_height);
+           res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
+           res.emit_at_origin(parent_rot + self.above_rotation_offset(), color)
             });
         }
     }
