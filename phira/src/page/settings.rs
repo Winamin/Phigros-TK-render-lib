@@ -627,6 +627,7 @@ struct DebugList {
     chart_debug_btn: DRectButton,
     touch_debug_btn: DRectButton,
     ratio_slider: Slider,
+    buffer_silder: Silder,
 }
 
 impl DebugList {
@@ -635,6 +636,7 @@ impl DebugList {
             chart_debug_btn: DRectButton::new(),
             touch_debug_btn: DRectButton::new(),
             ratio_slider: Slider::new(0.05..1.0, 0.05),
+            buffer_silder: Slider::new(128..2048, 256),
         }
     }
 
@@ -648,6 +650,9 @@ impl DebugList {
         if self.chart_debug_btn.touch(touch, t) {
             config.chart_debug ^= true;
             return Ok(Some(true));
+        }
+        if let wt @ Some(_) = self.buffer_silder.touch(touch, t, &mut config.buffer_size) {
+            return Ok(wt);
         }
         if self.touch_debug_btn.touch(touch, t) {
             config.touch_debug ^= true;
