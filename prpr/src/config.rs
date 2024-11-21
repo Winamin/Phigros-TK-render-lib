@@ -38,7 +38,7 @@ pub struct Config {
     pub challenge_rank: u32,
     pub chart_debug: bool,
     pub chart_ratio: f32,
-    pub buffer_size: f32
+    pub buffer_size: f32,
     pub disable_effect: bool,
     pub double_click_to_pause: bool,
     pub double_hint: bool,
