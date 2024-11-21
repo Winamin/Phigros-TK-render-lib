@@ -41,6 +41,7 @@ item-chart-debug = 谱面调试
 item-chart-debug-sub = 显示判定线编号和朝向
 item-touch-debug = 触摸调试
 item-touch-debug-sub = 游玩过程中显示触摸点
+item-touch-debug = 调节buffer_size
 
 load-cali-failed = 加载音频失败
 
