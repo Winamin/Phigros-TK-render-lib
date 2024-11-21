@@ -40,6 +40,7 @@ item-chart-debug = Beatmap debug mode
 item-chart-debug-sub = Display line number and orientation
 item-touch-debug = Touch debug mode
 item-touch-debug-sub = Display touch points
+item-touch_debug-sub = Adjust buffer_size
 
 load-cali-failed = Failed to load audio
 
