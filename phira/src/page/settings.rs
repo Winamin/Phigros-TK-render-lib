@@ -684,6 +684,10 @@ impl DebugList {
         let data = get_data();
         let config = &data.config;
         item! {
+        render_title(ui, c, tl!("item-buffer_size"), None);
+            self.buffer_slider.render(ui, rr, t,c, config.buffer_size, format!("{:.2}", config.buffer_size));
+        }
+        item! {
             render_title(ui, c, tl!("item-chart-debug"), Some(tl!("item-chart-debug-sub")));
             render_switch(ui, rr, t, c, &mut self.chart_debug_btn, config.chart_debug);
         }
