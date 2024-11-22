@@ -187,6 +187,13 @@ pub fn get_viewport() -> (i32, i32, i32, i32) {
 pub fn draw_text_aligned(ui: &mut Ui, text: &str, x: f32, y: f32, anchor: (f32, f32), scale: f32, color: Color) -> Rect {
     ui.text(text).pos(x, y).anchor(anchor.0, anchor.1).size(scale).color(color).draw()
 }
+pub fn draw_text_aligned_fix(ui: &mut Ui, text: &str, x: f32, y: f32, anchor: (f32, f32), mut scale: f32, color: Color, max_width: f32) -> Rect {
+    let text_width = ui.text(text).size(scale).measure().w;
+    if text_width > max_width {
+        scale *= max_width / text_width
+    }
+    ui.text(text).pos(x, y).anchor(anchor.0, anchor.1).size(scale).color(color).draw()
+}
 
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -278,10 +285,11 @@ pub fn draw_parallelogram_ex(rect: Rect, texture: Option<(Texture2D, Rect)>, top
     gl.geometry(&v, &[0, 2, 3, 0, 1, 3]);
     if shadow {
         drop_shadow(p, top.a.min(bottom.a));
+        //drop_shadow(p, 1.0);
     }
 }
 
-pub fn draw_illustration(tex: Texture2D, x: f32, y: f32, w: f32, h: f32, color: Color) -> Rect {
+pub fn draw_illustration(tex: Texture2D, x: f32, y: f32, w: f32, h: f32, color: Color, shadow: bool) -> Rect {
     let scale = 0.076;
     let w = scale * 13. * w;
     let h = scale * 7. * h;
@@ -297,17 +305,19 @@ pub fn draw_illustration(tex: Texture2D, x: f32, y: f32, w: f32, h: f32, color: 
             Rect::new(0.5 - w / 2., 0., w, 1.)
         }
     };
-    crate::ext::draw_parallelogram(r, Some((tex, tr)), color, true);
+    crate::ext::draw_parallelogram(r, Some((tex, tr)), color, shadow);
     r
 }
+
 
 fn drop_shadow(p: [Point; 4], alpha: f32) {
     const RADIUS: f32 = 0.018;
     let len = (PARALLELOGRAM_SLOPE * PARALLELOGRAM_SLOPE + 1.).sqrt();
     let n1 = Vector::new(PARALLELOGRAM_SLOPE / len - 1., -1. / len) * RADIUS;
     let n2 = Vector::new(n1.x + RADIUS * 2., n1.y);
-    let c1 = Color::new(0., 0., 0., alpha * 0.11);
-    let c2 = Color::default();
+    let c1 = Color::new(0., 0., 0., alpha * 0.06);
+    //let c2 = Color::default();
+    let c2 = Color::new(0., 0., 0., 0.);
     let v = |p: Point, c: Color| Vertex::new(p.x, p.y, 0., 0., 0., c);
     let p = [
         v(p[0], c1),
