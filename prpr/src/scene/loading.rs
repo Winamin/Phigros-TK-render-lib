@@ -2,7 +2,7 @@ use super::{draw_background, ending::RecordUpdateState, game::GameMode, GameScen
 use crate::{
     config::Config,
     core::Resource,
-    ext::{draw_illustration, draw_parallelogram, draw_text_aligned, poll_future, LocalTask, SafeTexture, BLACK_TEXTURE},
+    ext::{draw_illustration, draw_parallelogram, draw_text_aligned, draw_text_aligned_fix, poll_future, LocalTask, SafeTexture, BLACK_TEXTURE},
     fs::FileSystem,
     info::ChartInfo,
     judge::Judge,
@@ -19,7 +19,7 @@ use tracing::warn;
 
 const BEFORE_TIME: f32 = 1.;
 const TRANSITION_TIME: f32 = 1.4;
-const WAIT_TIME: f32 = 0.4;
+const WAIT_TIME: f32 = 0.;
 
 pub type UploadFn = Arc<dyn Fn(Vec<u8>) -> Task<Result<RecordUpdateState>>>;
 pub type UpdateFn = Box<dyn FnMut(f32, &mut Resource, &mut Judge)>;
@@ -60,11 +60,17 @@ impl LoadingScene {
 
             let mut blurred_rgb = image.to_rgb8();
             let mut vec = unsafe { Vec::from_raw_parts(std::mem::transmute(blurred_rgb.as_mut_ptr()), size, size) };
-            fastblur::gaussian_blur(&mut vec, w as _, h as _, 50.);
+            fastblur::gaussian_blur(&mut vec, w as _, h as _, 80.);
             std::mem::forget(vec);
             let mut blurred = Vec::with_capacity(size * 4);
             for input in blurred_rgb.chunks_exact(3) {
-                blurred.extend_from_slice(input);
+                //blurred.extend_from_slice(input);
+                let r = (input[0] as f32 * 0.8) as u8;
+                let g = (input[1] as f32 * 0.8) as u8;
+                let b = (input[2] as f32 * 0.8) as u8;
+                blurred.push(r);
+                blurred.push(g);
+                blurred.push(b);
                 blurred.push(255);
             }
             Ok((
@@ -150,7 +156,7 @@ impl Scene for LoadingScene {
         draw_background(*self.background);
         let dx = if now > self.finish_time {
             let p = ((now - self.finish_time) / TRANSITION_TIME).min(1.);
-            p.powi(3) * 2.
+            p.powi(2) * 3. + p.powi(5) * 11.
         } else {
             0.
         };
@@ -158,43 +164,58 @@ impl Scene for LoadingScene {
             gl.push_model_matrix(Mat4::from_translation(vec3(dx, 0., 0.)));
         }
         let vo = -top / 10.;
-        let r = draw_illustration(*self.illustration, 0.38, vo, 1., 1., WHITE);
-        let h = r.h / 3.6;
-        let main: Rect = Rect::new(-0.88, vo - h / 2. - top / 10., 0.78, h);
-        draw_parallelogram(main, None, Color::new(0., 0., 0., 0.7), true);
-        let p = (main.x + main.w * 0.09, main.y + main.h * 0.36);
-        let mut text = ui.text(&self.info.name).pos(p.0, p.1).anchor(0., 0.5).size(0.7);
-        if text.measure().w <= main.w * 0.6 {
-            text.draw();
-        } else {
-            drop(text);
-            ui.text(&self.info.name)
-                .pos(p.0, p.1)
-                .anchor(0., 0.5)
-                .max_width(main.w * 0.6)
-                .size(0.5)
-                .draw();
+        let voi = -top / 8.5;
+        let r = draw_illustration(*self.illustration, 0.380, voi, 1., 1., WHITE, false);
+        let h = r.h / 3.55;
+        let main: Rect = Rect::new(-0.87, vo - h / 2. - top / 10., 0.768, h);
+        draw_parallelogram(main, None, Color::new(0., 0., 0., 0.6), false);
+        let p = (main.x + main.w * 0.085, main.y + main.h * 0.35);
+
+        let mut text_size = 0.73;
+        let mut text = ui.text(&self.info.name).pos(p.0, p.1).anchor(0., 0.5).size(text_size);
+        let max_width = main.w * 0.60;
+        let text_width = text.measure().w;
+        if text_width > max_width {
+            text_size *= max_width / text_width
         }
-        draw_text_aligned(ui, &self.info.composer, main.x + main.w * 0.09, main.y + main.h * 0.73, (0., 0.5), 0.36, WHITE);
+        drop(text);
+        ui.text(&self.info.name)
+            .pos(p.0, p.1)
+            .anchor(0., 0.5)
+            //.max_width(main.w * 0.6)
+            .size(text_size)
+            .draw();
+        
+        draw_text_aligned_fix(ui, &self.info.composer, main.x + main.w * 0.09, main.y + main.h * 0.74, (0., 0.5), 0.363, WHITE, 0.40);
 
-        let ext = 0.06;
-        let sub = Rect::new(main.x + main.w * 0.71, main.y - main.h * ext, main.w * 0.26, main.h * (1. + ext * 2.));
+        let ext = 0.04;
+        let sub = Rect::new(main.x + main.w * 0.724, main.y - main.h * ext, main.w * 0.25, main.h * (1. + ext * 2.));
         let mut ct = sub.center();
-        ct.x += sub.w * 0.02;
+        ct.x += sub.w * 0.01;
+        ct.y += sub.h * 0.05;
         draw_parallelogram(sub, None, WHITE, true);
-        draw_text_aligned(ui, &(self.info.difficulty as u32).to_string(), ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.88, BLACK);
-        draw_text_aligned(ui, self.info.level.split_whitespace().next().unwrap_or_default(), ct.x, ct.y + sub.h * 0.09, (0.5, 0.), 0.34, BLACK);
-        let t = draw_text_aligned(ui, "Chart", main.x + main.w / 6., main.y + main.h * 1.2, (0., 0.), 0.3, WHITE);
-        draw_text_aligned(ui, &self.charter, t.x, t.y + top / 20., (0., 0.), 0.47, WHITE);
-        let w = 0.027;
-        let t = draw_text_aligned(ui, "Illustration", t.x - w, t.y + w / 0.13 / 13. * 5., (0., 0.), 0.3, WHITE);
-        draw_text_aligned(ui, &self.info.illustrator, t.x, t.y + top / 20., (0., 0.), 0.47, WHITE);
+        //draw_text_aligned(ui, &(self.info.difficulty as u32).to_string(), ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.88, BLACK);
+        let first_num = Regex::new(r"[0-9?]").unwrap();
+        draw_text_aligned(ui, self.info.level
+            .split_whitespace()
+            .rev()
+            .nth(0)
+            .and_then(|word| { first_num.find(word).map(|m| &word[m.start()..]) })
+            .unwrap_or_default()
+            , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK
+        );
+        draw_text_aligned(ui, self.info.level.split_whitespace().next().unwrap_or_default(), ct.x, ct.y + sub.h * 0.09, (0.5, 0.), 0.30, BLACK);
+        let t = draw_text_aligned(ui, "Chart", main.x + main.w / 6.1, main.y + main.h * 1.32, (0., 0.), 0.253, WHITE);
+        draw_text_aligned_fix(ui, &self.info.charter, t.x, t.y + top / 22., (0., 0.), 0.415, WHITE, 0.58);
+        let w = 0.031;
+        let t = draw_text_aligned(ui, "Illustration", t.x - w, t.y + w / 0.135 / 13. * 5., (0., 0.), 0.253, WHITE);
+        draw_text_aligned_fix(ui, &self.info.illustrator, t.x - 0.002, t.y + top / 22., (0., 0.), 0.415, WHITE, 0.58);
 
-        draw_text_aligned(ui, self.info.tip.as_ref().unwrap(), -0.91, top * 0.92, (0., 1.), 0.47, WHITE);
-        let t = draw_text_aligned(ui, "Loading...", 0.87, top * 0.92, (1., 1.), 0.44, WHITE);
-        let we = 0.2;
-        let he = 0.5;
-        let r = Rect::new(t.x - t.w * we, t.y - t.h * he, t.w * (1. + we * 2.), t.h * (1. + he * 2.));
+        draw_text_aligned_fix(ui, self.info.tip.as_ref().unwrap(), -0.895, top * 0.88, (0., 1.), 0.47, WHITE, 1.5);
+        let t = draw_text_aligned(ui, "Loading...", 0.865, top * 0.865, (1., 1.), 0.41, WHITE);
+        let we = 0.19;
+        let he = 0.35;
+        let r = Rect::new(t.x - t.w * we, t.y - t.h * he, t.w * (1. + we * 2.2), t.h * (1. + he * 2.2));
 
         let p = 0.6;
         let s = 0.2;
@@ -206,7 +227,7 @@ impl Scene for LoadingScene {
         ui.fill_rect(r, WHITE);
         r.x += dx;
         ui.scissor(Some(r));
-        draw_text_aligned(ui, "Loading...", 0.87, top * 0.92, (1., 1.), 0.44, BLACK);
+        draw_text_aligned(ui, "Loading...", 0.865, top * 0.865, (1., 1.), 0.41, BLACK);
         ui.scissor(None);
 
         if dx != 0. {
