@@ -16,7 +16,7 @@ use crate::{
     fs::FileSystem,
     info::{ChartFormat, ChartInfo},
     judge::Judge,
-    parse::{parse_extra, parse_pec, parse_phigros, parse_rpe},
+    parse::{parse_extra, parse_pec, parse_phigros, parse_phigros_fv1, parse_rpe},
     task::Task,
     time::TimeManager,
     ui::{RectButton, Ui},
@@ -191,7 +191,11 @@ impl GameScene {
                     if text.contains("\"META\"") {
                         ChartFormat::Rpe
                     } else {
-                        ChartFormat::Pgr
+                        if text.starts_with("{\"formatVersion\":3") {
+                            ChartFormat::Pgr
+                        } else {
+                            ChartFormat::Pgr1
+                        }
                     }
                 } else {
                     ChartFormat::Pec
@@ -203,6 +207,7 @@ impl GameScene {
         let mut chart = match format {
             ChartFormat::Rpe => parse_rpe(&String::from_utf8_lossy(&bytes), fs, extra).await,
             ChartFormat::Pgr => parse_phigros(&String::from_utf8_lossy(&bytes), extra),
+            ChartFormat::Pgr1 => parse_phigros_fv1(&String::from_utf8_lossy(&bytes), extra),
             ChartFormat::Pec => parse_pec(&String::from_utf8_lossy(&bytes), extra),
             ChartFormat::Pbc => {
                 let mut r = BinaryReader::new(Cursor::new(&bytes));
@@ -332,8 +337,8 @@ impl GameScene {
         let res = &mut self.res;
         let eps = 2e-2 / res.aspect_ratio;
         let top = -1. / res.aspect_ratio;
-        let pause_w = 0.012;
-        let pause_h = pause_w * 3.375;
+        let pause_w = 0.011;
+        let pause_h = pause_w * 3.4;
         let pause_center = Point::new(pause_w * 4.4 - 1., top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
         if res.config.interactive
             && !tm.paused()
@@ -381,7 +386,7 @@ impl GameScene {
                 .draw();
         }
         self.chart.with_element(ui, res, UIElement::Pause, |ui, color, scale| {
-            let mut r = Rect::new(pause_center.x - pause_w * 1.5, pause_center.y - pause_h / 2., pause_w, pause_h);
+            let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
             let ct = pause_center.coords;
             let c = Color { a: color.a * c.a, ..color };
             ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
@@ -402,8 +407,6 @@ impl GameScene {
                     .bottom()
             });
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
-                //println!("player_name:\"{}\"",res.config.player_name);
-                //let _player_name = res.config.player_name.clone()
                 ui.text(if res.config.autoplay() && res.config.player_name != "COMBO" { "AUTOPLAY" } else { "COMBO" })
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
@@ -416,13 +419,20 @@ impl GameScene {
         let lf = -1. + margin;
         let bt = -top - eps * 3.64;
         self.chart.with_element(ui, res, UIElement::Name, |ui, color, scale| {
+            let mut text_size = 0.5;
+            let mut text = ui.text(&res.info.name).pos(lf, bt + (1. - p) * 0.4).anchor(0., 1.).size(text_size);
+            let max_width = 0.9;
+            let text_width = text.measure().w;
+            if text_width > max_width {
+                text_size *= max_width / text_width
+            }
+            drop(text);
             ui.text(&res.info.name)
                 .pos(lf, bt + (1. - p) * 0.4)
                 .anchor(0., 1.)
-                .size(0.5)
+                .size(text_size)
                 .color(Color { a: color.a * c.a, ..color })
                 .scale(scale)
-                .max_width(0.8)
                 .draw();
         });
         self.chart.with_element(ui, res, UIElement::Level, |ui, color, scale| {
@@ -434,18 +444,16 @@ impl GameScene {
                 .scale(scale)
                 .draw();
         });
-        let hw = 0.003;
-        let height = eps * 1.2;
+        let hw = 0.0015;
+        let height = eps * 1.1;
         let dest = 2. * res.time / res.track_length;
         self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
             let ct = Vector::new(0., top + height / 2.);
             ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
                 ui.fill_rect(
                     Rect::new(-1., top, dest, height),
-                    Color {
-                        a: color.a * c.a * 0.6,
-                        ..color
-                    },
+                    //Color{ a: color.a * c.a * 0.6, ..color},
+                    Color::new(0.45, 0.45, 0.45, 1.),
                 );
                 ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
             });
