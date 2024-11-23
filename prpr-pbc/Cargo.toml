@@ -20,4 +20,4 @@ lzma = { version = "0.2.2", default-features = false }
 [build-dependencies]
 x11 = "2.21.0"
 lzma = "0.2.2"
-lzma-sys = "24.5"
+lzma-sys = "0.1.20"
