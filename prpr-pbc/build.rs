@@ -1,5 +1,3 @@
-use std::path::Path;
-
 extern crate cc;
 extern crate libc;
 
