@@ -13,4 +13,4 @@ prpr = { path = "../prpr" }
 
 [build-dependencies]
 x11 = "2.21.0"
-lzma = "0.3.0"
+lzma = "0.2.2"
