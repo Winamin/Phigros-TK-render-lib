@@ -15,6 +15,7 @@ anyhow = "1.0.78"
 async-trait = "0.1.76"
 pollster = "0.3.0"
 prpr = { path = "../prpr" }
+lzma = { version = "0.2.2", default-features = false }
 
 [build-dependencies]
 x11 = "2.21.0"
