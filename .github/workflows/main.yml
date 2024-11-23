@@ -28,23 +28,30 @@ jobs:
 
       - name: Download and set up Android Studio command line tools
         run: |
-          wget https://dl.google.com/dl/android/studio/ide-zips/2023.1.1.23/android-studio-2023.1.1.23-linux.tar.gz -O android-studio.tar.gz
-          tar -xzf android-studio.tar.gz -C $HOME
-          echo "ANDROID_STUDIO_HOME=$HOME/android-studio" >> $GITHUB_ENV
-          echo "PATH=$PATH:$ANDROID_STUDIO_HOME/bin" >> $GITHUB_ENV
-          wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip -O commandlinetools.zip
-          mkdir -p $HOME/android-sdk/cmdline-tools
-          unzip commandlinetools.zip -d $HOME/android-sdk/cmdline-tools
-          mv $HOME/android-sdk/cmdline-tools/cmdline-tools $HOME/android-sdk/cmdline-tools/latest
-          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
-          echo "PATH=$PATH:$HOME/android-sdk/cmdline-tools/latest/bin:$HOME/android-sdk/platform-tools" >> $GITHUB_ENV
-          yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses
-          $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;34.0.0" "ndk;27.2.12479018"
+         wget https://dl.google.com/dl/android/studio/ide-zips/2023.1.1.23/android-studio-2023.1.1.23-linux.tar.gz -O android-studio.tar.gz
+         tar -xzf android-studio.tar.gz -C $HOME
+         echo "ANDROID_STUDIO_HOME=$HOME/android-studio" >> $GITHUB_ENV
+         echo "PATH=$PATH:$ANDROID_STUDIO_HOME/bin" >> $GITHUB_ENV
+         wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip -O commandlinetools.zip
+         mkdir -p $HOME/android-sdk/cmdline-tools
+         unzip commandlinetools.zip -d $HOME/android-sdk/cmdline-tools
+         mv $HOME/android-sdk/cmdline-tools/cmdline-tools $HOME/android-sdk/cmdline-tools/latest
+         echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
+         echo "PATH=$PATH:$HOME/android-sdk/cmdline-tools/latest/bin:$HOME/android-sdk/platform-tools" >> $GITHUB_ENV
+         yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses
+         $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;34.0.0" "ndk;27.2.12479018"
+         ls -lR $ANDROID_SDK_ROOT/ndk
 
-      - name: Set up Android NDK
+
+      - name: Manually download and set up NDK
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
-          echo "PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+         wget https://dl.google.com/android/repository/android-ndk-r27b-linux-x86_64.zip -O android-ndk.zip
+         unzip android-ndk.zip -d $HOME/android-sdk/ndk
+         echo "ANDROID_NDK_HOME=$HOME/android-sdk/ndk/android-ndk-r27b" >> $GITHUB_ENV
+         echo "PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+         ls -lR $ANDROID_NDK_HOME
+
+
 
       - name: Install Rust toolchain for Android
         run: |
