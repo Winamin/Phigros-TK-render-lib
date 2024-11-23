@@ -95,7 +95,7 @@ jobs:
         run: cargo fix --lib -p prpr
 
       - name: Build the Rust project 
-        run: cargo build --release
+        run: cargo fix --lib -p prpr --allow-dirty
 
       - name: Build APK
         run: ./gradlew assembleRelease
