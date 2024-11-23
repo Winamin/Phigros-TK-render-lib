@@ -25,6 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wget unzip cmake ninja-build
           sudo apt-get install -y libzstd-dev gcc clang binutils make build-essential
+          export PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig
 
       - name: Download and set up Android Studio command line tools
         run: |
