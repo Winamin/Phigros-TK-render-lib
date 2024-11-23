@@ -24,27 +24,27 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget unzip cmake ninja-build
-          sudo apt-get install -y libzstd-dev gcc
+          sudo apt-get install -y libzstd-dev gcc clang binutils make build-essential
 
       - name: Download and set up Android Studio command line tools
         run: |
           wget https://dl.google.com/dl/android/studio/ide-zips/2023.1.1.23/android-studio-2023.1.1.23-linux.tar.gz -O android-studio.tar.gz
           tar -xzf android-studio.tar.gz -C $HOME
-          echo "export ANDROID_STUDIO_HOME=$HOME/android-studio" >> $GITHUB_ENV
-          echo "export PATH=$PATH:$ANDROID_STUDIO_HOME/bin" >> $GITHUB_ENV
+          echo "ANDROID_STUDIO_HOME=$HOME/android-studio" >> $GITHUB_ENV
+          echo "PATH=$PATH:$ANDROID_STUDIO_HOME/bin" >> $GITHUB_ENV
           wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip -O commandlinetools.zip
           mkdir -p $HOME/android-sdk/cmdline-tools
           unzip commandlinetools.zip -d $HOME/android-sdk/cmdline-tools
           mv $HOME/android-sdk/cmdline-tools/cmdline-tools $HOME/android-sdk/cmdline-tools/latest
-          echo "export ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
-          echo "export PATH=$PATH:$HOME/android-sdk/cmdline-tools/latest/bin:$HOME/android-sdk/platform-tools" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "PATH=$PATH:$HOME/android-sdk/cmdline-tools/latest/bin:$HOME/android-sdk/platform-tools" >> $GITHUB_ENV
           yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses
           $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;34.0.0" "ndk;27.2.12479018"
 
       - name: Set up Android NDK
         run: |
-          echo "export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
-          echo "export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
+          echo "PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
 
       - name: Install Rust toolchain for Android
         run: |
@@ -55,12 +55,11 @@ jobs:
         env:
           NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
-          sudo apt-get install -y clang binutils cmake make build-essential
           export CC_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           export AR_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/aarch64-linux-android/bin/ar
+          export CXX_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++
           export CC_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
           export AR_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/arm-linux-androideabi/bin/ar
-          export CXX_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++
           export CXX_armv7_linux_androideabi=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang++
           cargo build --target aarch64-linux-android --release
           cargo build --target armv7-linux-androideabi --release
