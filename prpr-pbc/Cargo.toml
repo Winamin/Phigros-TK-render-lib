@@ -3,24 +3,9 @@ name = "prpr-pbc"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.69.0"
-build = "build.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-tempfile = "3.2"
-chrono = "0.4"
-futures = "0.3"
 anyhow = "1.0.78"
 async-trait = "0.1.76"
 pollster = "0.3.0"
 prpr = { path = "../prpr" }
-lzma = { version = "0.2.2", default-features = false }
-libc = "0.2"
-
-[build-dependencies]
-x11 = "2.21.0"
-lzma = "0.2.2"
-lzma-sys = "0.1.20"
-cc = "1.0"
-libc = "0.2"
