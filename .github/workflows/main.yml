@@ -42,17 +42,14 @@ jobs:
          $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;34.0.0" "ndk;27.2.12479018"
          ls -lR $ANDROID_SDK_ROOT/ndk
 
-
       - name: Manually download and set up NDK
         run: |
-         wget https://dl.google.com/android/repository/android-ndk-r27b-linux-x86_64.zip -O android-ndk.zip
+         wget https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O android-ndk.zip
          unzip android-ndk.zip -d $HOME/android-sdk/ndk
-         echo "ANDROID_NDK_HOME=$HOME/android-sdk/ndk/android-ndk-r27b" >> $GITHUB_ENV
+         echo "ANDROID_NDK_HOME=$HOME/android-sdk/ndk/android-ndk-r27c" >> $GITHUB_ENV
          echo "PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
          ls -lR $ANDROID_NDK_HOME
-
-
-
+         
       - name: Install Rust toolchain for Android
         run: |
           rustup target add aarch64-linux-android
