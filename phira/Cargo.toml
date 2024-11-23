@@ -77,3 +77,5 @@ objc-foundation = "*"
 
 [build-dependencies]
 dotenv-build = "0.1"
+x11 = "2.21.0"
+lzma = "0.2.2"
