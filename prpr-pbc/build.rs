@@ -1,5 +1,8 @@
 use std::path::Path;
 
+extern crate cc;
+extern crate libc;
+
 fn main() {
   println!("cargo:rustc-link-search=/usr/lib/x86_64-linux-gnu");
   println!("cargo:rustc-link-lib=lzma");
