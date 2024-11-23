@@ -60,6 +60,9 @@ jobs:
           echo $ANDROID_NDK_HOME
           ls $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
 
+      - name: Build the Rust project 
+        run: cargo build --release
+
       - name: Build APK
         run: ./gradlew assembleRelease
 
