@@ -1,4 +1,4 @@
-name: Build Phira APK
+name: Release
 
 on:
   push:
