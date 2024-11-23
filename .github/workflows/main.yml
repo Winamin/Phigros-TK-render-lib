@@ -29,9 +29,9 @@ jobs:
         run: echo "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Rust setup
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: stable-x86_64-gnu
           override: true
 
       - name: Rust cache
