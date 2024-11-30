@@ -195,16 +195,30 @@ impl Scene for LoadingScene {
         ct.y += sub.h * 0.05;
         draw_parallelogram(sub, None, WHITE, true);
         //draw_text_aligned(ui, &(self.info.difficulty as u32).to_string(), ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.88, BLACK);
-        let first_num = Regex::new(r"[0-9?]").unwrap();
-        draw_text_aligned(ui, self.info.level
+        let first_str = Regex::new(r"[0-9?]+").unwrap();
+        let last_str = Regex::new(r"[0-9?.]+").unwrap();
+        draw_text_aligned_fix(ui, self.info.level
             .split_whitespace()
             .rev()
             .nth(0)
-            .and_then(|word| { first_num.find(word).map(|m| &word[m.start()..]) })
-            .unwrap_or_default()
-            , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK
+            //.and_then(|word| word.get(3..))
+            .and_then(|word| { first_str.find(word).map(|m| &word[m.start()..]) })
+            .and_then(|word| { last_str.find(word).map(|m| &word[..m.end()]) })
+            //.unwrap_or_default()
+            .unwrap_or(
+                //self.info.level.split_whitespace().rev().nth(0).and_then(|word| word.find('.').map(|pos| &word[(pos + 1)..])).unwrap_or("?")
+                "?"
+            )
+            , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK, main.w * 0.18
         );
-        draw_text_aligned(ui, self.info.level.split_whitespace().next().unwrap_or_default(), ct.x, ct.y + sub.h * 0.09, (0.5, 0.), 0.30, BLACK);
+
+        draw_text_aligned_fix(ui, self.info.level
+            .split_whitespace()
+            .next()
+            .unwrap_or("?")
+            , ct.x, ct.y + sub.h * 0.09, (0.5, 0.), 0.30, BLACK, main.w * 0.16
+        );
+
         let t = draw_text_aligned(ui, "Chart", main.x + main.w / 6.1, main.y + main.h * 1.32, (0., 0.), 0.253, WHITE);
         draw_text_aligned_fix(ui, &self.info.charter, t.x, t.y + top / 22., (0., 0.), 0.415, WHITE, 0.58);
         let w = 0.031;
