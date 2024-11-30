@@ -785,7 +785,7 @@ impl Judge {
 
     fn auto_play_update(&mut self, res: &mut Resource, chart: &mut Chart) {
         let t = res.time;
-        let spd = res.config.speed;
+        //let spd = res.config.speed;
         let mut judgements = Vec::new();
         for (line_id, (line, (idx, st))) in chart.lines.iter_mut().zip(self.notes.iter_mut()).enumerate() {
             for id in &idx[*st..] {
@@ -808,7 +808,10 @@ impl Judge {
                 note.judge = if matches!(note.kind, NoteKind::Hold { .. }) {
                     play_sfx(&mut res.sfx_click, &res.config);
                     self.judgements.borrow_mut().push((t, line_id as _, *id, Err(true)));
-                    JudgeStatus::Hold(true, t, (t - note.time) / spd, false, f32::INFINITY)
+                    //println!("{}\t{}\t{}", t, note.time, t - note.time);
+                    // 都是AutoPlay了为什么还要输出判定时间差
+                    //JudgeStatus::Hold(true, t, (t - note.time) / spd, false, f32::INFINITY)
+                    JudgeStatus::Hold(true, t, 0., true, f32::INFINITY)
                 } else {
                     judgements.push((line_id, *id));
                     JudgeStatus::Judged
@@ -833,9 +836,9 @@ impl Judge {
             };
             let line = &chart.lines[line_id];
             res.with_model(line.now_transform(res, &chart.lines) * note_transform, |res| {
-                if !matches!(note_kind, NoteKind::Hold{..}){                                       
+                if !matches!(note_kind, NoteKind::Hold { .. }){
                     res.emit_at_origin(line.notes[id as usize].rotation(line), res.res_pack.info.fx_perfect())
-                    }
+                }
             });
             if let Some(sfx) = match note_kind {
                 NoteKind::Click => Some(&mut res.sfx_click),
