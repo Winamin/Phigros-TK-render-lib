@@ -7,7 +7,9 @@ use crate::{
     core::HEIGHT_RATIO,
 };
 
+
 use macroquad::prelude::*;
+use ::rand::{thread_rng, Rng};
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
@@ -38,13 +40,14 @@ pub struct Note {
     pub time: f32,
     pub height: f32,
     pub speed: f32,
-    pub above: bool,
-    pub start_height: f32,
     pub end_speed: f32,
+    pub start_height: f32,
+
+    pub above: bool,
     pub multiple_hint: bool,
     pub fake: bool,
     pub judge: JudgeStatus,
-    pub format: bool
+    pub format: bool,
 }
 
 pub struct RenderConfig<'a> {
@@ -128,18 +131,16 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
     );
 }
 
-fn get_judge_color(&mut self, res: &mut Resource) -> Option<Color> {
-    if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
-        if res.time >= *at {
-            *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
-            return Some(if perfect {
-                res.res_pack.info.fx_perfect()
-            } else {
-                res.res_pack.info.fx_good()
-            });
-        }
-    }
-    None
+fn random_rotate() -> f32 {
+    let mut rng = thread_rng();
+    let rotation_degrees: f32 = match rng.gen_range(0..4) {
+        0 => 0.,
+        1 => 90.,
+        2 => 180.,
+        3 => 270.,
+        _ => 0.,
+    };
+    rotation_degrees
 }
 
 impl Note {
@@ -151,19 +152,16 @@ impl Note {
         !self.fake && !matches!(self.kind, NoteKind::Hold { .. }) && self.object.translation.1.keyframes.len() <= 1
         // && self.ctrl_obj.is_default()
     }
-    
-    pub fn rotation(&self, line: &JudgeLine) -> f32 {
-        line.object.rotation.now() +
-self.above_rotation_offset()
-    }
 
-    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32) {
+    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList) {
         self.object.set_time(res.time);
-        let mut _immediate_particle = false;
+        //let mut _immediate_particle = false;
         let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
             if res.time >= *at {
-                _immediate_particle = true;
-                *at = res.time + HOLD_PARTICLE_INTERVAL / res.config.speed;
+                //_immediate_particle = true;
+                let beat = if self.format { 30. / bpm_list.now_bpm(0.) } else { 30. / bpm_list.now_bpm(self.time) };
+                //println!("{} {} {}", bpm_list.now_bpm(0.), beat, res.config.speed);
+                *at = res.time + beat / res.config.speed; //HOLD_PARTICLE_INTERVAL
                 Some(if perfect {
                     res.res_pack.info.fx_perfect()
                 } else {
@@ -175,11 +173,15 @@ self.above_rotation_offset()
         } else {
             None
         };
-    
-        if let Some(color) = self.get_judge_color(res) {
-           self.init_ctrl_obj(ctrl_obj, line_height);
-           res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
-           res.emit_at_origin(parent_rot + self.above_rotation_offset(), color)
+
+        if let Some(color) = color {
+            self.init_ctrl_obj(ctrl_obj, line_height);
+            let rotation = if res.config.chart_debug { 
+                if self.above { 0. } else { 180. } } 
+                else { random_rotate() 
+            };
+            res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
+                res.emit_at_origin(parent_rot + rotation, color)
             });
         }
     }
@@ -209,8 +211,8 @@ self.above_rotation_offset()
             return;
         }
 
-        // if config.appear_before.is_finite() {
-        if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
+        if config.appear_before.is_finite() {
+        //if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
             let beat = bpm_list.beat(self.time);
             let time = bpm_list.time_beats(beat - config.appear_before);
             if time > res.time {
@@ -236,12 +238,17 @@ self.above_rotation_offset()
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
+        //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
 
-        // show_below的判断
+        // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
         if !config.draw_below
             && ((res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) || (self.time > res.time && base <= -1e-3))
         {
-            return;
+            if res.config.chart_debug{
+                color.a *= 0.2;
+            } else {
+                return;
+            }
         }
         let order = self.kind.order();
         let style = if res.config.double_hint && self.multiple_hint {
@@ -282,24 +289,33 @@ self.above_rotation_offset()
                     let start_height = self.start_height / res.aspect_ratio * spd;
                     let hold_height = end_height - start_height;
                     let time = if res.time >= self.time {res.time} else {self.time};
+                    let hold_line_height = (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO;
+
                     let clip = !config.draw_below && config.settings.hold_partial_cover;
+
+
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height; //StartY
                     let top = if self.format {
-                        bottom + hold_height - (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO
+                        bottom + hold_height - hold_line_height
                     } else {
                         end_height - line_height
                     };
-                    
+
+                    //let max_hold_height = 3. / res.config.chart_ratio / res.aspect_ratio;
+                    //let top = if res.config.aggressive && hold_height - hold_line_height >= max_hold_height { bottom + max_hold_height } else { top };
+
                     if self.format && end_spd == 0. {
-                        return
-                    };
+                        if res.config.chart_debug {
+                            color.a *= 0.2;
+                        } else {
+                            return;
+                        }
+                    }
                     
+
                     if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !self.format) {
                         return;
-                    }
-                    if res.config.chart_debug {
-                        color.a *= 0.25;
                     }
                     let tex = &style.hold;
                     let ratio = style.hold_ratio();
