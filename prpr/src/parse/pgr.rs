@@ -246,12 +246,10 @@ fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32) -> Result<JudgeLine> {
 
 pub fn parse_phigros(source: &str, extra: ChartExtra) -> Result<Chart> {
     let pgr: PgrChart = serde_json::from_str(source).with_context(|| ptl!("json-parse-failed"))?;
-    let pgr1: PgrChart = serde_json::from_str(source).with_context(|| ptl!("json-parse-failed"))?;
     let mut bpm_values = Vec::new();
     let indices: Vec<usize> = (0..pgr1.judge_line_list.len()).collect();
     for (index, judge_line) in indices.iter().zip(&pgr1.judge_line_list) {
         bpm_values.push((*index as f32, judge_line.bpm));
-        //bpm_values.push((0., judge_line.bpm));
 }
     let r = BpmList::new(bpm_values);
 
