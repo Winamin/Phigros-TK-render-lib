@@ -464,12 +464,10 @@ impl Resource {
                 SafeTexture::from(Texture2D::from_image(&load_image($path).await?))
             };
         }
-        //test
         let res_pack = ResourcePack::from_path(config.res_pack_path.as_ref())
             .await
             .context("Failed to load resource pack")?;
-        
-        let vec2_ratio = vec2(1. * config.chart_ratio,-config.aspect_ratio.unwrap_or(info.aspect_ratio) * config.chart_ratio);
+            let vec2_ratio = vec2(1. * config.chart_ratio,-config.aspect_ratio.unwrap_or(info.aspect_ratio) * config.chart_ratio);
         let camera = Camera2D {
             target: vec2(0., 0.),
             zoom: vec2_ratio,
@@ -479,7 +477,7 @@ impl Resource {
         let mut audio = create_audio_manger(&config)?;
         let music = AudioClip::new(fs.load_file(&info.music).await?)?;
         let track_length = music.length();
-        let buffer_size = Some(buffer_size);
+        let buffer_size = Some(1024);
         let sfx_click = audio.create_sfx(res_pack.sfx_click.clone(), buffer_size)?;
         let sfx_drag = audio.create_sfx(res_pack.sfx_drag.clone(), buffer_size)?;
         let sfx_flick = audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size)?;
