@@ -65,7 +65,7 @@ struct RPECtrlEvent {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RPESpeedEvent {
+struct RPESpeedEvent {
     // TODO linkgroup
     start_time: Triple,
     end_time: Triple,
@@ -181,9 +181,11 @@ fn parse_events<T: Tweenable, V: Clone + Into<T>>(
     bezier_map: &BezierMap,
 ) -> Result<Anim<T>> {
     let mut kfs = Vec::new();
-    if !rpe.is_empty() && rpe[0].start_time.beats() != 0.0 {
-    if let Some(default) = default {
-        kfs.push(Keyframe::new(0.0, default, 0));
+    if rpe.len() > 0{
+        if let Some(default) = default {
+            if rpe[0].start_time.beats() != 0.0 {
+                kfs.push(Keyframe::new(0.0, default, 0));
+            }
         }
     }
     for e in rpe {
@@ -234,8 +236,7 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
         let end_time = *pts[i + 1];
         sani.set_time(now_time);
         let speed = sani.now();
-        //msani.set_time(end_time - 1e-4);
-        sani.set_time(end_time);
+        sani.set_time(end_time - 1e-4);
         let end_speed = sani.now();
         if speed.signum() * end_speed.signum() < 0. {
             pts.push(f32::tween(&now_time, &end_time, speed / (speed - end_speed)).not_nan());
@@ -252,8 +253,7 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
         let speed = sani.now();
         // this can affect a lot! do not use end_time...
         // using end_time causes Hold tween (x |-> 0) to be recognized as Linear tween (x |-> x)
-        //nsani.set_time(end_time - 1e-4);
-        sani.set_time(end_time);
+        sani.set_time(end_time - 1e-4);
         let end_speed = sani.now();
         kfs.push(if (speed - end_speed).abs() < EPS {
             Keyframe::new(now_time, height, 2)
@@ -271,6 +271,7 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
             }
         });
         height += (speed + end_speed) * (end_time - now_time) / 2.;
+        //println!("time:{:.5}\tend_time:{}\theight:{}", now_time, end_time, height);
     }
     kfs.push(Keyframe::new(max_time, height, 0));
     Ok(AnimFloat::new(kfs))
@@ -323,16 +324,17 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
                 time,
                 height: note_height,
                 speed: note.speed,
-                end_speed: note.speed,          
+                end_speed: note.speed,
                 start_height: {
                     height.set_time(r.time(&note.start_time));
                     height.now()
                 },
+
                 above: note.above == 1,
                 multiple_hint: false,
                 fake: note.is_fake != 0,
                 judge: JudgeStatus::NotJudged,
-                format: false
+                format: false,
             })
         })
         .collect()
