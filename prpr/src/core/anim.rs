@@ -39,7 +39,7 @@ impl<T: Tweenable> Default for Anim<T> {
 
 impl<T: Tweenable> Anim<T> {
     pub fn new(keyframes: Vec<Keyframe<T>>) -> Self {
-        assert!(!keyframes.is_empty());
+        // assert!(!keyframes.is_empty());
         // assert_eq!(keyframes[0].time, 0.0);
         // assert_eq!(keyframes.last().unwrap().tween, 0);
         Self {
