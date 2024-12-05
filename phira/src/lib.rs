@@ -177,7 +177,7 @@ async fn the_main() -> Result<()> {
         .set_pause_resume_listener(on_pause_resume);
 
     if let Some(me) = &get_data().me {
-        anti_addiction_action("startup", Some(format!("phira-{}", me.id)));
+        anti_addiction_action("startup", Some(format!("Phigros-{}", me.id)));
     }
 
     let font = FontArc::try_from_vec(load_file("font.ttf").await?)?;
@@ -251,7 +251,7 @@ async fn the_main() -> Result<()> {
         let t = tm.real_time();
 
         if t > exit_time + 5. {
-            break;
+            //break;
         }
 
         let fps_now = t as i32;
