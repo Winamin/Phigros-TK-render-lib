@@ -186,7 +186,7 @@ impl Client {
         }
         let resp: Resp = recv_raw(Self::post("/login", &params)).await?.json().await?;
 
-        anti_addiction_action("startup", Some(format!("phira-{}", resp.id)));
+        anti_addiction_action("startup", Some(format!("Phigros-{}", resp.id)));
 
         set_access_token(&resp.token).await?;
         get_data_mut().tokens = Some((resp.token, resp.refresh_token));
