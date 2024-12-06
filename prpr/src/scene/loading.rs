@@ -211,7 +211,7 @@ impl Scene for LoadingScene {
             )
             , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK, main.w * 0.18
         );
-
+        //难度
         draw_text_aligned_fix(ui, self.info.level
             .split_whitespace()
             .next()
