@@ -5,6 +5,7 @@ members = [
 	"phira",
 	"phira-main",
 	"phira-monitor",
+        "prpr-pbc"
 ]
 resolver = "2"
 
