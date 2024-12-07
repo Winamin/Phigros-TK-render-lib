@@ -477,11 +477,10 @@ impl Resource {
         let mut audio = create_audio_manger(&config)?;
         let music = AudioClip::new(fs.load_file(&info.music).await?)?;
         let track_length = music.length();
-        let buffer_size = config.buffer_size;
-        let Tbuffer_size = Some(buffer_size);
-        let sfx_click = audio.create_sfx(res_pack.sfx_click.clone(), Tbuffer_size)?;
-        let sfx_drag = audio.create_sfx(res_pack.sfx_drag.clone(), Tbuffer_size)?;
-        let sfx_flick = audio.create_sfx(res_pack.sfx_flick.clone(), Tbuffer_size)?;
+        let buffer_size = Some(config.buffer_size);
+        let sfx_click = audio.create_sfx(res_pack.sfx_click.clone(), buffer_size)?;
+        let sfx_drag = audio.create_sfx(res_pack.sfx_drag.clone(), buffer_size)?;
+        let sfx_flick = audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size)?;
 
         let aspect_ratio = config.aspect_ratio.unwrap_or(info.aspect_ratio);
         let note_width = config.note_scale * NOTE_WIDTH_RATIO_BASE;
