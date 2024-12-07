@@ -15,7 +15,6 @@ use std::{cell::RefCell, collections::BTreeMap, ops::DerefMut, path::Path, sync:
 
 pub const MAX_SIZE: usize = 64; // needs tweaking
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
-let buffer_size = buffer_size
 
 #[inline]
 fn default_scale() -> f32 {
