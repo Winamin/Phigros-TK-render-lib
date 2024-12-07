@@ -443,6 +443,21 @@ impl GameScene {
                 .color(Color { a: color.a * c.a, ..color })
                 .scale(scale)
                 .draw();
+
+            /*ui.text("Phigros Recorder by HLMC")
+                .pos(0., -top + (1. - p) * 0.2)
+                .anchor(0.5, 1.)
+                .size(0.4)
+                .color(Color::new(1., 1., 1., 0.5))
+                .scale(scale)
+                .draw();
+            ui.text("Phigros Recorder by HLMC")
+                .pos(0., (-top + (1. - p) * 0.2) / res.config.chart_ratio)
+                .anchor(0.5, 1.)
+                .size(0.4 / res.config.chart_ratio)
+                .color(Color::new(1., 1., 1., 0.5))
+                .scale(scale)
+                .draw();*/
         });
         let hw = 0.0015;
         let height = eps * 1.1;

@@ -248,7 +248,7 @@ pub fn draw_image(tex: Texture2D, rect: Rect, scale_type: ScaleType) {
     );
 }
 
-pub const PARALLELOGRAM_SLOPE: f32 = 0.13 / (7. / 13.);
+pub const PARALLELOGRAM_SLOPE: f32 = 0.145 / (7. / 13.);
 
 pub fn draw_parallelogram(rect: Rect, texture: Option<(Texture2D, Rect)>, color: Color, shadow: bool) {
     draw_parallelogram_ex(rect, texture, color, color, shadow);
@@ -432,9 +432,10 @@ pub fn create_audio_manger(config: &Config) -> Result<AudioManager> {
     #[cfg(not(target_os = "android"))]
     {
         use sasa::backend::cpal::*;
-        AudioManager::new(CpalBackend::new(CpalSettings {
+        Ok(AudioManager::new(CpalBackend::new(CpalSettings {
             buffer_size: config.audio_buffer_size,
         }))
+        .expect("Failed to play sound"))
     }
 }
 

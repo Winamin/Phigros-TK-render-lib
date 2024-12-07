@@ -372,11 +372,11 @@ impl Scene for EndingScene {
         gl.pop_model_matrix();
 
         let dy = 0.010;
-        let w = 0.195;
+        let w = 0.202;
         let p = (1. - ran(t, 0.7, 1.8)).powi(7); // retry
         let p2 = (1. - ran(t, 0.7, 1.8)).powi(5); // next
-        let h = 0.12;
-        let s = 0.08;
+        let h = 0.117;
+        let s = 0.10;
         let hs = h * 0.28;
         let params = DrawTextureParams {
             dest_size: Some(vec2(hs * 2., hs * 2.)),
@@ -398,7 +398,7 @@ impl Scene for EndingScene {
         draw_parallelogram(r, None, c, true);
         draw_parallelogram(Rect::new(r.x, r.y, r.w * s, r.h), None, WHITE, false);
         let ct = r.center();
-        draw_texture_ex(*self.icon_proceed, ct.x - hs * 0.9 - r.w * s / 2., ct.y - hs, WHITE, params);
+        draw_texture_ex(*self.icon_proceed, ct.x - hs * 0.8 - r.w * s / 2., ct.y - hs, WHITE, params);
         gl.pop_model_matrix();
         if p <= 0. {
             self.btn_proceed.set(ui, r);
@@ -412,13 +412,19 @@ impl Scene for EndingScene {
         draw_parallelogram(sub, None, color, false);
         draw_text_aligned(
             ui,
-            &if let Some(state) = &self.update_state {
+            /*&if let Some(state) = &self.update_state {
                 format!("{:.2}", state.new_rks)
             } else if let Some(rks) = &self.player_rks {
                 format!("{rks:.2}")
             } else {
                 "".to_owned()
-            },
+            }*/
+            &if let Some(rks) = &self.player_rks {
+                format!("{rks:.2}")
+            } else {
+                "16.00".to_owned()
+            }
+            ,
             sub.center().x,
             sub.center().y - 0.003,
             (0.5, 0.5),
@@ -433,7 +439,6 @@ impl Scene for EndingScene {
             Color::new(0., 0., 0., c.a * alpha),
             false,
         );
-        //let r = draw_illustration(*self.player, 1. - 0.21, main.center().y, 0.12 / (0.076 * 7.), 0.12 / (0.076 * 7.), color, true); //懒得搞了 怎么写方便就怎么写( （烂摊子放这了
         draw_text_aligned(ui, &self.player_name, r.x - 0.01, r.center().y, (1., 0.5), 0.54, color);
 
         let ct = (1. - 0.1 + 0.043, main.center().y - 0.034 + 0.02);
