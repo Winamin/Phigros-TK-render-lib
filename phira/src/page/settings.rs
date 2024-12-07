@@ -627,7 +627,7 @@ struct DebugList {
     chart_debug_btn: DRectButton,
     touch_debug_btn: DRectButton,
     ratio_slider: Slider,
-    zbuffer_silder: Silder,
+    buffer_silder: Silder,
 }
 
 impl DebugList {
