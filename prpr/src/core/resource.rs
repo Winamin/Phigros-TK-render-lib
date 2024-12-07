@@ -15,6 +15,7 @@ use std::{cell::RefCell, collections::BTreeMap, ops::DerefMut, path::Path, sync:
 
 pub const MAX_SIZE: usize = 64; // needs tweaking
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
+let buffer_size = buffer_size
 
 #[inline]
 fn default_scale() -> f32 {
@@ -477,10 +478,11 @@ impl Resource {
         let mut audio = create_audio_manger(&config)?;
         let music = AudioClip::new(fs.load_file(&info.music).await?)?;
         let track_length = music.length();
-        let buffer_size = Some(buffer_size);
-        let sfx_click = audio.create_sfx(res_pack.sfx_click.clone(), buffer_size)?;
-        let sfx_drag = audio.create_sfx(res_pack.sfx_drag.clone(), buffer_size)?;
-        let sfx_flick = audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size)?;
+        let buffer_size = self.buffer_size;
+        let Tbuffer_size = Some(buffer_size);
+        let sfx_click = audio.create_sfx(res_pack.sfx_click.clone(), Tbuffer_size)?;
+        let sfx_drag = audio.create_sfx(res_pack.sfx_drag.clone(), Tbuffer_size)?;
+        let sfx_flick = audio.create_sfx(res_pack.sfx_flick.clone(), Tbuffer_size)?;
 
         let aspect_ratio = config.aspect_ratio.unwrap_or(info.aspect_ratio);
         let note_width = config.note_scale * NOTE_WIDTH_RATIO_BASE;
