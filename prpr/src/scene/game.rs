@@ -191,11 +191,7 @@ impl GameScene {
                     if text.contains("\"META\"") {
                         ChartFormat::Rpe
                     } else {
-                        if text.starts_with("{\"formatVersion\":3") {
-                            ChartFormat::Pgr
-                        } else {
-                            ChartFormat::Pgr1
-                        }
+                        ChartFormat::Pgr
                     }
                 } else {
                     ChartFormat::Pec
