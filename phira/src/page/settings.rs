@@ -627,7 +627,7 @@ struct DebugList {
     chart_debug_btn: DRectButton,
     touch_debug_btn: DRectButton,
     ratio_slider: Slider,
-    buffer_silder: Silder,
+    zbuffer_silder: Silder,
 }
 
 impl DebugList {
@@ -636,7 +636,7 @@ impl DebugList {
             chart_debug_btn: DRectButton::new(),
             touch_debug_btn: DRectButton::new(),
             ratio_slider: Slider::new(0.05..1.0, 0.05),
-            buffer_silder: Slider::new(128..2048, 256),
+            zbuffer_silder: Slider::new(128..2048, 256),
         }
     }
 
@@ -651,7 +651,7 @@ impl DebugList {
             config.chart_debug ^= true;
             return Ok(Some(true));
         }
-        if let wt @ Some(_) = self.buffer_silder.touch(touch, t, &mut config.buffer_size) {
+        if let wt @ Some(_) = self.zbuffer_silder.touch(touch, t, &mut config.qbuffer_size) {
             return Ok(wt);
         }
         if self.touch_debug_btn.touch(touch, t) {
@@ -684,8 +684,8 @@ impl DebugList {
         let data = get_data();
         let config = &data.config;
         item! {
-        render_title(ui, c, tl!("item-buffer_size"), None);
-            self.buffer_slider.render(ui, rr, t,c, config.buffer_size, format!("{:.2}", config.buffer_size));
+            render_title(ui, c, tl!("item-buffer_size"), None);
+            self.zbuffer_slider.render(ui, rr, t,c, config.qbuffer_size, format!("{:.2}", config.qbuffer_size));
         }
         item! {
             render_title(ui, c, tl!("item-chart-debug"), Some(tl!("item-chart-debug-sub")));
