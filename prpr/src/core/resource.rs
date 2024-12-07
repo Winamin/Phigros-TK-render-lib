@@ -451,7 +451,7 @@ impl Resource {
     }
 
     pub async fn new(
-        config: Config,
+        &self,config: Config,
         info: ChartInfo,
         mut fs: Box<dyn FileSystem>,
         player: Option<SafeTexture>,
