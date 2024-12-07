@@ -477,7 +477,7 @@ impl Resource {
         let mut audio = create_audio_manger(&config)?;
         let music = AudioClip::new(fs.load_file(&info.music).await?)?;
         let track_length = music.length();
-        let buffer_size = Some(1024);
+        let buffer_size = Some(qbuffer_size);
         let sfx_click = audio.create_sfx(res_pack.sfx_click.clone(), buffer_size)?;
         let sfx_drag = audio.create_sfx(res_pack.sfx_drag.clone(), buffer_size)?;
         let sfx_flick = audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size)?;
