@@ -1167,7 +1167,9 @@ fn build_audio() -> AudioManager {
     #[cfg(not(target_os = "android"))]
     {
         use sasa::backend::cpal::*;
-        AudioManager::new(CpalBackend::new(CpalSettings::default())).unwrap()
+        AudioManager::new(CpalBackend::new(CpalSettings::default()))
+        //.unwrap()
+        .expect("Failed to play sound")
     }
 }
 
