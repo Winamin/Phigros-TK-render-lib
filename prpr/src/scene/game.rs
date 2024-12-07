@@ -16,7 +16,7 @@ use crate::{
     fs::FileSystem,
     info::{ChartFormat, ChartInfo},
     judge::Judge,
-    parse::{parse_extra, parse_pec, parse_phigros, parse_phigros_fv1, parse_rpe},
+    parse::{parse_extra, parse_pec, parse_phigros, parse_rpe},
     task::Task,
     time::TimeManager,
     ui::{RectButton, Ui},
