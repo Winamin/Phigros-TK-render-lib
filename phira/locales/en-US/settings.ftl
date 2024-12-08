@@ -41,6 +41,7 @@ item-chart-debug-sub = Display line number and orientation
 item-touch-debug = Touch debug mode
 item-touch-debug-sub = Display touch points
 item-buffer_size = Adjust Buffer_size
+item-combo_name = customize COMBO text
 
 load-cali-failed = Failed to load audio
 
