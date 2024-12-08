@@ -84,7 +84,7 @@ impl Default for Config {
             chart_debug: false,
             chart_ratio: 1.0,
             buffer_size: 256.0,
-            combo_name: "COMBO".to_string(), 
+            combo_name: "".to_string(), 
             disable_effect: false,
             double_click_to_pause: true,
             double_hint: true,
