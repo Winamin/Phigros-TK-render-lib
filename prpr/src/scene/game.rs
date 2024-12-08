@@ -401,7 +401,7 @@ impl GameScene {
                     .bottom()
             });
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
-                ui.text(&res.config.combo)
+                ui.text(&res.config.combo_name)
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
                     .size(0.325)
