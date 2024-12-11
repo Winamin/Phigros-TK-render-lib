@@ -42,6 +42,7 @@ item-touch-debug = Touch debug mode
 item-touch-debug-sub = Display touch points
 item-buffer_size = Adjust Buffer_size
 item-combo = customize COMBO text
+item-flid_x = Mirror Mode
 
 load-cali-failed = Failed to load audio
 
