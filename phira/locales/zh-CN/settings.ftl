@@ -43,6 +43,7 @@ item-touch-debug = 触摸调试
 item-touch-debug-sub = 游玩过程中显示触摸点
 item-buffer_size = 调节Buffer_size
 item-combo = 自定义COMBO名称
+item-flid_x = 镜像模式
 
 load-cali-failed = 加载音频失败
 
