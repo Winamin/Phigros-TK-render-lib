@@ -44,7 +44,7 @@ pub struct Config {
     pub chart_ratio: f32,
     pub buffer_size: f32,
     pub combo: String,
-    pub flid_X:bool,
+    pub flid_X: bool,
     pub disable_effect: bool,
     pub double_click_to_pause: bool,
     pub double_hint: bool,
