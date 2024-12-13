@@ -9,3 +9,6 @@ anyhow = "1.0.78"
 async-trait = "0.1.76"
 pollster = "0.3.0"
 prpr = { path = "../prpr" }
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-undefined"]
