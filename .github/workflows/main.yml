@@ -84,19 +84,13 @@ jobs:
          echo "PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
          ls -lR $ANDROID_NDK_HOME
 
-      - name: Build with cargo ndk 
-        run: cargo ndk -t arm64-v8a build -r
-
       - name: Install Rust toolchain for Android
         run: |
           rustup target add aarch64-linux-android
           rustup target add armv7-linux-androideabi
-
-      - name: Build the Rust project 
-        run: cargo build --release
-
-      - name: Build APK
-        run: ./gradlew assembleRelease
+          
+      - name: Build with cargo ndk 
+        run: cargo ndk -t arm64-v8a build -r
 
       - name: Upload APK as an artifact
         uses: actions/upload-artifact@v3
