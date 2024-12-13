@@ -83,7 +83,10 @@ jobs:
          echo "ANDROID_NDK_HOME=$HOME/android-sdk/ndk/android-ndk-r27c" >> $GITHUB_ENV
          echo "PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
          ls -lR $ANDROID_NDK_HOME
-         
+
+      - name: Build with cargo ndk 
+        run: cargo ndk -t arm64-v8a build -r
+
       - name: Install Rust toolchain for Android
         run: |
           rustup target add aarch64-linux-android
