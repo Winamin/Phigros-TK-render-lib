@@ -76,14 +76,16 @@ jobs:
          $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;34.0.0" "ndk;27.2.12479018"
          ls -lR $ANDROID_SDK_ROOT/ndk
 
-      - name: Manually download and set up NDK
-        run: |
-         wget https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O android-ndk.zip
-         unzip android-ndk.zip -d $HOME/android-sdk/ndk
-         echo "ANDROID_NDK_HOME=$HOME/android-sdk/ndk/android-ndk-r27c" >> $GITHUB_ENV
-         echo "PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
-         ls -lR $ANDROID_NDK_HOME
-         
+      - name: Manually download and set up NDK 
+        run: | 
+         sudo apt-get update 
+         sudo apt-get install -y openjdk-11-jdk 
+         wget https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O android-ndk.zip 
+         unzip android-ndk.zip -d $HOME/android-sdk/ndk 
+         echo "ANDROID_NDK_HOME=$HOME/android-sdk/ndk/android-ndk-r27c" >> $GITHUB_ENV 
+         echo "PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV 
+         ls -lR $ANDROID_NDK_HOMETH
+        
       - name: Install cargo-ndk 
         run: cargo install cargo-ndk 
         
