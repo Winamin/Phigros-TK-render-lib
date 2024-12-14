@@ -134,13 +134,13 @@ impl Config {
     }
 
     #[inline]
-    pub fn flip_x(&mut self) -> bool {
-        let flip_x_enabled = self.flid_x.unwrap_or_else(|| self.has_mod(Mods::FLIP_X));
-        
-        if flip_x_enabled {
-            self.mods.insert(Mods::FLIP_X);
-        } else {
-            self.mods.remove(Mods::FLIP_X);
+    pub fn flip_x(&mut self) {
+    let flip_x_enabled = self.flid_x.unwrap_or_else(|| self.has_mod(Mods::FLIP_X));
+    
+    if flip_x_enabled {
+        self.mods.insert(Mods::FLIP_X);
+    } else {
+        self.mods.remove(Mods::FLIP_X);
         }
     }
 }
