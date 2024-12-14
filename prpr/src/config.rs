@@ -44,7 +44,7 @@ pub struct Config {
     pub chart_ratio: f32,
     pub buffer_size: f32,
     pub combo: String,
-    pub flid_x: Option<bool>,
+    pub flid_x: bool,
     pub disable_effect: bool,
     pub double_click_to_pause: bool,
     pub double_hint: bool,
@@ -86,7 +86,7 @@ impl Default for Config {
             chart_ratio: 1.0,
             buffer_size: 256.0,
             combo: "COMBO".to_string(),
-            flid_x: Some(false),
+            flid_x: false,
             disable_effect: false,
             double_click_to_pause: true,
             double_hint: true,
@@ -134,13 +134,7 @@ impl Config {
     }
 
     #[inline]
-    pub fn flip_x(&mut self) {
-    let flip_x_enabled = self.flid_x.unwrap_or_else(|| self.has_mod(Mods::FLIP_X));
-    
-    if flip_x_enabled {
-        self.mods.insert(Mods::FLIP_X);
-    } else {
-        self.mods.remove(Mods::FLIP_X);
-        }
+    pub fn flip_x(&self) -> bool {
+        self.flid_x || self.has_mod(Mods::FLIP_X)
     }
 }
