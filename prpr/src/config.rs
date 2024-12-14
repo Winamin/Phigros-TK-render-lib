@@ -86,7 +86,7 @@ impl Default for Config {
             chart_ratio: 1.0,
             buffer_size: 256.0,
             combo: "COMBO".to_string(),
-            flid_x: Some(flase),
+            flid_x: Some(false),
             disable_effect: false,
             double_click_to_pause: true,
             double_hint: true,
@@ -123,11 +123,6 @@ impl Config {
         }
     }
 
-    pub fn flip_x(&self) -> bool {
-        self.flid_x.unwrap_or(false)
-        }
-    }
-
     #[inline]
     pub fn has_mod(&self, m: Mods) -> bool {
         self.mods.contains(m)
@@ -139,7 +134,13 @@ impl Config {
     }
 
     #[inline]
-    pub fn flip_x(&self) -> bool {
-        self.has_mod(Mods::FLIP_X)
+    pub fn flip_x(&mut self) -> bool {
+        let flip_x_enabled = self.flid_x.unwrap_or_else(|| self.has_mod(Mods::FLIP_X));
+        
+        if flip_x_enabled {
+            self.mods.insert(Mods::FLIP_X);
+        } else {
+            self.mods.remove(Mods::FLIP_X);
+        }
     }
 }
