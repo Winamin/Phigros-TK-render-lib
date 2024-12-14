@@ -86,7 +86,7 @@ impl Default for Config {
             chart_ratio: 1.0,
             buffer_size: 256.0,
             combo: "COMBO".to_string(),
-            flid_x: None,
+            flid_x: Some(flase),
             disable_effect: false,
             double_click_to_pause: true,
             double_hint: true,
@@ -120,6 +120,11 @@ impl Config {
     pub fn init(&mut self) {
         if let Some(flag) = self.autoplay {
             self.mods.set(Mods::AUTOPLAY, flag);
+        }
+    }
+
+    pub fn flip_x(&self) -> bool {
+        self.flid_x.unwrap_or(false)
         }
     }
 
