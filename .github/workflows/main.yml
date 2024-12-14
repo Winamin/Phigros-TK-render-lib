@@ -1,4 +1,4 @@
-name: Build Phigros TK
+name: Build Phira
 
 on:
   push:
