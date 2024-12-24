@@ -452,6 +452,30 @@ impl GameScene {
                 ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
             });
         });
+        self.chart.with_element(ui, res, UIElement::TimeProgress, |ui, color, scale| {
+        let progress = res.time / res.track_length;
+        let bar_width = progress * 2.0;
+        let progress_text = format!("{}%", (progress * 100.).round());
+        let current_time_text = fmt_time(res.time);
+        let total_time_text = fmt_time(res.track_length);
+        let time_text = format!("{}/{}", current_time_text, total_time_text);
+            
+        ui.text(progress_text)
+            .pos(-1. + bar_width / 2., top + height + 0.07)
+            .anchor(0.5, 0.5)
+            .size(0.4)
+            .color(Color { a: color.a * c.a, ..color })
+            .scale(scale)
+            .draw();
+
+        ui.text(time_text)
+            .pos(-1. + bar_width + 0.05, top + height + 0.07)
+            .anchor(0., 0.5)
+            .size(0.4)
+            .color(Color { a: color.a * c.a, ..color })
+            .scale(scale)
+            .draw();
+        });
         Ok(())
     }
 
