@@ -1,5 +1,4 @@
-name: Build Phira
-
+name: Phira
 on:
   push:
     tags:
@@ -7,34 +6,29 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-20.04
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-20.04, windows-latest]
+    runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up JDK 11
-        uses: actions/setup-java@v2
-        with:
-          java-version: '11'
-          distribution: 'temurin'
-
-      - name: Install dependencies
+      - name: Install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-20.04'
+        # You can remove libayatana-appindicator3-dev if you don't use the system tray feature.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev libswresample-dev libavformat-dev libswscale-dev libx11-dev libxext-dev libxv-dev pkg-config
-          sudo apt-get install liblzma-dev 
-          
-      - name: Install AArch64 target 
-        run: rustup target install aarch64-linux-android
-      
-      - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config libswresample-dev
+      - name: Rust setup
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          targets: aarch64-linux-android
-          profile: minimal
+          toolchain: stable-x86_64-gnu
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -46,9 +40,13 @@ jobs:
         with:
           version: 8
 
+      - name: Install frontend dependencies
+        # If you don't have `beforeBuildCommand` configured you may want to build your frontend here too.
+        run: pnpm install # Change this to npm, yarn or pnpm.
+
       - name: Download static-lib
         uses: suisei-cn/actions-download-file@v1.3.0
-        id: download-static-lib
+        id: downlod-static-lib
         with:
           url: "https://files-cf.phira.cn/prpr-avc-static-lib.tar.gz"
           target: ./
@@ -64,58 +62,15 @@ jobs:
           cwd: ./static-lib
           files: prpr-avc-static-lib.tar.gz
 
-      - name: Download and set up Android Studio command line tools
-        run: |
-         wget https://dl.google.com/dl/android/studio/ide-zips/2023.1.1.23/android-studio-2023.1.1.23-linux.tar.gz -O android-studio.tar.gz
-         tar -xzf android-studio.tar.gz -C $HOME
-         echo "ANDROID_STUDIO_HOME=$HOME/android-studio" >> $GITHUB_ENV
-         echo "PATH=$PATH:$ANDROID_STUDIO_HOME/bin" >> $GITHUB_ENV
-         wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip -O commandlinetools.zip
-         mkdir -p $HOME/android-sdk/cmdline-tools
-         unzip commandlinetools.zip -d $HOME/android-sdk/cmdline-tools
-         mv $HOME/android-sdk/cmdline-tools/cmdline-tools $HOME/android-sdk/cmdline-tools/latest
-         echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
-         echo "PATH=$PATH:$HOME/android-sdk/cmdline-tools/latest/bin:$HOME/android-sdk/platform-tools" >> $GITHUB_ENV
-         yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses
-         $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platforms;android-30" "build-tools;34.0.0" "ndk;27.2.12479018"
-         ls -lR $ANDROID_SDK_ROOT/ndk
+      - name: Build the app
+        uses: tauri-apps/tauri-action@v0
 
-      - name: Manually download and set up NDK 
-        run: | 
-         sudo apt-get update 
-         sudo apt-get install -y openjdk-11-jdk 
-         wget https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O android-ndk.zip 
-         unzip android-ndk.zip -d $HOME/android-sdk/ndk 
-         echo "ANDROID_NDK_HOME=$HOME/android-sdk/ndk/android-ndk-r27c" >> $GITHUB_ENV 
-         echo "PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV 
-         ls -lR $ANDROID_NDK_HOMETH
-
-      - name: Set up environment variables for cross-compilation 
-        run: | 
-         echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV 
-         echo "PKG_CONFIG_SYSROOT_DIR=/usr" >> $GITHUB_ENV 
-         echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
-
-      - name: Install cargo-ndk 
-        run: |
-          cargo install cargo-ndk
-          cargo build --target aarch64-linux-android
-        
-      - name: Verify cargo-ndk installation 
-        run: cargo ndk --help
-        
-      - name: Install Rust toolchain for Android
-        run: |
-          rustup target add aarch64-linux-android
-          rustup target add armv7-linux-androideabi
-          rustup target add i686-linux-android
-          rustup target add x86_64-linux-android
-          
-      - name: Build with cargo ndk 
-        run: cargo ndk -t arm64-v8a build -r
-
-      - name: Upload APK as an artifact
-        uses: actions/upload-artifact@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRPR_AVC_LIBS: ${{ github.workspace }}/static-lib
         with:
-          name: phira-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          tagName: ${{ github.ref_name }} # This only works if your workflow triggers on new tags.
+          releaseName: 'Phigros-TK v__VERSION__' # tauri-action replaces \_\_VERSION\_\_ with the app version.
+          releaseBody: 'From GitHub Action'
+          releaseDraft: true
+          prerelease: false
