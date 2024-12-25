@@ -452,14 +452,24 @@ impl GameScene {
                 ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
             });
         });
-        self.chart.with_element(ui, res, UIElement::TimeProgress, |ui, color, scale| {
+        self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
+        let ct = Vector::new(0., top + height / 2.);
+        ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
+            ui.fill_rect(
+                Rect::new(-1., top, dest, height),
+                Color::new(0.45, 0.45, 0.45, 1.),
+            );
+            ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
+        });
+
         let progress = res.time / res.track_length;
         let bar_width = progress * 2.0;
         let progress_text = format!("{}%", (progress * 100.).round());
+
         let current_time_text = fmt_time(res.time);
         let total_time_text = fmt_time(res.track_length);
         let time_text = format!("{}/{}", current_time_text, total_time_text);
-            
+
         ui.text(progress_text)
             .pos(-1. + bar_width / 2., top + height + 0.07)
             .anchor(0.5, 0.5)
@@ -475,7 +485,7 @@ impl GameScene {
             .color(Color { a: color.a * c.a, ..color })
             .scale(scale)
             .draw();
-        });
+         });
         Ok(())
     }
 
