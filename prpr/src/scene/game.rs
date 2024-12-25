@@ -85,7 +85,8 @@ fn fmt_time(t: f32) -> String {
     let mins = t % 60;
     t /= 60;
     let hrs = t % 100;
-    format!("{}{hrs:02}:{mins:02}:{secs:05.2}", if f { "-" } else { "" })
+    format!("{}{mins:02}:{secs:02.0}", if f { "-" } else { "" })
+    //format!("{}{hrs:02}:{mins:02}:{secs:05.2}", if f { "-" } else { "" })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -469,19 +470,20 @@ impl GameScene {
         let current_time_text = fmt_time(res.time);
         let total_time_text = fmt_time(res.track_length);
         let time_text = format!("{}/{}", current_time_text, total_time_text);
+        let font_size = height * 0.5;
 
         ui.text(progress_text)
-            .pos(-1. + bar_width / 2., top + height + 0.07)
+            .pos(-1. + bar_width / 2., top + height / 2.)
             .anchor(0.5, 0.5)
-            .size(0.4)
+            .size(font_size)
             .color(Color { a: color.a * c.a, ..color })
             .scale(scale)
             .draw();
 
         ui.text(time_text)
-            .pos(-1. + bar_width + 0.05, top + height + 0.07)
-            .anchor(0., 0.5)
-            .size(0.4)
+            .pos(-1. + bar_width / 2., top + height / 2. + font_size)
+            .anchor(0.5, 0.5)
+            .size(font_size)
             .color(Color { a: color.a * c.a, ..color })
             .scale(scale)
             .draw();
