@@ -480,7 +480,7 @@ impl GameScene {
             .draw();
 
         ui.text(time_text)
-            .pos(-1. + bar_width / 2., top + height / 2. + font_size)
+            .pos(-1. + bar_width / 2., top + height / 2. + 0.70867)
             .anchor(0.5, 0.5)
             .size(0.70867)
             .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
