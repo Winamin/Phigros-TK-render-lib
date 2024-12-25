@@ -469,20 +469,19 @@ impl GameScene {
 
         let current_time_text = fmt_time(res.time);
         let total_time_text = fmt_time(res.track_length);
-        let time_text = format!("{}", total_time_text);
+        let time_text = format!("{}", current_time_text);
 
         ui.text(progress_text)
-            .pos(-1. + bar_width / 2., top + height / 2.)
-            .anchor(0.5, 0.5)
-            .size(0.007777)
-            .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
-            .scale(scale)
+            .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
+            .anchor(1., 0.)
+            .size(0.4)
+            .color(semi_white(0.7))
             .draw();
 
         ui.text(time_text)
             .pos(-1. + bar_width, top + height / 2.)
-            .anchor(0.08, 0.5)
-            .size(0.70867)
+            .anchor(-0.3, 0.5)
+            .size(0.30867)
             .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
             .scale(scale)
             .draw();
