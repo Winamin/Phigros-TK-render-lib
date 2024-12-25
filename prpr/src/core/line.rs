@@ -22,7 +22,6 @@ pub enum UIElement {
     Score,
     Name,
     Level,
-    TimeProgress,
 }
 
 impl UIElement {
