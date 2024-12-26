@@ -482,7 +482,7 @@ impl GameScene {
         ui.text(time_text)
             .pos(-1. + bar_width - 0.01, top + height / 2.)
             .anchor(1., 0.5)
-            .size(0.07867)
+            .size(0.37867)
             .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
             .scale(scale)
             .draw();
