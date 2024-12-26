@@ -439,8 +439,8 @@ impl GameScene {
                 .scale(scale)
                 .draw()
                 .bottom()
-            });
-        }
+             });
+         }
 
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
                 ui.text(&res.config.combo)
@@ -451,7 +451,7 @@ impl GameScene {
                     .scale(scale)
                     .draw();
             });
-        }
+        
         let lf = -1. + margin;
         let bt = -top - eps * 3.64;
         self.chart.with_element(ui, res, UIElement::Name, |ui, color, scale| {
