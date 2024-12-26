@@ -465,7 +465,7 @@ impl GameScene {
 
         let progress = res.time / res.track_length;
         let bar_width = progress * 2.0;
-        let progress_text = format!("{}%", (progress * 100.).round());
+        let progress_text = format!("{:.3}%", progress * 100.);
 
         let current_time_text = fmt_time(res.time);
         let total_time_text = fmt_time(res.track_length);
@@ -480,7 +480,7 @@ impl GameScene {
 
         ui.text(time_text)
             .pos(-1. + bar_width, top + height / 2.)
-            .anchor(-0.3, 0.5)
+            .anchor(-1., 0.5)
             .size(0.30867)
             .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
             .scale(scale)
