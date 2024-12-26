@@ -112,41 +112,6 @@ enum State {
     Ending,
 }
 
-struct Interpolator {
-    start: f32,
-    end: f32,
-    duration: f32,
-    elapsed: f32,
-    direction: f32,
-}
-
-impl Interpolator {
-    fn new(start: f32, end: f32, duration: f32) -> Self {
-        Self {
-            start,
-            end,
-            duration,
-            elapsed: 0.0,
-            direction: 1.0,
-        }
-    }
-
-    fn update(&mut self, delta_time: f32) {
-        self.elapsed += delta_time * self.direction;
-        if self.elapsed >= self.duration {
-            self.elapsed = self.duration;
-            self.direction = -1.0;
-        } else if self.elapsed <= 0.0 {
-            self.elapsed = 0.0;
-            self.direction = 1.0;
-        }
-    }
-
-    fn get_value(&self) -> f32 {
-        self.start + (self.end - self.start) * (self.elapsed / self.duration)
-    }
-}
-
 pub struct GameScene {
     should_exit: bool,
     next_scene: Option<NextScene>,
@@ -426,24 +391,18 @@ impl GameScene {
                 ui.fill_rect(r, c);
             });
         });
-        let mut interpolator = Interpolator::new(start_pos, end_pos, duration);
         if self.judge.combo() >= 3 {
-        let elapsed_time = get_elapsed_time();
-        interpolator.update(elapsed_time);
-        let current_pos = interpolator.get_value();
-        let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
-            ui.text(self.judge.combo().to_string())
-                .pos(0., current_pos)
-                .anchor(0.5, 0.)
-                .color(Color { a: color.a * c.a, ..color })
-                .scale(scale)
-                .draw()
-                .bottom()
-             });
-         }
-
+            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
+                ui.text(self.judge.combo().to_string())
+                    .pos(0., top + eps * 2. - (1. - p) * 0.4)
+                    .anchor(0.5, 0.)
+                    .color(Color { a: color.a * c.a, ..color })
+                    .scale(scale)
+                    .draw()
+                    .bottom()
+            });
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
-                ui.text(&res.config.combo)
+                ui.text(if res.config.autoplay() { "AUTOPLAY" } else { "COMBO" })
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
                     .size(0.325)
@@ -451,7 +410,7 @@ impl GameScene {
                     .scale(scale)
                     .draw();
             });
-        
+        }
         let lf = -1. + margin;
         let bt = -top - eps * 3.64;
         self.chart.with_element(ui, res, UIElement::Name, |ui, color, scale| {
