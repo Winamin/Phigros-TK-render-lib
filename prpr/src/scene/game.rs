@@ -475,7 +475,7 @@ impl GameScene {
         let integer_part = parts[0];
         let decimal_part = format!(".{}", parts[1]);
         let integer_text = ui.text(integer_part).size(0.4).build();
-        let integer_width = integer_text.measure().w;
+        let integer_width = measure_text_width(ui, integer_part, 0.4);
             
         let current_time_text = fmt_time(res.time);
         let total_time_text = fmt_time(res.track_length);
