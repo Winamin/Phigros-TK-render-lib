@@ -77,6 +77,10 @@ impl SimpleRecord {
     }
 }
 
+fn measure_text_width(ui: &Ui, text: &str, size: f32) -> f32 {
+    ui.text(text).size(size).measure().w
+}
+
 fn fmt_time(t: f32) -> String {
     let f = t < 0.;
     let t = t.abs();
