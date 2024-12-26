@@ -470,7 +470,9 @@ impl GameScene {
 
         let integer_part = parts[0];
         let decimal_part = format!(".{}", parts[1]);
-
+        let integer_text = ui.text(integer_part).size(0.4).build();
+        let integer_width = integer_text.measure().w;
+            
         let current_time_text = fmt_time(res.time);
         let total_time_text = fmt_time(res.track_length);
         let time_text = format!("{}", current_time_text);
@@ -483,7 +485,7 @@ impl GameScene {
             .draw();
 
          ui.text(decimal_part)
-            .pos(1. - margin + ui.text_width(integer_part) * 0.4, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
+            .pos(1. - margin + integer_width, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
             .anchor(0., 0.)
             .size(0.1)
             .color(semi_white(0.7))
