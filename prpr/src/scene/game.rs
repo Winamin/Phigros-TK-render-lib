@@ -469,29 +469,17 @@ impl GameScene {
 
         let progress = res.time / res.track_length;
         let bar_width = progress * 2.0;
-        let progress_text = format!("{:.3}%", progress * 100.);
+        let progress_text = format!("{:.2}%", progress * 100.);
         let parts: Vec<&str> = progress_text.split('.').collect();
-
-        let integer_part = parts[0];
-        let decimal_part = format!(".{}", parts[1]);
-        let integer_text = ui.text(integer_part).size(0.4).build();
-        let integer_width = measure_text_width(ui, integer_part, 0.4);
             
         let current_time_text = fmt_time(res.time);
         let total_time_text = fmt_time(res.track_length);
         let time_text = format!("{}", current_time_text);
 
-        ui.text(integer_part)
+        ui.text(progress_text)
             .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
             .anchor(1., 0.)
             .size(0.4)
-            .color(semi_white(0.7))
-            .draw();
-
-         ui.text(decimal_part)
-            .pos(1. - margin + integer_width, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
-            .anchor(0., 0.)
-            .size(0.1)
             .color(semi_white(0.7))
             .draw();
 
