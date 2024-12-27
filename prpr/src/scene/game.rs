@@ -391,16 +391,19 @@ impl GameScene {
                 ui.fill_rect(r, c);
             });
         });
-        if self.judge.combo() >= 3 {
-            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
-                ui.text(self.judge.combo().to_string())
-                    .pos(0., top + eps * 2. - (1. - p) * 0.4)
-                    .anchor(0.5, 0.)
-                    .color(Color { a: color.a * c.a, ..color })
-                    .scale(scale)
-                    .draw()
-                    .bottom()
+         if self.judge.combo() >= 3 {
+           let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
+           let combo = self.judge.combo();
+           let offset_y = (combo as f32 * std::f32::consts::PI).sin() * 0.1;
+           ui.text(combo.to_string())
+                .pos(0., top + eps * 2. - (1. - p) * 0.4 + offset_y) 
+                .anchor(0.5, 0.)
+                .color(Color { a: color.a * c.a, ..color })
+                .scale(scale)
+                .draw()
+                .bottom()
             });
+        }
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
                 ui.text(if res.config.autoplay() { "AUTOPLAY" } else { "COMBO" })
                     .pos(0., btm + 0.007777)
