@@ -403,7 +403,6 @@ impl GameScene {
                 .draw()
                 .bottom()
             });
-        }
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
                 ui.text(if res.config.autoplay() { "AUTOPLAY" } else { "COMBO" })
                     .pos(0., btm + 0.007777)
