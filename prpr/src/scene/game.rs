@@ -391,7 +391,7 @@ impl GameScene {
                 ui.fill_rect(r, c);
             });
         });
-         if self.judge.combo() >= 3 {
+        if self.judge.combo() >= 3 {
            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
            let combo = self.judge.combo();
            let offset_y = (combo as f32 * std::f32::consts::PI).sin() * 0.1;
