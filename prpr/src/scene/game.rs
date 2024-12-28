@@ -90,13 +90,6 @@ fn fmt_time(t: f32) -> String {
     //format!("{}{hrs:02}:{mins:02}:{secs:05.2}", if f { "-" } else { "" })
 }
 
-fn get_current_time() -> f32 {
-    let start = SystemTime::now();
-    let since_the_epoch = start.duration_since(UNIX_EPOCH)
-        .expect("Time went backwards");
-    since_the_epoch.as_secs_f32()
-}
-
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 extern "C" {
@@ -146,10 +139,6 @@ pub struct GameScene {
     pub last_update_time: f64,
     pause_rewind: Option<f64>,
     pause_first_time: f32,
-    last_score: u32,
-    display_score: f32,
-    animation_start_time: f32,
-    animation_duration: f32,
 
     pub bad_notes: Vec<BadNote>,
 
@@ -299,10 +288,6 @@ impl GameScene {
             last_update_time: 0.,
             pause_rewind: None,
             pause_first_time: f32::NEG_INFINITY,
-            last_score: 0,
-            display_score: 0.0,
-            animation_start_time: get_current_time(),
-            animation_duration: 1.0,
 
             bad_notes: Vec::new(),
 
@@ -330,21 +315,6 @@ impl GameScene {
 
     fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
         let time = tm.now() as f32;
-        let current_score = self.judge.score();
-        let current_time = get_current_time();
-
-        if current_score != self.last_score {
-            self.animation_start_time = current_time;
-            self.last_score = current_score;
-        }
-
-        let elapsed_time = current_time - self.animation_start_time;
-        if elapsed_time < self.animation_duration {
-            let t = elapsed_time / self.animation_duration;
-            self.display_score = (1.0 - t) * self.display_score + t * self.last_score as f32;
-        } else {
-            self.display_score = self.last_score as f32;
-        }
         let p = match self.state {
             State::Starting => {
                 if time <= Self::BEFORE_TIME {
@@ -496,9 +466,12 @@ impl GameScene {
 
         let progress = res.time / res.track_length;
         let bar_width = progress * 2.0;
+            
         let progress_percentage = (progress * 100.).min(100.);
-        let progress_text = format!("{:.4}%", progress_percentage);
-        let parts: Vec<&str> = progress_text.split('.').collect();
+        let truncated_percentage = ((progress_percentage * 10000.0).floor() / 10000.0).min(100.0);
+        let progress_text = format!("{:.4}%", truncated_percentage);
+            
+        let parts: Vec<&str> = progress_text.split('.').collect();    
             
         let current_time_text = fmt_time(res.time);
         let total_time_text = fmt_time(res.track_length);
