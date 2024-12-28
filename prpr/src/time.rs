@@ -22,6 +22,10 @@ impl TimeManager {
         Self::new(1., config.adjust_time)
     }
 
+    pub fn delta_time(&self) -> f64 {
+        self.real_time() - self.start_time
+    }
+    
     pub fn manual(get_time_fn: Box<dyn Fn() -> f64>) -> Self {
         let start_time = get_time_fn();
         Self {
