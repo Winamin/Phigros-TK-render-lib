@@ -23,7 +23,7 @@ impl TimeManager {
     }
 
     pub fn delta_time(&self) -> f32 {
-        self.real_time() - self.start_time
+        (self.real_time() - self.start_time) as f32
     }
     
     pub fn manual(get_time_fn: Box<dyn Fn() -> f64>) -> Self {
