@@ -39,6 +39,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tracing::{debug, warn};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const PAUSE_CLICK_INTERVAL: f32 = 0.7;
 
@@ -87,6 +88,13 @@ fn fmt_time(t: f32) -> String {
     let hrs = t % 100;
     format!("{}{mins:02}:{secs:02.0}", if f { "-" } else { "" })
     //format!("{}{hrs:02}:{mins:02}:{secs:05.2}", if f { "-" } else { "" })
+}
+
+fn get_current_time() -> f32 {
+    let start = SystemTime::now();
+    let since_the_epoch = start.duration_since(UNIX_EPOCH)
+        .expect("Time went backwards");
+    since_the_epoch.as_secs_f32()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -138,7 +146,10 @@ pub struct GameScene {
     pub last_update_time: f64,
     pause_rewind: Option<f64>,
     pause_first_time: f32,
-    last_combo: u32,
+    last_score: u32,
+    display_score: f32,
+    animation_start_time: f32,
+    animation_duration: f32,
 
     pub bad_notes: Vec<BadNote>,
 
@@ -167,7 +178,13 @@ impl GameScene {
     pub const BEFORE_TIME: f32 = 0.7;
     pub const FADEOUT_TIME: f32 = WAIT_TIME + AFTER_TIME + 0.3;
 
-    pub fn new() -> Self { GameScene { last_combo: 0, } }
+    pub fn new() -> Self {
+        GameScene {
+            last_score: 0,
+            display_score: 0.0,
+            animation_start_time: get_current_time(),
+            animation_duration: 1.0,
+    }
 
     pub async fn load_chart_bytes(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<Vec<u8>> {
         if let Ok(bytes) = fs.load_file(&info.chart).await {
@@ -315,9 +332,23 @@ impl GameScene {
         (screen_width() / screen_height()) / self.res.aspect_ratio
     }
 
-    fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
+    fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager, res: &Resources) -> Result<()> {
         let time = tm.now() as f32;
-        let current_combo = self.judge.combo();
+        let current_score = self.judge.score();
+        let current_time = get_current_time();
+
+        if current_score != self.last_score {
+            self.animation_start_time = current_time;
+            self.last_score = current_score;
+        }
+
+        let elapsed_time = current_time - self.animation_start_time;
+        if elapsed_time < self.animation_duration {
+            let t = elapsed_time / self.animation_duration;
+            self.display_score = (1.0 - t) * self.display_score + t * self.last_score as f32;
+        } else {
+            self.display_score = self.last_score as f32;
+        }
         let p = match self.state {
             State::Starting => {
                 if time <= Self::BEFORE_TIME {
@@ -369,7 +400,7 @@ impl GameScene {
         let margin = 0.046;
 
         self.chart.with_element(ui, res, UIElement::Score, |ui, color, scale| {
-            ui.text(format!("{:07}", self.judge.score()))
+            ui.text(format!("{:07}", self.display_score as u32))
                 .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
                 .anchor(1., 0.)
                 .size(0.70867)
@@ -395,20 +426,16 @@ impl GameScene {
                 ui.fill_rect(r, c);
             });
         });
-        if current_combo != self.last_combo {
-            self.last_combo = current_combo;
-            if current_combo >= 3 {
-                self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
-                    let offset_y = (current_combo as f32 * std::f32::consts::PI).sin() * 0.8; 
-                    ui.text(current_combo.to_string())
-                        .pos(0., top + eps * 2. - (1. - p) * 0.4 + offset_y)
-                        .anchor(0.5, 0.)
-                        .color(Color { a: color.a * c.a, ..color })
-                        .scale(scale)
-                        .draw()
-                        .bottom()
-                });
-            }
+        if self.judge.combo() >= 3 {
+            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
+                ui.text(self.judge.combo().to_string())
+                    .pos(0., top + eps * 2. - (1. - p) * 0.4)
+                    .anchor(0.5, 0.)
+                    .color(Color { a: color.a * c.a, ..color })
+                    .scale(scale)
+                    .draw()
+                    .bottom()
+            });
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
                 ui.text(if res.config.autoplay() { "AUTOPLAY" } else { "COMBO" })
                     .pos(0., btm + 0.007777)
