@@ -138,6 +138,7 @@ pub struct GameScene {
     pub last_update_time: f64,
     pause_rewind: Option<f64>,
     pause_first_time: f32,
+    last_combo: u32;
 
     pub bad_notes: Vec<BadNote>,
 
@@ -165,6 +166,8 @@ macro_rules! reset {
 impl GameScene {
     pub const BEFORE_TIME: f32 = 0.7;
     pub const FADEOUT_TIME: f32 = WAIT_TIME + AFTER_TIME + 0.3;
+
+    pub fn new() -> Self { GameScene { last_combo: 0, } }
 
     pub async fn load_chart_bytes(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<Vec<u8>> {
         if let Ok(bytes) = fs.load_file(&info.chart).await {
@@ -314,6 +317,7 @@ impl GameScene {
 
     fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
         let time = tm.now() as f32;
+        let current_combo = self.judge.combo();
         let p = match self.state {
             State::Starting => {
                 if time <= Self::BEFORE_TIME {
@@ -391,18 +395,20 @@ impl GameScene {
                 ui.fill_rect(r, c);
             });
         });
-        if self.judge.combo() >= 3 {
-           let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
-           let combo = self.judge.combo();
-           let offset_y = (combo as f32 * std::f32::consts::PI).sin() * 0.8;
-           ui.text(combo.to_string())
-                .pos(0., top + eps * 2. - (1. - p) * 0.4 + offset_y) 
-                .anchor(0.5, 0.)
-                .color(Color { a: color.a * c.a, ..color })
-                .scale(scale)
-                .draw()
-                .bottom()
-            });
+        if current_combo != self.last_combo {
+            self.last_combo = current_combo;
+            if current_combo >= 3 {
+                self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
+                    let offset_y = (current_combo as f32 * std::f32::consts::PI).sin() * 0.8; 
+                    ui.text(current_combo.to_string())
+                        .pos(0., top + eps * 2. - (1. - p) * 0.4 + offset_y)
+                        .anchor(0.5, 0.)
+                        .color(Color { a: color.a * c.a, ..color })
+                        .scale(scale)
+                        .draw()
+                        .bottom()
+                });
+            }
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
                 ui.text(if res.config.autoplay() { "AUTOPLAY" } else { "COMBO" })
                     .pos(0., btm + 0.007777)
