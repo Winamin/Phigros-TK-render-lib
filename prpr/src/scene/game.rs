@@ -178,15 +178,6 @@ impl GameScene {
     pub const BEFORE_TIME: f32 = 0.7;
     pub const FADEOUT_TIME: f32 = WAIT_TIME + AFTER_TIME + 0.3;
 
-    pub fn new() -> Self {
-        GameScene {
-            last_score: 0,
-            display_score: 0.0,
-            animation_start_time: get_current_time(),
-            animation_duration: 1.0,
-             }
-    }
-
     pub async fn load_chart_bytes(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<Vec<u8>> {
         if let Ok(bytes) = fs.load_file(&info.chart).await {
             return Ok(bytes);
@@ -308,6 +299,10 @@ impl GameScene {
             last_update_time: 0.,
             pause_rewind: None,
             pause_first_time: f32::NEG_INFINITY,
+            last_score: 0,
+            display_score: 0.0,
+            animation_start_time: get_current_time(),
+            animation_duration: 1.0,
 
             bad_notes: Vec::new(),
 
