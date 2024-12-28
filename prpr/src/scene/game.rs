@@ -184,6 +184,7 @@ impl GameScene {
             display_score: 0.0,
             animation_start_time: get_current_time(),
             animation_duration: 1.0,
+             }
     }
 
     pub async fn load_chart_bytes(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<Vec<u8>> {
