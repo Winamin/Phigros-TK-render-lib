@@ -139,8 +139,6 @@ pub struct GameScene {
     pub last_update_time: f64,
     pause_rewind: Option<f64>,
     pause_first_time: f32,
-    last_combo: u32,
-    combo_shake_timer: f32,
 
     pub bad_notes: Vec<BadNote>,
 
@@ -290,8 +288,6 @@ impl GameScene {
             last_update_time: 0.,
             pause_rewind: None,
             pause_first_time: f32::NEG_INFINITY,
-            last_combo: 0,
-            combo_shake_timer: 0.0,
 
             bad_notes: Vec::new(),
 
@@ -338,27 +334,6 @@ impl GameScene {
         let res = &mut self.res;
         let eps = 2e-2 / res.aspect_ratio;
         let top = -1. / res.aspect_ratio;
-
-        let current_combo = self.judge.combo();
-        if current_combo != self.last_combo {
-            self.combo_shake_timer = 0.1; 
-            self.last_combo = current_combo;
-        }
-
-        self.combo_shake_timer = 0.1;
-
-        if self.combo_shake_timer > 0.0 {
-            self.combo_shake_timer -= tm.delta_time();
-        }
-
-        let shake_offset = if self.combo_shake_timer > 0.0 {
-            let intensity = 10.0;
-            let frequency = 30.0;
-            intensity * (self.combo_shake_timer * frequency).sin() as f32
-        } else {
-            0.0
-        };
-
         let pause_w = 0.011;
         let pause_h = pause_w * 3.4;
         let pause_center = Point::new(pause_w * 4.4 - 1., top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
@@ -420,7 +395,7 @@ impl GameScene {
         if self.judge.combo() >= 3 {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
                ui.text(self.judge.combo().to_string())
-                    .pos(0. + shake_offset, top + eps * 2. - (1. - p) * 0.4 + shake_offset)
+                    .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
                     .color(Color { a: color.a * c.a, ..color })
                     .scale(scale)
@@ -428,7 +403,7 @@ impl GameScene {
                     .bottom()
             });
             self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
-                ui.text(if res.config.autoplay() { "AUTOPLAY" } else { "COMBO" })
+                ui.text(&res.config.combo)
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
                     .size(0.325)
