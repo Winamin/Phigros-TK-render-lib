@@ -22,7 +22,7 @@ impl TimeManager {
         Self::new(1., config.adjust_time)
     }
 
-    pub fn delta_time(&self) -> f64 {
+    pub fn delta_time(&self) -> f32 {
         self.real_time() - self.start_time
     }
     
