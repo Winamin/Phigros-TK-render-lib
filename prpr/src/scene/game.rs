@@ -328,7 +328,7 @@ impl GameScene {
         (screen_width() / screen_height()) / self.res.aspect_ratio
     }
 
-    fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager, res: &Resources) -> Result<()> {
+    fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager, res: &Resource) -> Result<()> {
         let time = tm.now() as f32;
         let current_score = self.judge.score();
         let current_time = get_current_time();
