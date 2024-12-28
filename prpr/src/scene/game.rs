@@ -345,13 +345,15 @@ impl GameScene {
             self.last_combo = current_combo;
         }
 
+        self.combo_shake_timer = 0.1;
+
         if self.combo_shake_timer > 0.0 {
             self.combo_shake_timer -= tm.delta_time();
         }
 
         let shake_offset = if self.combo_shake_timer > 0.0 {
-            let intensity = 0.2;
-            let frequency = 1.0;
+            let intensity = 10.0;
+            let frequency = 30.0;
             intensity * (self.combo_shake_timer * frequency).sin() as f32
         } else {
             0.0
