@@ -138,7 +138,7 @@ pub struct GameScene {
     pub last_update_time: f64,
     pause_rewind: Option<f64>,
     pause_first_time: f32,
-    last_combo: u32;
+    last_combo: u32,
 
     pub bad_notes: Vec<BadNote>,
 
