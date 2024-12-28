@@ -467,7 +467,8 @@ impl GameScene {
 
         let progress = res.time / res.track_length;
         let bar_width = progress * 2.0;
-        let progress_text = format!("{:.4}%", progress * 100.);
+        let progress_percentage = (progress * 100.).min(100.);
+        let progress_text = format!("{:.4}%", progress_percentage);
         let parts: Vec<&str> = progress_text.split('.').collect();
             
         let current_time_text = fmt_time(res.time);
