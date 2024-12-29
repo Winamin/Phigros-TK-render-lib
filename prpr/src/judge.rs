@@ -20,6 +20,7 @@ pub const LIMIT_GOOD: f32 = 0.16;
 pub const LIMIT_BAD: f32 = 0.22;
 pub const UP_TOLERANCE: f32 = 0.05;
 pub const DIST_FACTOR: f32 = 0.2;
+pub const DRAG_LENIENT_WINDOW: f32 = 0.03;
 
 const EARLY_OFFSET: f32 = 0.07;
 
@@ -487,26 +488,25 @@ impl Judge {
                     if !click && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. }) {
                         continue;
                     }
-                    let dt = (note.time - t) / spd;
-                    if dt >= closest.3 {
-                        break;
-                    }
-                    let dt = if dt < 0. { (dt + EARLY_OFFSET).min(0.).abs() } else { dt };
-                    let x = &mut note.object.translation.0;
-                    x.set_time(t);
-                    let dist = (x.now() - pos.x).abs();
-                    if dist > X_DIFF_MAX {
-                        continue;
-                    }
-                    if dt
-                        > if matches!(note.kind, NoteKind::Click) {
-                            LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
+                    if matches!(note.kind, NoteKind::Drag) && dt <= DRAG_LENIENT_WINDOW {
+                        if dt <= LIMIT_PERFECT {
+                            closest = (Some((line_id, *id)), dist, dt, dt);
+                        } else if dt <= LIMIT_GOOD {
+                            closest = (Some((line_id, *id)), dist, dt, dt + 0.05);
                         } else {
-                            LIMIT_GOOD
+                            closest = (Some((line_id, *id)), dist, dt, dt + 0.1);
                         }
-                    {
                         continue;
                     }
+
+                    if dt > if matches!(note.kind, NoteKind::Click) {
+                        LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
+                    } else {
+                        LIMIT_GOOD
+                    } {
+                        continue;
+                    }
+
                     let dt = if matches!(note.kind, NoteKind::Flick | NoteKind::Drag) {
                         dt + LIMIT_GOOD
                     } else {
@@ -518,6 +518,7 @@ impl Judge {
                     }
                 }
             }
+
             if let (Some((line_id, id)), _, dt, _) = closest {
                 let line = &mut chart.lines[line_id];
                 if matches!(line.notes[id as usize].kind, NoteKind::Drag) {
@@ -537,7 +538,7 @@ impl Judge {
                                 judgements.push((if dt <= LIMIT_PERFECT { Judgement::Perfect } else { Judgement::Good }, line_id, id, Some(t)));
                             }
                             NoteKind::Hold { .. } => {
-                                play_sfx(&mut res.sfx_click, &res.config);
+                                note.hitsound.play(res);
                                 self.judgements.borrow_mut().push((t, line_id as _, id, Err(dt <= LIMIT_PERFECT)));
                                 note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, t, false, f32::INFINITY);
                             }
@@ -546,7 +547,6 @@ impl Judge {
                     } else {
                         // prevent extra judgements
                         if matches!(note.judge, JudgeStatus::NotJudged) {
-                            // keep the note after bad judgement
                             line.notes[id as usize].judge = JudgeStatus::PreJudge;
                             judgements.push((Judgement::Bad, line_id, id, None));
                         }
