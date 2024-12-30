@@ -191,7 +191,8 @@ impl JudgeLine {
                     JudgeLineKind::Texture(texture, _) => {
                         let mut color = color.unwrap_or(WHITE);
                         color.a = alpha.max(0.0);
-                        let hf = vec2(texture.width() / res.aspect_ratio, texture.height() / res.aspect_ratio);
+                        let hf = vec2(texture.width(), texture.height()); // Sync RPE
+                        //let hf = vec2(texture.width() / res.aspect_ratio, texture.height() / res.aspect_ratio);
                         draw_texture_ex(
                             **texture,
                             -hf.x / 2.,
