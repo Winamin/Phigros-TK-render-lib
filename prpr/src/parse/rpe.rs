@@ -396,7 +396,7 @@ async fn parse_judge_line(r: &mut BpmList, rpe: RPEJudgeLine, max_time: f32, fs:
                 let factor = if rpe.texture == "line.png" {
                     1.
                 } else {
-                    2.57 / RPE_WIDTH /*TODO tweak*/
+                    2. / RPE_WIDTH /*TODO tweak*/
                 };
                 rpe.extended
                     .as_ref()
