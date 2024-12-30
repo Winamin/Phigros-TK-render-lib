@@ -488,22 +488,24 @@ impl Judge {
                     if !click && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. }) {
                         continue;
                     }
-                    if matches!(note.kind, NoteKind::Drag) && dt <= DRAG_LENIENT_WINDOW {
-                        if dt <= LIMIT_PERFECT {
-                            closest = (Some((line_id, *id)), dist, dt, dt);
-                        } else if dt <= LIMIT_GOOD {
-                            closest = (Some((line_id, *id)), dist, dt, dt + 0.05);
-                        } else {
-                            closest = (Some((line_id, *id)), dist, dt, dt + 0.1);
-                        }
+                    let dt = (note.time - t) / spd;
+                    if dt >= closest.3 {
+                        break;
+                    }
+                    let dt = if dt < 0. { (dt + EARLY_OFFSET).min(0.).abs() } else { dt };
+                    let x = &mut note.object.translation.0;
+                    x.set_time(t);
+                    let dist = (x.now() - pos.x).abs();
+                    if dist > X_DIFF_MAX {
                         continue;
                     }
-
-                    if dt > if matches!(note.kind, NoteKind::Click) {
-                        LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
-                    } else {
-                        LIMIT_GOOD
-                    } {
+                    if dt
+                        > if matches!(note.kind, NoteKind::Click) {
+                            LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
+                        } else {
+                            LIMIT_GOOD
+                        }
+                    {
                         continue;
                     }
 
@@ -538,7 +540,7 @@ impl Judge {
                                 judgements.push((if dt <= LIMIT_PERFECT { Judgement::Perfect } else { Judgement::Good }, line_id, id, Some(t)));
                             }
                             NoteKind::Hold { .. } => {
-                                note.hitsound.play(res);
+                                play_sfx(&mut res.sfx_click, &res.config);
                                 self.judgements.borrow_mut().push((t, line_id as _, id, Err(dt <= LIMIT_PERFECT)));
                                 note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, t, false, f32::INFINITY);
                             }
