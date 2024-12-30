@@ -115,15 +115,14 @@ pub struct JudgeLine {
 }
 
 impl JudgeLine {
-    pub fn update(&mut self, res: &mut Resource, tr: Matrix, bpm_list: &mut BpmList) {
-        // self.object.set_time(res.time); // this is done by chart, chart has to calculate transform for us
+    pub fn update(&mut self, res: &mut Resource, tr: Matrix, bpm_list: &mut BpmList, index: usize) {
         let rot = self.object.rotation.now();
         self.height.set_time(res.time);
         let line_height = self.height.now();
         let mut ctrl_obj = self.ctrl_obj.borrow_mut();
         self.cache.update_order.retain(|id| {
             let note = &mut self.notes[*id as usize];
-            note.update(res, rot, &tr, &mut ctrl_obj, line_height, bpm_list);
+            note.update(res, rot, &tr, &mut ctrl_obj, line_height, bpm_list, index);
             !note.dead()
         });
         drop(ctrl_obj);
