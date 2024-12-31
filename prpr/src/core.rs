@@ -76,7 +76,7 @@ pub struct BpmList {
 }
 
 impl BpmList {
-    pub fn new(ranges: &[(f32, f32)]) -> Self {
+    pub fn new(ranges: Vec<(f32, f32)> /*(beat, bpm)*/) -> Self {
         let mut elements = Vec::new();
         let mut time = 0.0;
         let mut last_beats = 0.0;
