@@ -2856,7 +2856,7 @@ dependencies = [
  "libc",
  "lru",
  "lyon",
- "macroquad 0.3.25 (git+https://github.com/2278535805/prpr-macroquad)",
+ "macroquad 0.3.25 (git+https://github.com/Winamin/prpr-macroquad)",
  "miniquad",
  "miniz_oxide 0.7.4",
  "nalgebra",
