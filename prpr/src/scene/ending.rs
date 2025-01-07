@@ -61,6 +61,7 @@ pub struct EndingScene {
 }
 
 impl EndingScene {
+    pub const BPM_WAIT_TIME: f64 = 0.24;
     pub fn new(
         background: SafeTexture,
         illustration: SafeTexture,
@@ -179,7 +180,7 @@ impl Scene for EndingScene {
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
         self.audio.recover_if_needed()?;
-        if tm.now() >= 0.24 && self.target.is_none() && self.bgm.paused() {
+        if tm.now() >= EndingScene::BPM_WAIT_TIME && self.target.is_none() && self.bgm.paused() {
             self.bgm.play()?;
         }
         if RE_UPLOAD.with(|it| std::mem::replace(it.borrow_mut().deref_mut(), false)) && self.upload_task.is_none() {
