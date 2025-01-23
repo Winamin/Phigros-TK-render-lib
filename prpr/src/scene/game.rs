@@ -12,7 +12,7 @@ use crate::{
     bin::{BinaryReader, BinaryWriter},
     config::{Config, Mods},
     core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Point, Resource, UIElement, Vector},
-    ext::{parse_time, screen_aspect, semi_white, RectExt, SafeTexture},
+    ext::{parse_time, screen_aspect, semi_white, first_out_quintic, RectExt, SafeTexture},
     fs::FileSystem,
     info::{ChartFormat, ChartInfo},
     judge::Judge,
@@ -318,16 +318,16 @@ impl GameScene {
         let p = match self.state {
             State::Starting => {
                 if time <= Self::BEFORE_TIME {
-                    1. - (1. - time / Self::BEFORE_TIME).powi(3)
+                    1. - (1. - time / Self::BEFORE_TIME)
                 } else {
                     1.
                 }
             }
             State::BeforeMusic => 1.,
             State::Playing => 1.,
-            State::Ending => {
-                let t = time - self.res.track_length - WAIT_TIME;
-                1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
+            State::Ending | State::Playing => {
+                let t = time - res.track_length;
+                1. - (t / Self::BEFORE_TIME).clamp(0., 1.)
             }
         };
         let c = Color::new(1., 1., 1., self.res.alpha);
@@ -1044,7 +1044,28 @@ impl Scene for GameScene {
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
         let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
-        let vec2_asp = vec2(1. * res.config.chart_ratio, -asp * res.config.chart_ratio);
+        
+        let vp = res.camera.viewport.unwrap_or(ui.viewport);
+        let asp2 = vp.2 as f32 / vp.3 as f32;
+
+        let time = tm.now() as f32;
+        let p = match self.state {
+            State::Starting => {
+                if time < Self::BEFORE_DURATION {
+                    1. - (1. - time / Self::BEFORE_DURATION)
+                } else {
+                    1.
+                }
+            }
+            State::BeforeMusic => 1.,
+            State::Ending | State::Playing => {
+                let t = time - res.track_length;
+                1. - (t / Self::BEFORE_DURATION).clamp(0., 1.)
+            }
+        };
+        let ratio = 1. + (res.config.chart_ratio - 1.) * first_out_quartic(p);
+        let vec2_asp = vec2(1. * ratio, -asp2 * ratio);
+
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
             set_camera(&res.camera);
         }
@@ -1056,7 +1077,8 @@ impl Scene for GameScene {
             .as_ref()
             .map(|it| if msaa { it.input() } else { it.output() })
             .or(res.camera.render_target);
-        push_camera_state();
+
+        let h = 1. / res.aspect_ratio;
         set_camera(&Camera2D {
             zoom: vec2(1., -asp),
             viewport: if res.chart_target.is_some() { None } else { Some(ui.viewport) },
@@ -1064,22 +1086,43 @@ impl Scene for GameScene {
             ..Default::default()
         });
         clear_background(BLACK);
-        draw_background(*res.background);
-        pop_camera_state();
+        if res.config.render_bg {
+            draw_background(*res.background);
+        }
 
+        let vp = res.camera.viewport.unwrap();
         let chart_target_vp = if res.chart_target.is_some() {
-            let vp = res.camera.viewport.unwrap();
             Some((vp.0 - ui.viewport.0, vp.1 - ui.viewport.1, vp.2, vp.3))
         } else {
             res.camera.viewport
         };
+
+        if res.config.chart_ratio >= 1. {
+            let dim_alpha = 0.5;    
+            let dim = Color::new(0.1, 0.1, 0.1, dim_alpha * res.alpha);
+            let x_range = vp.0 as f32 / ui.viewport.2 as f32;
+            draw_rectangle(-1., -h,x_range * 2., h * 2., dim);
+            draw_rectangle(1., -h,-x_range * 2., h * 2., dim);
+            draw_rectangle(x_range * 2. - 1., -h, (1. - x_range * 2.) * 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+        }
+
+        set_camera( &Camera2D {
+            zoom: vec2_asp,
+            viewport: chart_target_vp,
+            ..Default::default()
+        });
+        
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
-        self.gl.quad_gl.viewport(chart_target_vp);
-
-        let h = 1. / res.aspect_ratio;
-        draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
-
+        if res.config.chart_ratio < 1. {
+            draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+        }
         self.chart.render(ui, res);
+
+        set_camera( &Camera2D {
+            zoom: vec2_asp,
+            viewport: chart_target_vp,
+            ..Default::default()
+        });
 
         self.gl.quad_gl.render_pass(
             res.chart_target
@@ -1094,40 +1137,48 @@ impl Scene for GameScene {
         if res.config.particle {
             res.emitter.draw(dt);
         }
+        
         self.ui(ui, tm)?;
-        self.overlay_ui(ui, tm)?;
 
-        if self.mode == GameMode::TweakOffset {
-            push_camera_state();
-            self.gl.quad_gl.viewport(None);
-            set_camera(&Camera2D {
-                zoom: vec2(1., -screen_aspect()),
-                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
-                ..Default::default()
-            });
-            self.tweak_offset(ui, Self::interactive(&self.res, &self.state));
-            pop_camera_state();
-        }
 
         if !self.res.no_effect && !self.effects.is_empty() {
-            push_camera_state();
+            //push_camera_state();
             set_camera(&Camera2D {
-                zoom: vec2_asp,
+                zoom: vec2(1., asp),
                 ..Default::default()
             });
             for e in &self.effects {
                 e.render(&mut self.res);
             }
-            pop_camera_state();
         }
+        
+        {
+            set_camera(&Camera2D {
+                zoom: vec2(1., -asp2),
+                viewport: chart_target_vp,
+                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
+                ..Default::default()
+            });
+            self.overlay_ui(ui, tm)?;
+        }
+
+        if self.mode == GameMode::TweakOffset {
+            set_camera(&Camera2D {
+                zoom: vec2(1., -asp),
+                viewport: None,
+                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
+                ..Default::default()
+            });
+            self.tweak_offset(ui, Self::interactive(&self.res, &self.state), tm);
+        }
+
         if msaa || !self.res.no_effect {
             // render the texture onto screen
             if let Some(target) = &self.res.chart_target {
                 self.gl.flush();
-                push_camera_state();
                 self.gl.quad_gl.viewport(None);
                 set_camera(&Camera2D {
-                    zoom: vec2_asp,
+                    zoom: vec2(1., asp),
                     render_target: self.res.camera.render_target,
                     viewport: Some(ui.viewport),
                     ..Default::default()
@@ -1142,8 +1193,9 @@ impl Scene for GameScene {
                         ..Default::default()
                     },
                 );
-                pop_camera_state();
             }
+        } else {
+            self.gl.flush();
         }
         Ok(())
     }
