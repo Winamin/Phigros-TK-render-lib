@@ -551,7 +551,7 @@ pub fn parse_time(s: &str) -> Option<f32> {
     }
     Some(res)
 }
-pub fn first_out_cubic(t: f32) -> f32 {
+pub fn ease_in_out_cubic(t: f32) -> f32 {
     if t < 0.5 {
         4.0 * t * t * t
     } else {
@@ -559,7 +559,7 @@ pub fn first_out_cubic(t: f32) -> f32 {
         0.5 * t * t * t + 1.0
     }
 }
-pub fn first_out_quartic(t: f32) -> f32 {
+pub fn ease_in_out_quartic(t: f32) -> f32 {
     if t < 0.5 {
         8.0 * t * t * t * t
     } else {
@@ -567,7 +567,7 @@ pub fn first_out_quartic(t: f32) -> f32 {
         1.0 - 0.5 * t * t * t * t
     }
 }
-pub fn first_out_quintic(t: f32) -> f32 {
+pub fn ease_in_out_quintic(t: f32) -> f32 {
     if t < 0.5 {
         16.0 * t * t * t * t * t
     } else {
