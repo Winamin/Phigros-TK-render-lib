@@ -12,7 +12,7 @@ use crate::{
     bin::{BinaryReader, BinaryWriter},
     config::{Config, Mods},
     core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Point, Resource, UIElement, Vector},
-    ext::{parse_time, screen_aspect, semi_white, first_out_quintic, RectExt, SafeTexture},
+    ext::{ease_in_out_quartic, parse_time, screen_aspect, semi_white, RectExt, SafeTexture},
     fs::FileSystem,
     info::{ChartFormat, ChartInfo},
     judge::Judge,
@@ -166,6 +166,7 @@ macro_rules! reset {
 impl GameScene {
     pub const BEFORE_TIME: f32 = 0.7;
     pub const FADEOUT_TIME: f32 = WAIT_TIME + AFTER_TIME + 0.3;
+    pub const BEFORE_DURATION: f32 = 1.2;
 
     pub async fn load_chart_bytes(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<Vec<u8>> {
         if let Ok(bytes) = fs.load_file(&info.chart).await {
@@ -326,7 +327,7 @@ impl GameScene {
             State::BeforeMusic => 1.,
             State::Playing => 1.,
             State::Ending | State::Playing => {
-                let t = time - res.track_length;
+                let t = time - self.res.track_length;
                 1. - (t / Self::BEFORE_TIME).clamp(0., 1.)
             }
         };
@@ -1055,7 +1056,7 @@ impl Scene for GameScene {
                 1. - (t / Self::BEFORE_DURATION).clamp(0., 1.)
             }
         };
-        let ratio = 1. + (res.config.chart_ratio - 1.) * first_in_out_quartic(p);
+        let ratio = 1. + (res.config.chart_ratio - 1.) * ease_in_out_quartic(p);
         let vec2_asp = vec2(1. * ratio, -asp2 * ratio);
 
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
@@ -1091,7 +1092,8 @@ impl Scene for GameScene {
         };
 
         if res.config.chart_ratio >= 1. {
-            let dim_alpha = 0.5;    
+            let dim_alpha = 0.5;
+            //let alpha = res.alpha * (1. - dim_alpha) + dim_alpha;    
             let dim = Color::new(0.1, 0.1, 0.1, dim_alpha * res.alpha);
             let x_range = vp.0 as f32 / ui.viewport.2 as f32;
             draw_rectangle(-1., -h,x_range * 2., h * 2., dim);
@@ -1106,6 +1108,7 @@ impl Scene for GameScene {
         });
         
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
+        //self.gl.quad_gl.viewport(chart_target_vp);
         if res.config.chart_ratio < 1. {
             draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
         }
@@ -1130,8 +1133,13 @@ impl Scene for GameScene {
         if res.config.particle {
             res.emitter.draw(dt);
         }
+        
         self.ui(ui, tm)?;
+
+        //pop_camera_state();
+
         if !self.res.no_effect && !self.effects.is_empty() {
+            //push_camera_state();
             set_camera(&Camera2D {
                 zoom: vec2(1., asp),
                 ..Default::default()
@@ -1139,6 +1147,7 @@ impl Scene for GameScene {
             for e in &self.effects {
                 e.render(&mut self.res);
             }
+            //pop_camera_state();
         }
         
         {
@@ -1150,9 +1159,11 @@ impl Scene for GameScene {
                 ..Default::default()
             });
             self.overlay_ui(ui, tm)?;
+            //pop_camera_state();
         }
 
         if self.mode == GameMode::TweakOffset {
+            //push_camera_state();
             set_camera(&Camera2D {
                 zoom: vec2(1., -asp),
                 viewport: None,
@@ -1160,11 +1171,14 @@ impl Scene for GameScene {
                 ..Default::default()
             });
             self.tweak_offset(ui, Self::interactive(&self.res, &self.state), tm);
+            //pop_camera_state();
         }
 
         if msaa || !self.res.no_effect {
+            // render the texture onto screen
             if let Some(target) = &self.res.chart_target {
                 self.gl.flush();
+                //push_camera_state();
                 self.gl.quad_gl.viewport(None);
                 set_camera(&Camera2D {
                     zoom: vec2(1., asp),
@@ -1182,6 +1196,7 @@ impl Scene for GameScene {
                         ..Default::default()
                     },
                 );
+                //pop_camera_state();
             }
         } else {
             self.gl.flush();
