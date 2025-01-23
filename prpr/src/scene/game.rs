@@ -842,35 +842,27 @@ impl Scene for GameScene {
         let offset = self.offset();
         let time = tm.now() as f32;
         let time = match self.state {
-            State::Starting => {
-                if time >= Self::BEFORE_TIME {
-                    self.res.alpha = 1.;
-                    self.state = State::BeforeMusic;
-                    tm.reset();
-                    tm.seek_to(if self.mode == GameMode::Exercise {
-                        self.exercise_range.start as f64
-                    } else {
-                        offset.min(0.) as f64
-                    });
-                    self.last_update_time = tm.real_time();
-                    if self.first_in && self.mode == GameMode::Exercise {
-                        tm.pause();
-                        self.first_in = false;
-                    }
-                    tm.now() as f32
+        State::Starting => {
+            if time >= Self::BEFORE_DURATION { // wait for animation
+                self.res.alpha = 1.;
+                self.state = State::BeforeMusic;
+                tm.reset();
+                tm.seek_to(self.exercise_range.start as f64);
+                self.last_update_time = tm.real_time();
+                if self.first_in && self.mode == GameMode::Exercise {
+                    tm.pause();
+                    self.first_in = false;
+                }
+                tm.now() as f32
                 } else {
-                    self.res.alpha = 1. - (1. - time / Self::BEFORE_TIME).powi(3);
-                    if self.mode == GameMode::Exercise {
-                        self.exercise_range.start
-                    } else {
-                        offset
-                    }
+                    self.res.alpha = 1. - (1. - time / Self::BEFORE_TIME).clamp(0., 1.).powi(3);
+                    self.exercise_range.start
                 }
             }
             State::BeforeMusic => {
                 if time >= 0.0 {
                     self.music.seek_to(time)?;
-                    if !tm.paused() {
+                    if !tm.paused() && !self.res.config.disable_audio {
                         self.music.play()?;
                     }
                     self.state = State::Playing;
@@ -930,7 +922,7 @@ impl Scene for GameScene {
                         GameMode::Exercise => None,
                     };
                 }
-                self.res.alpha = 1. - (t / AFTER_TIME).min(1.).powi(2);
+                self.res.alpha = 1. - (t / AFTER_TIME).clamp(0., 1.).powi(2);
                 self.res.track_length
             }
         };
@@ -972,8 +964,8 @@ impl Scene for GameScene {
         }
         if Self::interactive(res, &self.state) {
             if is_key_pressed(KeyCode::Left) {
-                res.time -= 1.;
-                let dst = (self.music.position() - 1.).max(0.);
+                res.time -= 2.;
+                let dst = (self.music.position() - 2.).max(0.);
                 self.music.seek_to(dst)?;
                 tm.seek_to(dst as f64);
             }
@@ -1063,7 +1055,7 @@ impl Scene for GameScene {
                 1. - (t / Self::BEFORE_DURATION).clamp(0., 1.)
             }
         };
-        let ratio = 1. + (res.config.chart_ratio - 1.) * first_out_quartic(p);
+        let ratio = 1. + (res.config.chart_ratio - 1.) * ease_in_out_quartic(p);
         let vec2_asp = vec2(1. * ratio, -asp2 * ratio);
 
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
@@ -1079,6 +1071,7 @@ impl Scene for GameScene {
             .or(res.camera.render_target);
 
         let h = 1. / res.aspect_ratio;
+        //push_camera_state();
         set_camera(&Camera2D {
             zoom: vec2(1., -asp),
             viewport: if res.chart_target.is_some() { None } else { Some(ui.viewport) },
@@ -1137,12 +1130,8 @@ impl Scene for GameScene {
         if res.config.particle {
             res.emitter.draw(dt);
         }
-        
         self.ui(ui, tm)?;
-
-
         if !self.res.no_effect && !self.effects.is_empty() {
-            //push_camera_state();
             set_camera(&Camera2D {
                 zoom: vec2(1., asp),
                 ..Default::default()
@@ -1153,6 +1142,7 @@ impl Scene for GameScene {
         }
         
         {
+            //push_camera_state();
             set_camera(&Camera2D {
                 zoom: vec2(1., -asp2),
                 viewport: chart_target_vp,
@@ -1173,7 +1163,6 @@ impl Scene for GameScene {
         }
 
         if msaa || !self.res.no_effect {
-            // render the texture onto screen
             if let Some(target) = &self.res.chart_target {
                 self.gl.flush();
                 self.gl.quad_gl.viewport(None);
