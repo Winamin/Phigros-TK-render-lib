@@ -322,7 +322,7 @@ impl GameScene {
         let p = match self.state {
             State::Starting => {
                 if time <= Self::BEFORE_TIME {
-                    1. - (1. - time / Self::BEFORE_TIME)
+                    1. - (1. - time / Self::BEFORE_TIME).clamp(0., 1.).powi(3)
                 } else {
                     1.
                 }
@@ -331,7 +331,7 @@ impl GameScene {
             State::Playing => 1.,
             State::Ending | State::Playing => {
                 let t = time - self.res.track_length;
-                1. - (t / Self::BEFORE_TIME).clamp(0., 1.)
+                1. - (t / (AFTER_TIME + 0.3)).clamp(0., 1.).powi(2)
             }
         };
         let c = Color::new(1., 1., 1., self.res.alpha);
