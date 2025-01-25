@@ -108,7 +108,6 @@ pub enum GameMode {
 #[derive(Clone)]
 enum State {
     Starting,
-    Draw,
     BeforeMusic,
     Playing,
     Ending,
@@ -147,6 +146,7 @@ pub struct GameScene {
     update_fn: Option<UpdateFn>,
 
     pub touch_points: Vec<(f32, f32)>,
+    line_draw_time: Option<f64>,
 }
 
 macro_rules! reset {
@@ -161,6 +161,7 @@ macro_rules! reset {
         $tm.reset();
         $self.last_update_time = $tm.now();
         $self.state = State::Starting;
+        $self.line_draw_time = Some($tm.now());
     }};
 }
 
@@ -444,7 +445,17 @@ impl GameScene {
         });
         let hw = 0.0015;
         let height = eps * 1.1;
+        let elapsed_time = tm.now() - self.line_draw_time.unwrap_or(0.0);
+        let animation_duration = 0.5;
+        let progress = (elapsed_time / line_draw_time).min(1.0);
+        let initial_dest = 2.0;
+        let final_dest = 2. * res.time / res.track_length;
+        let dest = initial_dest + (final_dest - initial_dest) 
+            
+        /*let hw = 0.0015;
+        let height = eps * 1.1;
         let dest = 2. * res.time / res.track_length;
+        */
         self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
             let ct = Vector::new(0., top + height / 2.);
             ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
@@ -465,6 +476,7 @@ impl GameScene {
             );
             ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
         });
+        
 
         let progress = res.time / res.track_length;
         let bar_width = progress * 2.0;
@@ -1048,17 +1060,8 @@ impl Scene for GameScene {
                 if time < Self::BEFORE_DURATION {
                     1. - (1. - time / Self::BEFORE_DURATION)
                 } else {
-                    self.state = State::Draw;
-                    0.0
+                    1.
                 }
-            }
-            State::Draw => {
-                let Draw = 1.0
-                let progress = (time / expansion_duration).clamp(0.0, 1.0);
-                if progress >= 1.0 {
-                    self.state = State::BeforeMusic;
-                }
-                progress
             }
             State::BeforeMusic => 1.,
             State::Ending | State::Playing => {
@@ -1205,10 +1208,6 @@ impl Scene for GameScene {
             }
         } else {
             self.gl.flush();
-        }
-        if self.state == State::Draw {
-            let expansion_length = p * 2.0;
-            draw_rectangle(-expansion_length / 2.0, -0.05, expansion_length, 0.1, WHITE);
         }
         Ok(())
     }
