@@ -3,6 +3,7 @@ use crate::{fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use tracing::warn;
+use std::cell::RefCell;
 
 #[derive(Default)]
 pub struct ChartExtra {
@@ -29,7 +30,7 @@ pub struct Chart {
 }
 
 impl Chart {
-    pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra, hitsounds: HitSoundMap) -> Self {
+    pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra) -> Self {
         let mut attach_ui = [None; 7];
         let mut order = (0..lines.len())
             .filter(|it| {
