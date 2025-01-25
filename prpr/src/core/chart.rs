@@ -3,7 +3,6 @@ use crate::{fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use tracing::warn;
-use sasa::AudioClip;
 use std::{cell::RefCell, collections::HashMap};
 
 #[derive(Default)]
@@ -19,8 +18,6 @@ pub struct ChartSettings {
     pub hold_partial_cover: bool,
 }
 
-pub type HitSoundMap = HashMap<String, AudioClip>;
-
 pub struct Chart {
     pub offset: f32,
     pub lines: Vec<JudgeLine>,
@@ -30,7 +27,6 @@ pub struct Chart {
 
     pub order: Vec<usize>,
     pub attach_ui: [Option<usize>; 7],
-    pub hitsounds: HitSoundMap,
 }
 
 impl Chart {
