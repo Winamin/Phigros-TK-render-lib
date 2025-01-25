@@ -108,7 +108,7 @@ impl Default for Config {
             chart_ratio: 1.0,
             all_good: false,
             all_bad: false,
-            buffer_size: 256,
+            buffer_size: 256.0,
             disable_effect: false,
             double_click_to_pause: true,
             double_hint: true,
