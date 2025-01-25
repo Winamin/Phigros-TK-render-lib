@@ -20,7 +20,6 @@ pub const LIMIT_GOOD: f32 = 0.16;
 pub const LIMIT_BAD: f32 = 0.18;
 pub const UP_TOLERANCE: f32 = 0.05;
 pub const DIST_FACTOR: f32 = 0.2;
-pub const DRAG_LENIENT_WINDOW: f32 = 0.03;
 
 const EARLY_OFFSET: f32 = 0.07;
 
@@ -47,6 +46,40 @@ fn get_uptime() -> f64 {
     unsafe {
         let process_info: ObjcId = msg_send![class!(NSProcessInfo), processInfo];
         msg_send![process_info, systemUptime]
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum HitSound {
+    None,
+    Click,
+    Flick,
+    Drag,
+    Custom(String),
+}
+
+impl HitSound {
+    pub fn play(&self, res: &mut Resource) {
+        match self {
+            HitSound::None => {}
+            HitSound::Click => play_sfx(&mut res.sfx_click, &res.config),
+            HitSound::Flick => play_sfx(&mut res.sfx_flick, &res.config),
+            HitSound::Drag => play_sfx(&mut res.sfx_drag, &res.config),
+            HitSound::Custom(s) => {
+                if let Some(sfx) = res.extra_sfxs.get_mut(s) {
+                    play_sfx(sfx, &res.config);
+                }
+            }
+        }
+    }
+
+    pub fn default_from_kind(kind: &NoteKind) -> Self {
+        match kind {
+            NoteKind::Click => HitSound::Click,
+            NoteKind::Flick => HitSound::Flick,
+            NoteKind::Drag => HitSound::Drag,
+            NoteKind::Hold { .. } => HitSound::Click,
+        }
     }
 }
 
@@ -477,7 +510,7 @@ impl Judge {
                 continue;
             }
             let t = time_of(touch);
-            let mut closest = (None, X_DIFF_MAX, LIMIT_BAD, LIMIT_BAD + (X_DIFF_MAX / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * DIST_FACTOR);
+            let mut closest = (None, X_DIFF_MAX, LIMIT_BAD, LIMIT_BAD + (X_DIFF_MAX / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * DIST_FACTOR, 0.);
             for (line_id, ((line, pos), (idx, st))) in chart.lines.iter_mut().zip(pos.iter()).zip(self.notes.iter_mut()).enumerate() {
                 let Some(pos) = pos[id] else { continue; };
                 for id in &idx[*st..] {
@@ -492,44 +525,70 @@ impl Judge {
                     if dt >= closest.3 {
                         break;
                     }
-                    let dt = if dt < 0. { (dt + EARLY_OFFSET).min(0.).abs() } else { dt };
+                    // let dt = if dt < 0. { (dt + EARLY_OFFSET).min(0.).abs() } else { dt };
                     let x = &mut note.object.translation.0;
                     x.set_time(t);
-                    let dist = (x.now() - pos.x).abs();
+                    let posx = pos.x;
+                    let dist = (x.now() - posx).abs();
                     if dist > X_DIFF_MAX {
                         continue;
                     }
                     if dt
                         > if matches!(note.kind, NoteKind::Click) {
-                            LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
+                            LIMIT_BAD // LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
                         } else {
                             LIMIT_GOOD
                         }
                     {
                         continue;
                     }
-
                     let dt = if matches!(note.kind, NoteKind::Flick | NoteKind::Drag) {
-                        dt + LIMIT_GOOD
+                        dt.abs().max(LIMIT_GOOD)
                     } else {
                         dt
                     };
                     let key = dt + (dist / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * DIST_FACTOR;
                     if key < closest.3 {
-                        closest = (Some((line_id, *id)), dist, dt, key);
+                        closest = (Some((line_id, *id)), dist, dt, key, posx);
                     }
                 }
             }
-
-            if let (Some((line_id, id)), _, dt, _) = closest {
+            if let (Some((line_id, id)), dist, dt, _, posx) = closest {
+                let unattr_drag = &chart.lines.iter_mut().any(|line| { // Check drag in good range & not flag
+                    line.notes.iter_mut().any(|note| {
+                    let x = &mut note.object.translation.0;
+                    x.set_time(t);
+                    let dist2 = (x.now() - posx).abs();
+                    let dist = (dist2 - dist).abs();
+                    let judge_time = t - note.time;
+                    matches!(note.kind, NoteKind::Drag | NoteKind::Flick) && dist <= X_DIFF_MAX && matches!(note.fake, false) && !note.attr && judge_time >= -LIMIT_GOOD && judge_time <= LIMIT_BAD
+                    })
+                });
                 let line = &mut chart.lines[line_id];
                 if matches!(line.notes[id as usize].kind, NoteKind::Drag) {
-                    debug!("reject by drag");
+                    //debug!("reject by drag");
                     continue;
                 }
                 if click {
+                    if *unattr_drag && dt > LIMIT_PERFECT { // flag drag
+                        for line in &mut chart.lines {
+                            for note in &mut line.notes {
+                                let x = &mut note.object.translation.0;
+                                x.set_time(t);
+                                let dist2 = (x.now() - posx).abs();
+                                let dist = (dist2 - dist).abs();
+                                let judge_time = t - note.time;
+                                if matches!(note.kind, NoteKind::Drag | NoteKind::Flick) && dist <= X_DIFF_MAX && matches!(note.fake, false) && !note.attr && judge_time >= -LIMIT_GOOD && judge_time <= LIMIT_BAD { //LIMIT_PERFECT * 0.25
+                                    note.attr = true;
+                                    // debug!("flag drag");
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     // click & hold
                     let note = &mut line.notes[id as usize];
+                    let dt = dt.abs();
                     if matches!(note.kind, NoteKind::Flick) {
                         continue; // to next loop
                     }
@@ -549,6 +608,7 @@ impl Judge {
                     } else {
                         // prevent extra judgements
                         if matches!(note.judge, JudgeStatus::NotJudged) {
+                            // keep the note after bad judgement
                             line.notes[id as usize].judge = JudgeStatus::PreJudge;
                             judgements.push((Judgement::Bad, line_id, id, None));
                         }
@@ -601,7 +661,7 @@ impl Judge {
                             ));
                         }
                         NoteKind::Hold { .. } => {
-                            play_sfx(&mut res.sfx_click, &res.config);
+                            note.hitsound.play(res);
                             self.judgements.borrow_mut().push((t, line_id as _, id, Err(dt <= LIMIT_PERFECT)));
                             note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, (t - note.time) / spd, false, f32::INFINITY);
                         }
@@ -764,14 +824,7 @@ impl Judge {
                 }
                 _ => false,
             } {
-                if let Some(sfx) = match note.kind {
-                    NoteKind::Click => Some(&mut res.sfx_click),
-                    NoteKind::Drag => Some(&mut res.sfx_drag),
-                    NoteKind::Flick => Some(&mut res.sfx_flick),
-                    _ => None,
-                } {
-                    play_sfx(sfx, &res.config);
-                }
+                note.hitsound.play(res);
             }
         }
         for (line, (idx, st)) in chart.lines.iter().zip(self.notes.iter_mut()) {
@@ -786,7 +839,14 @@ impl Judge {
     }
 
     fn auto_play_update(&mut self, res: &mut Resource, chart: &mut Chart) {
-        let t = res.time;
+        let t = res.time - res.config.judge_offset;
+        let (judge_type, judge_type_hold, judge_time, fx_color) = if res.config.all_bad {
+            (Judgement::Bad, Judgement::Good, LIMIT_BAD, Color::new(0., 0., 0., 0.))
+        } else if res.config.all_good {
+            (Judgement::Good, Judgement::Good, LIMIT_GOOD, res.res_pack.info.fx_good())
+        } else {
+            (Judgement::Perfect, Judgement::Perfect, 0., res.res_pack.info.fx_perfect())
+        };
         //let spd = res.config.speed;
         let mut judgements = Vec::new();
         for (line_id, (line, (idx, st))) in chart.lines.iter_mut().zip(self.notes.iter_mut()).enumerate() {
@@ -808,12 +868,14 @@ impl Judge {
                     break;
                 }
                 note.judge = if matches!(note.kind, NoteKind::Hold { .. }) {
-                    play_sfx(&mut res.sfx_click, &res.config);
+                    if !res.config.disable_audio {
+                        note.hitsound.play(res);
+                    }
                     self.judgements.borrow_mut().push((t, line_id as _, *id, Err(true)));
                     //println!("{}\t{}\t{}", t, note.time, t - note.time);
                     // 都是AutoPlay了为什么还要输出判定时间差
                     //JudgeStatus::Hold(true, t, (t - note.time) / spd, false, f32::INFINITY)
-                    JudgeStatus::Hold(true, t, 0., true, f32::INFINITY)
+                    JudgeStatus::Hold(true, t, judge_time, true, f32::INFINITY)
                 } else {
                     judgements.push((line_id, *id));
                     JudgeStatus::Judged
@@ -827,29 +889,43 @@ impl Judge {
             }
         }
         for (line_id, id) in judgements.into_iter() {
-            self.commit(t, Judgement::Perfect, line_id as _, id, 0.);
-            let (note_transform, note_kind) = {
+            let (note_transform, note_kind, note_hitsound) = {
                 let line = &mut chart.lines[line_id];
                 let note = &mut line.notes[id as usize];
                 let nt = if matches!(note.kind, NoteKind::Hold { .. }) { t } else { note.time };
                 line.object.set_time(nt);
                 note.object.set_time(nt);
-                (note.object.now(res), note.kind.clone())
+                (note.object.now(res), note.kind.clone(), note.hitsound.clone())
             };
             let line = &chart.lines[line_id];
-            res.with_model(line.now_transform(res, &chart.lines) * note_transform, |res| {
-                if !matches!(note_kind, NoteKind::Hold { .. }){
-                    res.emit_at_origin(line.notes[id as usize].rotation(line), res.res_pack.info.fx_perfect())
+            match note_kind {
+                NoteKind::Click => {
+                    self.commit(t, judge_type, line_id as _, id, 0.);
+                    res.with_model(line.now_transform(res, &chart.lines) * note_transform, |res| {
+                        res.emit_at_origin(line.notes[id as usize].rotation(line), fx_color)
+
+                    });
                 }
-            });
-            if let Some(sfx) = match note_kind {
-                NoteKind::Click => Some(&mut res.sfx_click),
-                NoteKind::Drag => Some(&mut res.sfx_drag),
-                NoteKind::Flick => Some(&mut res.sfx_flick),
-                _ => None,
-            } {
-                play_sfx(sfx, &res.config);
+                NoteKind::Hold { .. } => {
+                    self.commit(t, judge_type_hold, line_id as _, id, 0.);
+                }
+                _ => {
+                    self.commit(t, Judgement::Perfect, line_id as _, id, 0.);
+                    res.with_model(line.now_transform(res, &chart.lines) * note_transform, |res| {
+                        res.emit_at_origin(line.notes[id as usize].rotation(line), res.res_pack.info.fx_perfect())
+
+                    });
+                },
+            };
+
+            if !res.config.disable_audio {
+                match note_kind {
+                    NoteKind::Click => if !res.config.all_bad {note_hitsound.play(res)},
+                    NoteKind::Hold { .. } => (),
+                    _ => note_hitsound.play(res),
+                }
             }
+
         }
     }
 
@@ -949,13 +1025,13 @@ pub struct PlayResult {
 
 pub fn icon_index(score: u32, full_combo: bool) -> usize {
     match (score, full_combo) {
+        (x, _) if x >= 1000000 => 7,
+        (_, true) => 6,
         (x, _) if x < 700000 => 0,
         (x, _) if x < 820000 => 1,
         (x, _) if x < 880000 => 2,
         (x, _) if x < 920000 => 3,
         (x, _) if x < 960000 => 4,
-        (1000000, _) => 7,
         (_, false) => 5,
-        (_, true) => 6,
     }
 }
