@@ -863,7 +863,7 @@ impl Scene for GameScene {
             State::BeforeMusic => {
                 if time >= 0.0 {
                     self.music.seek_to(time)?;
-                    if !tm.paused() && !self.res.config.disable_audio {
+                    if !tm.paused() {
                         self.music.play()?;
                     }
                     self.state = State::Playing;
@@ -1072,7 +1072,6 @@ impl Scene for GameScene {
             .or(res.camera.render_target);
 
         let h = 1. / res.aspect_ratio;
-        //push_camera_state();
         set_camera(&Camera2D {
             zoom: vec2(1., -asp),
             viewport: if res.chart_target.is_some() { None } else { Some(ui.viewport) },
@@ -1080,10 +1079,6 @@ impl Scene for GameScene {
             ..Default::default()
         });
         clear_background(BLACK);
-        if res.config.render_bg {
-            draw_background(*res.background);
-        }
-
         let vp = res.camera.viewport.unwrap();
         let chart_target_vp = if res.chart_target.is_some() {
             Some((vp.0 - ui.viewport.0, vp.1 - ui.viewport.1, vp.2, vp.3))
@@ -1170,7 +1165,7 @@ impl Scene for GameScene {
                 render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
                 ..Default::default()
             });
-            self.tweak_offset(ui, Self::interactive(&self.res, &self.state), tm);
+            self.tweak_offset(ui, Self::interactive(&self.res, &self.state));
             //pop_camera_state();
         }
 
