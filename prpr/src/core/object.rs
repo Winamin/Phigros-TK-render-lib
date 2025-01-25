@@ -1,6 +1,6 @@
 use super::{AnimFloat, AnimVector, Color, Matrix, Resource, Vector};
 use macroquad::prelude::*;
-use nalgebra::Rotation2;
+use nalgebra::{Point2, Point3, Rotation2, Vector2, Vector3};
 
 #[derive(Default)]
 pub struct Object {
@@ -67,6 +67,18 @@ impl Object {
     #[inline]
     pub fn now_scale(&self) -> Matrix {
         Matrix::identity().append_nonuniform_scaling(&self.scale.now_with_def(1.0, 1.0))
+    }
+
+    pub fn now_scale_fix(&self, ct: Vector) -> Matrix {
+        let scale = self.scale.now_with_def(1.0, 1.0);
+        Matrix::new_translation(&-ct).append_nonuniform_scaling(&scale).append_translation(&ct)
+    }
+
+    pub fn new_rotation_wrt_point(&self, angle: f32, pt: Vector) -> Matrix {
+        let rot = Rotation2::new(angle);
+        let translation_back = Matrix::new_translation(&pt);
+        let translation_to = Matrix::new_translation(&-pt);
+        translation_back * rot.to_homogeneous() * translation_to
     }
 }
 
