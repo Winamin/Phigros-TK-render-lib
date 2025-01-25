@@ -161,8 +161,7 @@ impl BinaryData for ChartFormat {
             0 => Ok(ChartFormat::Rpe),
             1 => Ok(ChartFormat::Pec),
             2 => Ok(ChartFormat::Pgr),
-            3 => Ok(ChartFormat::Pgr1),
-            4 => Ok(ChartFormat::Pbc),
+            3 => Ok(ChartFormat::Pbc),
             _ => bail!("invalid chart format"),
         }
     }
@@ -173,8 +172,7 @@ impl BinaryData for ChartFormat {
                 ChartFormat::Rpe => 0,
                 ChartFormat::Pec => 1,
                 ChartFormat::Pgr => 2,
-                ChartFormat::Pgr1 => 3,
-                ChartFormat::Pbc => 4,
+                ChartFormat::Pbc => 3,
             }
         )?;
         Ok(())
