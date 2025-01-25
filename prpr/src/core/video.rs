@@ -25,7 +25,7 @@ pub struct Video {
     alpha: Anim<f32>,
     dim: Anim<f32>,
     frame_delta: f64,
-    next_frame: usize,
+    pub next_frame: usize,
     ended: bool,
 }
 
