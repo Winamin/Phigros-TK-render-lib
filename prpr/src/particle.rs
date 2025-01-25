@@ -107,6 +107,7 @@ impl Default for ColorCurve {
 
 #[derive(Debug, Clone)]
 pub struct EmitterConfig {
+    pub max_particles: usize,
     /// If false - particles spawns at position supplied to .draw(), but afterwards lives in current camera coordinate system.
     /// If false particles use coordinate system originated to the emitter draw position
     pub local_coords: bool,
@@ -345,6 +346,7 @@ impl AtlasConfig {
 impl Default for EmitterConfig {
     fn default() -> EmitterConfig {
         EmitterConfig {
+            max_particles: 600000,
             local_coords: false,
             emission_shape: EmissionShape::Point,
             one_shot: false,
@@ -423,13 +425,11 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    const MAX_PARTICLES: usize = 12000;
-
     pub fn new(config: EmitterConfig) -> Emitter {
         let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
 
         // empty, dynamic instance-data vertex buffer
-        let positions_vertex_buffer = Buffer::stream(ctx, BufferType::VertexBuffer, Self::MAX_PARTICLES * std::mem::size_of::<GpuParticle>());
+        let positions_vertex_buffer = Buffer::stream(ctx, BufferType::VertexBuffer, config.max_particles * std::mem::size_of::<GpuParticle>());
 
         let bindings = config.shape.build_bindings(ctx, positions_vertex_buffer, config.texture);
 
@@ -536,6 +536,7 @@ impl Emitter {
                 images: vec![post_processing_pass.texture(ctx)],
             }
         };
+        let max_particles = config.max_particles;
 
         Emitter {
             blend_mode: config.blend_mode,
@@ -547,8 +548,8 @@ impl Emitter {
             pipeline,
             bindings,
             position: vec2(0.0, 0.0),
-            gpu_particles: Vec::with_capacity(Self::MAX_PARTICLES),
-            cpu_counterpart: Vec::with_capacity(Self::MAX_PARTICLES),
+            gpu_particles: Vec::with_capacity(max_particles),
+            cpu_counterpart: Vec::with_capacity(max_particles),
             particles_spawned: 0,
             last_emit_time: 0.0,
             time_passed: 0.0,
@@ -564,8 +565,8 @@ impl Emitter {
         self.mesh_dirty = true;
     }
 
-    fn emit_particle(&mut self, offset: Vec2) {
-        if self.gpu_particles.len() == Self::MAX_PARTICLES {
+    fn emit_particle(&mut self, config: &EmitterConfig, offset: Vec2) {
+        if self.gpu_particles.len() == config.max_particles {
             return;
         }
         let offset = offset + self.config.emission_shape.gen_random_point();
@@ -618,7 +619,7 @@ impl Emitter {
         });
     }
 
-    fn update(&mut self, ctx: &mut Context, dt: f32) {
+    fn update(&mut self, config: &EmitterConfig, ctx: &mut Context, dt: f32) {
         if self.mesh_dirty {
             self.bindings = self
                 .config
@@ -643,7 +644,7 @@ impl Emitter {
                 self.last_emit_time = self.time_passed;
 
                 if self.particles_spawned < self.config.amount as u64 {
-                    self.emit_particle(vec2(0.0, 0.0));
+                    self.emit_particle(config, vec2(0.0, 0.0));
                 }
 
                 if self.gpu_particles.len() >= self.config.amount as usize {
@@ -718,9 +719,9 @@ impl Emitter {
     }
 
     /// Immediately emit N particles, ignoring "emitting" and "amount" params of EmitterConfig
-    pub fn emit(&mut self, pos: Vec2, n: usize) {
+    pub fn emit(&mut self, config: &EmitterConfig, pos: Vec2, n: usize) {
         for _ in 0..n {
-            self.emit_particle(pos);
+            self.emit_particle(config, pos);
             self.particles_spawned += 1;
         }
     }
@@ -786,7 +787,7 @@ impl Emitter {
         }
     }
 
-    pub fn draw(&mut self, pos: Vec2, dt: f32) {
+    pub fn draw(&mut self, config: &EmitterConfig, pos: Vec2, dt: f32) {
         let mut gl = unsafe { get_internal_gl() };
 
         gl.flush();
@@ -795,7 +796,7 @@ impl Emitter {
 
         self.position = pos;
 
-        self.update(ctx, dt);
+        self.update(config, ctx, dt);
 
         self.setup_render_pass(quad_gl, ctx);
         self.perform_render_pass(quad_gl, ctx);
