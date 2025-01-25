@@ -275,7 +275,7 @@ impl GameScene {
             judge,
             gl: unsafe { get_internal_gl() },
             player,
-            line_draw_time: 0.0,
+            line_draw_time: Some(0.5),
             chart_bytes,
             chart_format,
             effects,
@@ -448,7 +448,7 @@ impl GameScene {
         let height = eps * 1.1;
         let elapsed_time = tm.now() - self.line_draw_time.unwrap_or(0.0);
         let animation_duration = 0.5;
-        let progress1 = (elapsed_time / self.line_draw_time).min(1.0);
+        let progress1 = (elapsed_time / self.line_draw_time.unwrap_or(1.0)).min(1.0);
         let initial_dest = 2.0;
         let final_dest = 2. * res.time / res.track_length;
         let dest = initial_dest + (final_dest - initial_dest);
