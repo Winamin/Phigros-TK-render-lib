@@ -108,6 +108,7 @@ pub enum GameMode {
 #[derive(Clone)]
 enum State {
     Starting,
+    Draw,
     BeforeMusic,
     Playing,
     Ending,
@@ -1047,8 +1048,17 @@ impl Scene for GameScene {
                 if time < Self::BEFORE_DURATION {
                     1. - (1. - time / Self::BEFORE_DURATION)
                 } else {
-                    1.
+                    self.state = State::Draw;
+                    0.0
                 }
+            }
+            State::Draw => {
+                let Draw = 1.0
+                let progress = (time / expansion_duration).clamp(0.0, 1.0);
+                if progress >= 1.0 {
+                    self.state = State::BeforeMusic;
+                }
+                progress
             }
             State::BeforeMusic => 1.,
             State::Ending | State::Playing => {
@@ -1195,6 +1205,10 @@ impl Scene for GameScene {
             }
         } else {
             self.gl.flush();
+        }
+        if self.state == State::Draw {
+            let expansion_length = p * 2.0;
+            draw_rectangle(-expansion_length / 2.0, -0.05, expansion_length, 0.1, WHITE);
         }
         Ok(())
     }
