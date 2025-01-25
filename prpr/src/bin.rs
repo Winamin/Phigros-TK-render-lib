@@ -3,7 +3,8 @@ use crate::{
         Anim, AnimVector, BezierTween, BpmList, Chart, ChartExtra, ChartSettings, ClampedTween, CtrlObject, JudgeLine, JudgeLineCache, JudgeLineKind,
         Keyframe, Note, NoteKind, Object, StaticTween, Tweenable, UIElement,
     },
-    judge::JudgeStatus,
+    info::ChartFormat,
+    judge::{HitSound, JudgeStatus},
     parse::process_lines,
 };
 use anyhow::{bail, Result};
@@ -11,6 +12,7 @@ use byteorder::{LittleEndian as LE, ReadBytesExt, WriteBytesExt};
 use macroquad::{prelude::Color, texture::Texture2D};
 use std::{
     cell::RefCell,
+    collections::HashMap,
     io::{Read, Write},
     ops::Deref,
     rc::Rc,
@@ -121,6 +123,18 @@ impl BinaryData for u8 {
     }
 }
 
+impl BinaryData for [f32; 2] {
+    fn read_binary<R: Read>(r: &mut BinaryReader<R>) -> Result<Self> {
+        Ok([r.read()?, r.read()?])
+    }
+
+    fn write_binary<W: Write>(&self, w: &mut BinaryWriter<W>) -> Result<()> {
+        w.write_val(self[0])?;
+        w.write_val(self[1])?;
+        Ok(())
+    }
+}
+
 impl BinaryData for i32 {
     fn read_binary<R: Read>(r: &mut BinaryReader<R>) -> Result<Self> {
         Ok(r.0.read_i32::<LE>()?)
@@ -138,6 +152,32 @@ impl BinaryData for bool {
 
     fn write_binary<W: Write>(&self, w: &mut BinaryWriter<W>) -> Result<()> {
         Ok(w.0.write_u8(if *self { 1 } else { 0 })?)
+    }
+}
+
+impl BinaryData for ChartFormat {
+    fn read_binary<R: Read>(r: &mut BinaryReader<R>) -> Result<Self> {
+        match r.read::<u8>()? {
+            0 => Ok(ChartFormat::Rpe),
+            1 => Ok(ChartFormat::Pec),
+            2 => Ok(ChartFormat::Pgr),
+            3 => Ok(ChartFormat::Pgr1),
+            4 => Ok(ChartFormat::Pbc),
+            _ => bail!("invalid chart format"),
+        }
+    }
+
+    fn write_binary<W: Write>(&self, w: &mut BinaryWriter<W>) -> Result<()> {
+        w.write_val(
+            match self {
+                ChartFormat::Rpe => 0,
+                ChartFormat::Pec => 1,
+                ChartFormat::Pgr => 2,
+                ChartFormat::Pgr1 => 3,
+                ChartFormat::Pbc => 4,
+            }
+        )?;
+        Ok(())
     }
 }
 
@@ -303,27 +343,30 @@ impl BinaryData for CtrlObject {
 
 impl BinaryData for Note {
     fn read_binary<R: Read>(r: &mut BinaryReader<R>) -> Result<Self> {
+        let kind = match r.read::<u8>()? {
+            0 => NoteKind::Click,
+            1 => NoteKind::Hold {
+                end_time: r.read()?,
+                end_height: r.read()?,
+                end_speed: if r.read()? { r.read::<f32>()? } else { 1. },
+            },
+            2 => NoteKind::Flick,
+            3 => NoteKind::Drag,
+            _ => bail!("invalid note kind"),
+        };
+        let hitsound = HitSound::default_from_kind(&kind);
         Ok(Self {
             object: r.read()?,
-            kind: match r.read::<u8>()? {
-                0 => NoteKind::Click,
-                1 => NoteKind::Hold {
-                    end_time: r.read()?,
-                    end_height: r.read()?,
-                },
-                2 => NoteKind::Flick,
-                3 => NoteKind::Drag,
-                _ => bail!("invalid note kind"),
-            },
+            kind,
+            hitsound,
             time: r.time()?,
             height: r.read()?,
             speed: if r.read()? { r.read::<f32>()? } else { 1. },
-            end_speed: if r.read()? { r.read::<f32>()? } else { 1. },
-            start_height: r.read()?,
             above: r.read()?,
             multiple_hint: false,
             fake: r.read()?,
             judge: JudgeStatus::NotJudged,
+            attr: false,
             format: r.read()?,
         })
     }
@@ -334,10 +377,11 @@ impl BinaryData for Note {
             NoteKind::Click => {
                 w.write_val(0_u8)?;
             }
-            NoteKind::Hold { end_time, end_height } => {
+            NoteKind::Hold { end_time, end_height, end_speed } => {
                 w.write_val(1_u8)?;
                 w.write_val(end_time)?;
                 w.write_val(end_height)?;
+                w.write_val(end_speed)?;
             }
             NoteKind::Flick => w.write_val(2_u8)?,
             NoteKind::Drag => w.write_val(3_u8)?,
@@ -374,6 +418,7 @@ impl BinaryData for JudgeLine {
             0 => None,
             x => Some(x as usize - 1),
         };
+        let anchor = r.read()?;
         let show_below = r.read()?;
         let cache = JudgeLineCache::new(&mut notes);
         let attach_ui = UIElement::from_u8(r.read()?);
@@ -387,6 +432,7 @@ impl BinaryData for JudgeLine {
             notes,
             color,
             parent,
+            anchor,
             show_below,
 
             attach_ui,
@@ -413,6 +459,9 @@ impl BinaryData for JudgeLine {
             JudgeLineKind::Paint(events, _) => {
                 w.write_val(3_u8)?;
                 w.write(events)?;
+            }
+            JudgeLineKind::TextureGif(..) => {
+                bail!("gif texture binary not supported");
             }
         }
         w.write(&self.height)?;
@@ -452,7 +501,7 @@ impl BinaryData for Chart {
         let mut lines = r.array()?;
         process_lines(&mut lines);
         let settings = r.read()?;
-        Ok(Chart::new(offset, lines, BpmList::new(vec![(0., 60.)]), settings, ChartExtra::default()))
+        Ok(Chart::new(offset, lines, BpmList::new(vec![(0., 60.)]), settings, ChartExtra::default(), HashMap::new()))
     }
 
     fn write_binary<W: Write>(&self, w: &mut BinaryWriter<W>) -> Result<()> {
