@@ -3,7 +3,8 @@ use crate::{fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use tracing::warn;
-use std::cell::RefCell;
+use sasa::AudioClip;
+use std::{cell::RefCell, collections::HashMap};
 
 #[derive(Default)]
 pub struct ChartExtra {
@@ -18,6 +19,8 @@ pub struct ChartSettings {
     pub hold_partial_cover: bool,
 }
 
+pub type HitSoundMap = HashMap<String, AudioClip>;
+
 pub struct Chart {
     pub offset: f32,
     pub lines: Vec<JudgeLine>,
@@ -27,10 +30,11 @@ pub struct Chart {
 
     pub order: Vec<usize>,
     pub attach_ui: [Option<usize>; 7],
+    pub hitsounds: HitSoundMap,
 }
 
 impl Chart {
-    pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra) -> Self {
+    pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra, hitsounds: HitSoundMap) -> Self {
         let mut attach_ui = [None; 7];
         let mut order = (0..lines.len())
             .filter(|it| {
@@ -116,6 +120,7 @@ impl Chart {
         for line in &mut self.lines {
             line.object.set_time(res.time);
         }
+        // TODO optimize
         let trs = self.lines.iter().map(|it| it.now_transform(res, &self.lines)).collect::<Vec<_>>();
         let mut guard = self.bpm_list.borrow_mut();
         for (index, (line, tr)) in self.lines.iter_mut().zip(trs).enumerate() {
@@ -153,13 +158,17 @@ impl Chart {
                 }
             }
             if !res.no_effect {
+                //push_camera_state();
                 set_camera(&Camera2D {
                     zoom: vec2_asp2,
+                    //render_target: res.camera.render_target,
+                    //viewport: Some(ui.viewport),
                     ..Default::default()
                 });
                 for effect in &self.extra.effects {
                     effect.render(res);
                 }
+                //pop_camera_state();
             }
         });
     }
