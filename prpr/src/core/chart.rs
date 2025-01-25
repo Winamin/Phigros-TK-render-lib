@@ -34,10 +34,11 @@ pub struct Chart {
 }
 
 impl Video {
-    pub fn reset_next_frame(&mut self) {
-        self.next_frame = 0;
+    pub fn set_next_frame(&mut self, value: u32) {
+        self.next_frame = value;
     }
 }
+
 impl Chart {
     pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra, hitsounds: HitSoundMap) -> Self {
         let mut attach_ui = [None; 7];
