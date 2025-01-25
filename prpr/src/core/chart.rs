@@ -3,7 +3,6 @@ use crate::{fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use tracing::warn;
-use std::{cell::RefCell, collections::HashMap};
 
 #[derive(Default)]
 pub struct ChartExtra {
