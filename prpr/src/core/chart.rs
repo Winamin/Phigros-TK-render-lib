@@ -33,6 +33,11 @@ pub struct Chart {
     pub hitsounds: HitSoundMap,
 }
 
+impl Video {
+    pub fn reset_next_frame(&mut self) {
+        self.next_frame = 0;
+    }
+}
 impl Chart {
     pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra, hitsounds: HitSoundMap) -> Self {
         let mut attach_ui = [None; 7];
@@ -112,7 +117,7 @@ impl Chart {
             line.cache.reset(&mut line.notes);
         }
         for video in &mut self.extra.videos {
-            video.next_frame = 0;
+            video.reset_next_frame();
         }
     }
 
