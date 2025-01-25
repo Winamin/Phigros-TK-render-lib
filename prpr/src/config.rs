@@ -46,6 +46,7 @@ pub struct Config {
     pub all_good: bool,
     pub all_bad: bool,
     pub buffer_size: f32,
+    pub flid_x: bool,
     pub disable_effect: bool,
     pub double_click_to_pause: bool,
     pub double_hint: bool,
@@ -109,6 +110,7 @@ impl Default for Config {
             all_good: false,
             all_bad: false,
             buffer_size: 256.0,
+            flid_x: false,
             disable_effect: false,
             double_click_to_pause: true,
             double_hint: true,
@@ -178,6 +180,6 @@ impl Config {
 
     #[inline]
     pub fn flip_x(&self) -> bool {
-        self.has_mod(Mods::FLIP_X)
+        self.flid_x || self.has_mod(Mods::FLIP_X)
     }
 }
