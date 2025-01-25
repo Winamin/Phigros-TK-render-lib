@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub static TIPS: Lazy<Vec<String>> = Lazy::new(|| 
     include_str!("tips.txt").split('\n')
     //.map(str::to_owned)
-    .map(|s| format!("Tip: {}", s))
+    .map(|s| format!("{}", s))
     .collect());
 
 bitflags! {
@@ -18,7 +18,7 @@ bitflags! {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, Default, Debug)]
 #[serde(rename_all = "camelCase")]
 pub enum ChallengeModeColor {
     White,
@@ -26,6 +26,7 @@ pub enum ChallengeModeColor {
     Blue,
     Red,
     Golden,
+    #[default] 
     Rainbow,
 }
 
@@ -42,9 +43,8 @@ pub struct Config {
     pub challenge_rank: u32,
     pub chart_debug: bool,
     pub chart_ratio: f32,
-    pub buffer_size: f32,
-    pub combo: String,
-    pub flid_x: bool,
+    pub all_good: bool,
+    pub all_bad: bool,
     pub disable_effect: bool,
     pub double_click_to_pause: bool,
     pub double_hint: bool,
@@ -68,9 +68,30 @@ pub struct Config {
     pub volume_music: f32,
     pub volume_sfx: f32,
     pub volume_bgm: f32,
+    pub watermark: String,
+    pub roman: bool,
+    pub chinese: bool,
+    pub combo: String,
+    pub difficulty: String,
+    pub phira_mode: bool,
+    pub disable_loading: bool,
 
     // for compatibility
+    pub hires: bool,
     pub autoplay: Option<bool>,
+    pub disable_audio: bool,
+    pub judge_offset: f32,
+
+    pub render_line: bool,
+    pub render_line_extra: bool,
+    pub render_note: bool,
+    pub render_ui_pause: bool,
+    pub render_ui_score: bool,
+    pub render_ui_combo: bool,
+    pub render_ui_bar: bool,
+    pub render_bg: bool,
+
+    pub max_particles: usize,
 }
 
 impl Default for Config {
@@ -80,13 +101,12 @@ impl Default for Config {
             aggressive: false,
             aspect_ratio: None,
             audio_buffer_size: None,
-            challenge_color: ChallengeModeColor::Golden,
+            challenge_color: ChallengeModeColor::Rainbow,
             challenge_rank: 45,
             chart_debug: false,
             chart_ratio: 1.0,
-            buffer_size: 256.0,
-            combo: "COMBO".to_string(),
-            flid_x: false,
+            all_good: false,
+            all_bad: false,
             disable_effect: false,
             double_click_to_pause: true,
             double_hint: true,
@@ -100,7 +120,7 @@ impl Default for Config {
             offline_mode: false,
             offset: 0.,
             particle: true,
-            player_name: "Link".to_string(),
+            player_name: "Guest".to_string(),
             player_rks: 15.,
             res_pack_path: None,
             sample_count: 1,
@@ -110,8 +130,29 @@ impl Default for Config {
             volume_music: 1.,
             volume_sfx: 1.,
             volume_bgm: 1.,
+            watermark: "".to_string(),
+            roman: false,
+            chinese: false,
+            combo: "COMBO".to_string(),
+            difficulty: "".to_string(),
+            phira_mode: false,
+            disable_loading: false,
 
+            hires: false,
             autoplay: None,
+            disable_audio: false,
+            judge_offset: 0.,
+
+            render_line: true,
+            render_line_extra: true,
+            render_note: true,
+            render_ui_pause: true,
+            render_ui_score: true,
+            render_ui_combo: true,
+            render_ui_bar: true,
+            render_bg: true,
+
+            max_particles: 600000,
         }
     }
 }
@@ -135,6 +176,6 @@ impl Config {
 
     #[inline]
     pub fn flip_x(&self) -> bool {
-        self.flid_x || self.has_mod(Mods::FLIP_X)
+        self.has_mod(Mods::FLIP_X)
     }
 }
