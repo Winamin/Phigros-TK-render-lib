@@ -71,7 +71,6 @@ pub struct Config {
     pub volume_bgm: f32,
     pub combo: String,
     pub difficulty: String,
-    pub phira_mode: bool,
     pub disable_loading: bool,
     pub show_acc: bool,
 
