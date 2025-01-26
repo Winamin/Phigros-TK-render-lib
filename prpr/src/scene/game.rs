@@ -378,14 +378,6 @@ impl GameScene {
                 .scale(scale)
                 .draw();
         });
-            ui.text(format!("{:07}", self.judge.score()))
-                .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
-                .anchor(1., 0.)
-                .size(0.70867)
-                .color(Color { a: color.a * c.a, ..color })
-                .scale(scale)
-                .draw();
-        });
         if res.config.show_acc {
             ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
                 .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
