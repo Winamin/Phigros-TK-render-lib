@@ -73,6 +73,7 @@ pub struct Config {
     pub difficulty: String,
     pub phira_mode: bool,
     pub disable_loading: bool,
+    pub show_acc: bool,
 
     // for compatibility
     pub autoplay: Option<bool>,
@@ -131,6 +132,7 @@ impl Default for Config {
             volume_bgm: 1.,
             combo: "COMBO".to_string(),
             difficulty: "".to_string(),
+            show_acc: false,
             disable_loading: false,
 
             autoplay: None,
