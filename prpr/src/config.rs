@@ -124,7 +124,6 @@ impl Default for Config {
             player_rks: 15.,
             res_pack_path: None,
             sample_count: 1,
-            show_acc: false,
             speed: 1.,
             touch_debug: false,
             volume_music: 1.,
