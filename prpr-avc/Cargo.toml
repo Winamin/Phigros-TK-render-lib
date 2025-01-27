@@ -8,3 +8,8 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.71"
 tracing = "0.1.37"
+
+[package.metadata.ffmpeg]
+version = "4.4"
+lib_dir = "C:\\msys64\\mingw64\\lib"
+include_dir = "C:\\msys64\\mingw64\\include"
