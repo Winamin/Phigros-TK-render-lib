@@ -7,4 +7,8 @@ fn main() {
     println!("cargo:rustc-link-search={libs_path}");
     println!("cargo:rustc-link-lib=z");
     println!("cargo:rerun-if-changed={libs_path}");
+    println!("cargo:rustc-link-search=native=C:\\msys64\\mingw64\\lib");
+    println!("cargo:rustc-link-lib=avformat");
+    println!("cargo:rustc-link-lib=avcodec");
+    println!("cargo:rustc-link-lib=avutil");
 }
