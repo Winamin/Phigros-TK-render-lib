@@ -11,7 +11,7 @@ use super::{
 use crate::{
     bin::{BinaryReader, BinaryWriter},
     config::{Config, Mods},
-    core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Point, Resource, UIElement, Vector},
+    core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Point, Resource, UIElement, Vector, Matrix},
     ext::{ease_in_out_quartic, parse_time, screen_aspect, semi_white, RectExt, SafeTexture},
     fs::FileSystem,
     info::{ChartFormat, ChartInfo},
