@@ -78,6 +78,7 @@ pub struct Config {
     pub autoplay: Option<bool>,
     pub disable_audio: bool,
     pub judge_offset: f32,
+    pub phira_mode: bool,
 
     pub render_line: bool,
     pub render_line_extra: bool,
@@ -136,6 +137,7 @@ impl Default for Config {
             autoplay: None,
             disable_audio: false,
             judge_offset: 0.,
+            phira_mode:false,
 
             render_line: true,
             render_line_extra: true,
