@@ -385,7 +385,7 @@ impl GameScene {
                 .color(semi_white(0.7))
                 .draw();
         }
-        self.chart.with_element(ui, res, UIElement::Pause, |ui, color, scale| {
+        self.chart.with_element(ui, res, UIElement::Pause, |ui, color: Color, scale| {
             let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
             let ct = pause_center.coords;
             let c = Color { a: color.a * c.a, ..color };
