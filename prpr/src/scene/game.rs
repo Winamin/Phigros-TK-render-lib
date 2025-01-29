@@ -385,7 +385,7 @@ impl GameScene {
                 .color(semi_white(0.7))
                 .draw();
         }
-        self.chart.with_element(ui, res, UIElement::Pause, |ui: &mut Ui, color: Color, scale| {
+        self.chart.with_element(ui, res, UIElement::Pause, |ui, color, scale| {
             let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
             let ct = pause_center.coords;
             let c = Color { a: color.a * c.a, ..color };
@@ -396,7 +396,7 @@ impl GameScene {
             });
         });
         if self.judge.combo() >= 3 {
-            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui: &mut Ui, color: Color, scale| {
+            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
                ui.text(self.judge.combo().to_string())
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
@@ -405,7 +405,7 @@ impl GameScene {
                     .draw()
                     .bottom()
             });
-            self.chart.with_element(ui, res, UIElement::Combo, |ui: &mut Ui, color: Color, scale| {
+            self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
                 ui.text(&res.config.combo)
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
@@ -417,7 +417,7 @@ impl GameScene {
         }
         let lf = -1. + margin;
         let bt = -top - eps * 3.64;
-        self.chart.with_element(ui, res, UIElement::Name, |ui: &mut Ui, color: Color, scale| {
+        self.chart.with_element(ui, res, UIElement::Name, |ui, color, scale| {
             let mut text_size = 0.5;
             let mut text = ui.text(&res.info.name).pos(lf, bt + (1. - p) * 0.4).anchor(0., 1.).size(text_size);
             let max_width = 0.9;
@@ -434,7 +434,7 @@ impl GameScene {
                 .scale(scale)
                 .draw();
         });
-        self.chart.with_element(ui, res, UIElement::Level, |ui: &mut Ui, color: Color, scale| {
+        self.chart.with_element(ui, res, UIElement::Level, |ui, color, scale| {
             ui.text(&res.info.level)
                 .pos(-lf, bt + (1. - p) * 0.4)
                 .anchor(1., 1.)
@@ -456,7 +456,7 @@ impl GameScene {
         let height = eps * 1.1;
         let dest = 2. * res.time / res.track_length;
         */
-        self.chart.with_element(ui, res, UIElement::Bar, |ui: &mut Ui, color: Color, scale| {
+        self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
             let ct = Vector::new(0., top + height / 2.);
             ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
                 ui.fill_rect(
@@ -467,7 +467,7 @@ impl GameScene {
                 ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
             });
         });
-        self.chart.with_element(ui, res, UIElement::Bar, |ui: &mut Ui, color: Color, scale| {
+        self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
         let ct = Vector::new(0., top + height / 2.);
         ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
             ui.fill_rect(
