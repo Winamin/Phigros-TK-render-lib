@@ -137,7 +137,7 @@ impl Default for Config {
             autoplay: None,
             disable_audio: false,
             judge_offset: 0.,
-            phira_mode:false,
+            phira_mode: false,
 
             render_line: true,
             render_line_extra: true,
