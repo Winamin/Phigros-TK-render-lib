@@ -369,12 +369,13 @@ impl GameScene {
 
         let margin = 0.046;
 
-        self.chart.with_element(ui, res, UIElement::Pause, None, None, |ui: &mut Ui, color: Color| {
+        self.chart.with_element(ui, res, UIElement::Pause, |ui: &mut Ui, color: Color, scale: &lyon::geom::Scale| {
             ui.text(format!("{:07}", self.judge.score()))
                 .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
                 .anchor(1., 0.)
                 .size(0.70867)
                 .color(Color { a: color.a * c.a, ..color })
+                .scale(scale)
                 .draw();
         });
         if res.config.show_acc {
@@ -385,7 +386,7 @@ impl GameScene {
                 .color(semi_white(0.7))
                 .draw();
         }
-        self.chart.with_element(ui, res, UIElement::Pause, |ui: &mut Ui, color: Color, scale| {
+        self.chart.with_element(ui, res, UIElement::Pause, |ui: &mut Ui, color: Color, scale: &lyon::geom::Scale| {
             let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
             let ct = pause_center.coords;
             let c = Color { a: color.a * c.a, ..color };
