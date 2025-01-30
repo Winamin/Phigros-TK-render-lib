@@ -393,7 +393,6 @@ impl GameScene {
             ui.fill_rect(r, c);
             r.x += pause_w * 2.;
             ui.fill_rect(r, c);
-            });
         });
         let unit_h = ui.text("0").measure().h;
         let combo_top = top + eps * 2. - (1. - p) * 0.4;
