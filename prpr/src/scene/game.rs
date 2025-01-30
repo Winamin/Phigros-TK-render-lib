@@ -490,7 +490,6 @@ impl GameScene {
             .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
             .scale(scale)
             .draw();
-         });
         Ok(())
     }
 
