@@ -410,7 +410,6 @@ impl GameScene {
                     .anchor(0.5, 0.)
                     .size(0.325)
                     .color(Color { a: color.a * c.a, ..color })
-                    .scale(scale)
                     .draw();
             });
         }
