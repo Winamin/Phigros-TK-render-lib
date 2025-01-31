@@ -1,6 +1,6 @@
 use super::{draw_background, ending::RecordUpdateState, game::GameMode, GameScene, NextScene, Scene};
 use crate::{
-    config: Config,
+    config::Config,
     core::Resource,
     ext::{draw_illustration, draw_parallelogram, draw_text_aligned, draw_text_aligned_fix, poll_future, LocalTask, SafeTexture, BLACK_TEXTURE},
     fs::FileSystem,
