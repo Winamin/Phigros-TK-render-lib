@@ -433,7 +433,7 @@ impl GameScene {
                 .color(Color { a: color.a * c.a, ..color })
                 .draw();
         });
-        self.chart.with_element(ui, res, UIElement::Level, Some((-lf - ct.x, bt - ct.y)), |ui: &mut Ui, color: Color| {
+        self.chart.with_element(ui, res, UIElement::Level, Some((-lf - ct.x, bt - ct.y)), None, |ui: &mut Ui, color: Color| {
             ui.text(&res.info.level)
                 .pos(-lf, bt + (1. - p) * 0.4)
                 .anchor(1., 1.)
