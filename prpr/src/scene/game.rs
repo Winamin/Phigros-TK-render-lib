@@ -1075,7 +1075,8 @@ impl Scene for GameScene {
             render_target: chart_onto,
             ..Default::default()
         });
-        clear_background(Color::new(BLACK));
+        clear_background(BLACK);
+        draw_background(*res.background);
         let vp = res.camera.viewport.unwrap();
         let chart_target_vp = if res.chart_target.is_some() {
             Some((vp.0 - ui.viewport.0, vp.1 - ui.viewport.1, vp.2, vp.3))
