@@ -1,6 +1,6 @@
 use super::{draw_background, ending::RecordUpdateState, game::GameMode, GameScene, NextScene, Scene};
 use crate::{
-    config::Config,
+    config: Config,
     core::Resource,
     ext::{draw_illustration, draw_parallelogram, draw_text_aligned, draw_text_aligned_fix, poll_future, LocalTask, SafeTexture, BLACK_TEXTURE},
     fs::FileSystem,
@@ -94,7 +94,7 @@ impl LoadingScene {
         if info.tip.is_none() {
             info.tip = Some(crate::config::TIPS.choose(&mut thread_rng()).unwrap().to_owned());
         }
-        let future = Box::pin(GameScene::new(mode, info.clone(), config.clone(), fs, player, background.clone(), illustration.clone(), upload_fn, update_fn));
+        let future = Box::pin(GameScene::new(mode, info.clone(), config, fs, player, background.clone(), illustration.clone(), upload_fn, update_fn));
         let charter = Regex::new(r"\[!:[0-9]+:([^:]*)\]").unwrap().replace_all(&info.charter, "$1").to_string();
 
         Ok(Self {
@@ -225,7 +225,7 @@ impl Scene for LoadingScene {
         let t = draw_text_aligned(ui, "Chart", main.x + main.w / 6.1, main.y + main.h * 1.32, (0., 0.), 0.253, WHITE);
         draw_text_aligned_fix(ui, &self.info.charter, t.x, t.y + top / 22., (0., 0.), 0.415, WHITE, 0.58);
         let w = 0.031;
-        let t = draw_text_aligned(ui, Illustration, t.x - w, t.y + w / 0.135 / 13. * 5., (0., 0.), 0.253, WHITE);
+        let t = draw_text_aligned(ui, "Illustration", t.x - w, t.y + w / 0.135 / 13. * 5., (0., 0.), 0.253, WHITE);
         draw_text_aligned_fix(ui, &self.info.illustrator, t.x - 0.002, t.y + top / 22., (0., 0.), 0.415, WHITE, 0.58);
         draw_text_aligned_fix(ui, self.info.tip.as_ref().unwrap(), -0.895, top * 0.88, (0., 1.), 0.47, WHITE, 1.5);
         let t = draw_text_aligned(ui, "Loading...", 0.865, top * 0.865, (1., 1.), 0.41, WHITE);
@@ -252,14 +252,15 @@ impl Scene for LoadingScene {
         Ok(())
     }
 
-    fn next_scene(&mut self, tm: &mut TimeManager) -> NextScene {
+     fn next_scene(&mut self, tm: &mut TimeManager) -> NextScene {
         if matches!(self.next_scene, Some(NextScene::PopWithResult(_))) {
             return self.next_scene.take().unwrap();
         }
-        if tm.now() as f32 > self.finish_time + TRANSITION_TIME + WAIT_TIME
+        if tm.now() as f32 > self.finish_time + TRANSITION_TIME + WAIT_TIME {
             if let Some(scene) = self.next_scene.take() {
                 return scene;
             }
         }
         NextScene::None
+    }
 }
