@@ -222,16 +222,13 @@ impl Scene for LoadingScene {
             .unwrap_or("?")
             , ct.x, ct.y + sub.h * 0.09, (0.5, 0.), 0.30, BLACK, main.w * 0.16
         );
-        let (text_chart, text_illustration) = if self.config.chinese {("谱师", "画师")} else {("Chart", "Illustration")};
-        let t = draw_text_aligned(ui, text_chart, main.x + main.w / 6.1, main.y + main.h * 1.32, (0., 0.), 0.253, WHITE);
+        let t = draw_text_aligned(ui, "Chart", main.x + main.w / 6.1, main.y + main.h * 1.32, (0., 0.), 0.253, WHITE);
         draw_text_aligned_fix(ui, &self.info.charter, t.x, t.y + top / 22., (0., 0.), 0.415, WHITE, 0.58);
         let w = 0.031;
-        let t = draw_text_aligned(ui, text_illustration, t.x - w, t.y + w / 0.135 / 13. * 5., (0., 0.), 0.253, WHITE);
+        let t = draw_text_aligned(ui, Illustration, t.x - w, t.y + w / 0.135 / 13. * 5., (0., 0.), 0.253, WHITE);
         draw_text_aligned_fix(ui, &self.info.illustrator, t.x - 0.002, t.y + top / 22., (0., 0.), 0.415, WHITE, 0.58);
-        let text_tip = if self.config.chinese {format!("提示：{}", self.info.tip.as_ref().unwrap())} else {format!("Tip: {}", self.info.tip.as_ref().unwrap())};
-        draw_text_aligned_fix(ui, &text_tip, -0.895, top * 0.88, (0., 1.), 0.47, WHITE, 1.5);
-        let text_loading = if self.config.chinese {"加载中..."} else {"Loading..."};
-        let t = draw_text_aligned(ui, &text_loading, 0.865, top * 0.865, (1., 1.), 0.41, WHITE);
+        draw_text_aligned_fix(ui, self.info.tip.as_ref().unwrap(), -0.895, top * 0.88, (0., 1.), 0.47, WHITE, 1.5);
+        let t = draw_text_aligned(ui, "Loading...", 0.865, top * 0.865, (1., 1.), 0.41, WHITE);
         let we = 0.19;
         let he = 0.35;
         let r = Rect::new(t.x - t.w * we, t.y - t.h * he, t.w * (1. + we * 2.2), t.h * (1. + he * 2.2));
@@ -246,7 +243,7 @@ impl Scene for LoadingScene {
         ui.fill_rect(r, WHITE);
         r.x += dx;
         ui.scissor(Some(r));
-        draw_text_aligned(ui, text_loading, 0.865, top * 0.865, (1., 1.), 0.41, BLACK);
+        draw_text_aligned(ui, "Loading...", 0.865, top * 0.865, (1., 1.), 0.41, BLACK);
         ui.scissor(None);
 
         if dx != 0. {
@@ -259,11 +256,10 @@ impl Scene for LoadingScene {
         if matches!(self.next_scene, Some(NextScene::PopWithResult(_))) {
             return self.next_scene.take().unwrap();
         }
-        if tm.now() as f32 > self.finish_time + TRANSITION_TIME + WAIT_TIME || self.config.disable_loading {
+        if tm.now() as f32 > self.finish_time + TRANSITION_TIME + WAIT_TIME
             if let Some(scene) = self.next_scene.take() {
                 return scene;
             }
         }
         NextScene::None
-    }
 }
