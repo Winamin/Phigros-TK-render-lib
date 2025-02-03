@@ -551,30 +551,7 @@ pub fn parse_time(s: &str) -> Option<f32> {
     }
     Some(res)
 }
-pub fn ease_in_out_cubic(t: f32) -> f32 {
-    if t < 0.5 {
-        4.0 * t * t * t
-    } else {
-        let t = t * 2.0 - 2.0;
-        0.5 * t * t * t + 1.0
-    }
-}
-pub fn ease_in_out_quartic(t: f32) -> f32 {
-    if t < 0.5 {
-        8.0 * t * t * t * t
-    } else {
-        let t = t * 2.0 - 2.0;
-        1.0 - 0.5 * t * t * t * t
-    }
-}
-pub fn ease_in_out_quintic(t: f32) -> f32 {
-    if t < 0.5 {
-        16.0 * t * t * t * t * t
-    } else {
-        let t = t * 2.0 - 2.0;
-        0.5 * t * t * t * t * t + 1.0
-    }
-}
+
 mod shader {
     pub const VERTEX: &str = r#"#version 100
 attribute vec3 position;

@@ -13,17 +13,17 @@ mod anim;
 pub use anim::{Anim, AnimFloat, AnimVector, Keyframe};
 
 mod chart;
-pub use chart::{Chart, ChartExtra, ChartSettings, HitSoundMap};
+pub use chart::{Chart, ChartExtra, ChartSettings};
 
 mod effect;
 pub use effect::{Effect, Uniform};
 
 mod line;
-pub use line::{GifFrames, JudgeLine, JudgeLineCache, JudgeLineKind, UIElement};
+pub use line::{JudgeLine, JudgeLineCache, JudgeLineKind, UIElement};
 
 mod note;
 use macroquad::prelude::set_pc_assets_folder;
-pub use note::{BadNote, Note, NoteKind, HitSound, RenderConfig};
+pub use note::{BadNote, Note, NoteKind, RenderConfig};
 
 mod object;
 pub use object::{CtrlObject, Object};
@@ -32,7 +32,7 @@ mod render;
 pub use render::{copy_fbo, internal_id, MSRenderTarget};
 
 mod resource;
-pub use resource::{NoteStyle, ParticleEmitter, ResPackInfo, Resource, ResourcePack, SfxMap, BUFFER_SIZE, DPI_VALUE};
+pub use resource::{NoteStyle, ParticleEmitter, ResPackInfo, Resource, ResourcePack, DPI_VALUE};
 
 mod smooth;
 pub use smooth::Smooth;
@@ -99,7 +99,7 @@ impl BpmList {
         }
         BpmList { elements, cursor: 0 }
     }
-
+    
     pub fn time_beats(&mut self, beats: f32) -> f32 {
         while let Some(kf) = self.elements.get(self.cursor + 1) {
             if kf.0 > beats {
