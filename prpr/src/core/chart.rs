@@ -2,9 +2,8 @@ use super::{BpmList, Effect, JudgeLine, JudgeLineKind, Matrix, Resource, UIEleme
 use crate::{fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
+use std::cell::RefCell;
 use tracing::warn;
-use sasa::AudioClip;
-use std::{cell::RefCell, collections::HashMap};
 
 #[derive(Default)]
 pub struct ChartExtra {
@@ -19,8 +18,6 @@ pub struct ChartSettings {
     pub hold_partial_cover: bool,
 }
 
-pub type HitSoundMap = HashMap<String, AudioClip>;
-
 pub struct Chart {
     pub offset: f32,
     pub lines: Vec<JudgeLine>,
@@ -33,7 +30,7 @@ pub struct Chart {
 }
 
 impl Chart {
-    pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra, hitsounds: HitSoundMap) -> Self {
+    pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra) -> Self {
         let mut attach_ui = [None; 7];
         let mut order = (0..lines.len())
             .filter(|it| {
@@ -55,38 +52,20 @@ impl Chart {
 
             order,
             attach_ui,
-            hitsounds,
         }
     }
 
     #[inline]
-    pub fn with_element<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, ct: Option<(f32, f32)>, pt: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
-        if let Some(id) = self.attach_ui[element as usize - 1] {
-            let obj = &self.lines[id].object;
-            let mut tr = JudgeLine::fetch_pos(&self.lines[id], res, &self.lines);
-            tr.y = -tr.y;
-            let mut color = self.lines[id].color.now_opt().unwrap_or(WHITE);
-            color.a *= obj.now_alpha().max(0.); 
-            let scale = obj.now_scale_fix(ct.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
-            let ro = obj.new_rotation_wrt_point(-obj.rotation.now().to_radians(), pt.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
-            ui.with(Matrix::new_translation(&tr) * ro * scale, |ui| f(ui, color))
-        } else {
-            f(ui, WHITE)
-        }
-    }
-
-    pub fn with_element_noscale<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, ct: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
+    pub fn with_element<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, f: impl FnOnce(&mut Ui, Color, Matrix) -> R) -> R {
         if let Some(id) = self.attach_ui[element as usize - 1] {
             let obj = &self.lines[id].object;
             let mut tr = obj.now_translation(res);
             tr.y = -tr.y;
             let mut color = self.lines[id].color.now_opt().unwrap_or(WHITE);
-            color.a *= obj.now_alpha().max(0.); 
-            let mut scale = obj.now_scale_fix(ct.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x , y)));
-            scale.m11 = 1.0;
-            ui.with(obj.now_rotation().append_translation(&tr) * scale, |ui| f(ui, color))
+            color.a *= obj.now_alpha().max(0.);
+            ui.with(obj.now_rotation().append_translation(&tr), |ui| f(ui, color, obj.now_scale()))
         } else {
-            f(ui, WHITE)
+            f(ui, WHITE, Matrix::identity())
         }
     }
 
@@ -103,15 +82,9 @@ impl Chart {
         self.lines
             .iter_mut()
             .flat_map(|it| it.notes.iter_mut())
-            .for_each(|note| {
-                note.judge = JudgeStatus::NotJudged;
-                note.attr = false;
-            });
+            .for_each(|note| note.judge = JudgeStatus::NotJudged);
         for line in &mut self.lines {
             line.cache.reset(&mut line.notes);
-        }
-        for video in &mut self.extra.videos {
-            video.next_frame = 0;
         }
     }
 
@@ -137,9 +110,6 @@ impl Chart {
     }
 
     pub fn render(&self, ui: &mut Ui, res: &mut Resource) {
-        let vp = res.camera.viewport.unwrap_or(ui.viewport);
-        let asp2 = vp.2 as f32 / vp.3 as f32;
-        let vec2_asp2 = vec2(1., -asp2);
         for video in &self.extra.videos {
             video.render(res);
         }
@@ -157,17 +127,9 @@ impl Chart {
                 }
             }
             if !res.no_effect {
-                //push_camera_state();
-                set_camera(&Camera2D {
-                    zoom: vec2_asp2,
-                    //render_target: res.camera.render_target,
-                    //viewport: Some(ui.viewport),
-                    ..Default::default()
-                });
                 for effect in &self.extra.effects {
                     effect.render(res);
                 }
-                //pop_camera_state();
             }
         });
     }
