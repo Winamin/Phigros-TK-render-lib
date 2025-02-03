@@ -52,6 +52,7 @@ pub struct Config {
     pub double_hint: bool,
     pub fix_aspect_ratio: bool,
     pub fxaa: bool,
+    pub ending_length: f64,
     pub interactive: bool,
     pub note_scale: f32,
     pub mods: Mods,
