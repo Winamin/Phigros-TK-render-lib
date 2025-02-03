@@ -30,7 +30,6 @@ pub struct Chart {
 
     pub order: Vec<usize>,
     pub attach_ui: [Option<usize>; 7],
-    pub hitsounds: HitSoundMap,
 }
 
 impl Chart {
