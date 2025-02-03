@@ -251,7 +251,7 @@ pub fn parse_phigros(source: &str, extra: ChartExtra) -> Result<Chart> {
     for (index, judge_line) in pgr.judge_line_list.iter().enumerate() {
         bpm_values.push((index as f32, judge_line.bpm));
     }
-    let r = BpmList::new(bpm_valuesclone());
+    let r = BpmList::new(bpm_values.clone());
 
     let max_time = *pgr
         .judge_line_list
