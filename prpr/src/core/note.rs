@@ -2,24 +2,23 @@ use super::{
     chart::ChartSettings, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource
 };
 use crate::{
-    core::HEIGHT_RATIO, info::ChartFormat, judge::JudgeStatus, parse::RPE_HEIGHT, ui::Ui
+    judge::JudgeStatus, 
+    parse::RPE_HEIGHT,
+    core::HEIGHT_RATIO,
 };
 
 
 use macroquad::prelude::*;
 use ::rand::{thread_rng, Rng};
-pub use crate::{
-    judge::HitSound,
-};
 
-//const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
+const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
 
 #[derive(Clone, Debug)]
 pub enum NoteKind {
     Click,
-    Hold { end_time: f32, end_height: f32, end_speed: f32 },
+    Hold { end_time: f32, end_height: f32 },
     Flick,
     Drag,
 }
@@ -38,21 +37,18 @@ impl NoteKind {
 pub struct Note {
     pub object: Object,
     pub kind: NoteKind,
-    pub hitsound: HitSound,
     pub time: f32,
     pub height: f32,
     pub speed: f32,
+    pub end_speed: f32,
+    pub start_height: f32,
 
     pub above: bool,
     pub multiple_hint: bool,
     pub fake: bool,
     pub judge: JudgeStatus,
-    pub attr: bool,
-    pub format: ChartFormat,
+    pub format: bool,
 }
-
-unsafe impl Sync for Note {}
-unsafe impl Send for Note {}
 
 pub struct RenderConfig<'a> {
     pub settings: &'a ChartSettings,
@@ -163,12 +159,10 @@ impl Note {
         let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
             if res.time >= *at {
                 //_immediate_particle = true;
-                let beat = 30. / bpm_list.now_bpm(
-                    if matches!(self.format, ChartFormat::Pgr) { index as f32 } else { self.time }
-                );
-                //println!("{} {} {}", index, bpm_list.now_bpm(index as f32), beat);
+                let beat = if self.format { 30. / bpm_list.now_bpm(index as f32) } else { 30. / bpm_list.now_bpm(self.time) };
+                //println!("{} {} {}", bpm_list.now_bpm(0.), beat, res.config.speed);
                 *at = res.time + beat / res.config.speed; //HOLD_PARTICLE_INTERVAL
-                Some(if perfect && !res.config.all_good && !res.config.all_bad {
+                Some(if perfect {
                     res.res_pack.info.fx_perfect()
                 } else {
                     res.res_pack.info.fx_good()
@@ -212,7 +206,7 @@ impl Note {
         self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr)
     }
 
-    pub fn render(&self, _ui: &mut Ui, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList, line_set_debug_alpha: bool) {
+    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
             return;
         }
@@ -229,59 +223,35 @@ impl Note {
         if config.invisible_time.is_finite() && self.time - config.invisible_time < res.time {
             return;
         }
-        let ctrl_obj = &mut config.ctrl_obj;
-        self.init_ctrl_obj(ctrl_obj, config.line_height);
-        let spd = self.speed * ctrl_obj.y.now_opt().unwrap_or(1.);
-
-        let line_height = config.line_height / res.aspect_ratio * spd;
-        let height = self.height / res.aspect_ratio * spd;
-        let base = height - line_height;
-
-        if res.config.aggressive && matches!(self.format, ChartFormat::Pec) && matches!(self.kind, NoteKind::Hold { .. }) {
-            let h = if self.time <= res.time { line_height } else { height };
-            let bottom = h - line_height;
-            if bottom - line_height > 2. / res.config.chart_ratio {
-                return;
-            }
-        }
-
-        let cover_base = if res.config.phira_mode || !matches!(self.format, ChartFormat::Rpe) {
-            height - line_height
-        } else {
-            match self.kind {
-                NoteKind::Hold { end_time: _,  end_height, end_speed } => {
-                    let end_spd = end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
-                    let end_height = end_height / res.aspect_ratio * end_spd;
-                    end_height - line_height
-                }
-                _ => {
-                    height - line_height
-                }
-            }
-        };
-        
-        let mut color = self.object.now_color();
-        color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
-
-        // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
-        if !config.draw_below
-            && ((res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) || (self.time > res.time && cover_base <= -0.001))
-            // && self.speed != 0.
-        {
-            if res.config.chart_debug{
-                color.a *= 0.2;
-            } else {
-                return;
-            }
-        }
-        if line_set_debug_alpha {
-            color.a *= 0.4;
-        }
         let scale = (if self.multiple_hint {
             res.res_pack.note_style_mh.click.width() / res.res_pack.note_style.click.width()
         } else {
             1.0
         }) * res.note_width;
+        let ctrl_obj = &mut config.ctrl_obj;
+        self.init_ctrl_obj(ctrl_obj, config.line_height);
+        let mut color = self.object.now_color();
+        color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
+        let spd = self.speed * ctrl_obj.y.now_opt().unwrap_or(1.);
+        let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
+
+        let line_height = config.line_height / res.aspect_ratio * spd;
+        let height = self.height / res.aspect_ratio * spd;
+        let base = height - line_height;
+        //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
+
+        // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
+        if !config.draw_below
+            && ((res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) || (self.time > res.time && base <= -0.0075))
+            && self.speed != 0.
+        {
+            if res.config.chart_debug{
+                color.a *= 0.2;
+                //println!("{}", base);
+            } else {
+                return;
+            }
+        }
         let order = self.kind.order();
         let style = if res.config.double_hint && self.multiple_hint {
             &res.res_pack.note_style_mh
@@ -302,9 +272,14 @@ impl Note {
                 if self.fake && res.time >= self.time {return};
                 draw(res, *style.click);
             }
-            NoteKind::Hold { end_time, end_height, end_speed } => {
+            NoteKind::Hold { end_time, end_height } => {
                 if self.fake && res.time >= end_time {return};
                 res.with_model(self.now_transform(res, ctrl_obj, 0., 0.), |res| {
+                    let style = if res.config.double_hint && self.multiple_hint {
+                        &res.res_pack.note_style_mh
+                    } else {
+                        &res.res_pack.note_style
+                    };
                     if matches!(self.judge, JudgeStatus::Judged) {
                         // miss
                         color.a *= 0.5;
@@ -312,25 +287,18 @@ impl Note {
                     if res.time >= end_time {
                         return;
                     }
-                    let end_spd = end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
-                    if matches!(self.format, ChartFormat::Pgr) && end_spd == 0. {
-                        if res.config.chart_debug {
-                            color.a *= 0.2;
-                        } else {
-                            return;
-                        }
-                    }
-
                     let end_height = end_height / res.aspect_ratio * spd;
+                    let start_height = self.start_height / res.aspect_ratio * spd;
+                    let hold_height = end_height - start_height;
                     let time = if res.time >= self.time {res.time} else {self.time};
+                    let hold_line_height = (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO;
 
                     let clip = !config.draw_below && config.settings.hold_partial_cover;
 
+
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height; //StartY
-                    let top = if matches!(self.format, ChartFormat::Pgr) {
-                        let hold_height = end_height - height;
-                        let hold_line_height = (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO;
+                    let top = if self.format {
                         bottom + hold_height - hold_line_height
                     } else {
                         end_height - line_height
@@ -339,17 +307,18 @@ impl Note {
                     //let max_hold_height = 3. / res.config.chart_ratio / res.aspect_ratio;
                     //let top = if res.config.aggressive && hold_height - hold_line_height >= max_hold_height { bottom + max_hold_height } else { top };
 
-                    //println!("res.time:{:.6}\tend_height:{:.7}\tspd:{}\tend_spd:{:.7}\tline_height:{:.6}\th:{}\tbottom:{:.6}\ttop:{:.6}\thold_height:{} {}", res.time, end_height, spd, end_spd, line_height, h, bottom, top, hold_height, height - h);
-                    if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !matches!(self.format, ChartFormat::Pgr)) {
+                    if self.format && end_spd == 0. {
+                        if res.config.chart_debug {
+                            color.a *= 0.2;
+                        } else {
+                            return;
+                        }
+                    }
+                    
+
+                    if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !self.format) {
                         return;
                     }
-
-                    let style = if res.config.double_hint && self.multiple_hint {
-                        &res.res_pack.note_style_mh
-                    } else {
-                        &res.res_pack.note_style
-                    };
-
                     let tex = &style.hold;
                     let ratio = style.hold_ratio();
                     // body

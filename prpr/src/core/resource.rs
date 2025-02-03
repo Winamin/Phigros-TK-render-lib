@@ -11,11 +11,10 @@ use macroquad::prelude::*;
 use miniquad::{gl::{GLuint, GL_LINEAR}, Texture, TextureWrap};
 use sasa::{AudioClip, AudioManager, Sfx};
 use serde::Deserialize;
-use std::{cell::RefCell, collections::{BTreeMap, HashMap}, ops::DerefMut, path::Path, sync::atomic::AtomicU32};
+use std::{cell::RefCell, collections::BTreeMap, ops::DerefMut, path::Path, sync::atomic::AtomicU32};
 
 pub const MAX_SIZE: usize = 64; // needs tweaking
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
-pub const BUFFER_SIZE: usize = 1024;
 
 #[inline]
 fn default_scale() -> f32 {
@@ -267,14 +266,12 @@ impl ResourcePack {
 pub struct ParticleEmitter {
     scale: f32,
     emitter: Emitter,
-    emitter_config: EmitterConfig,
     emitter_square: Emitter,
-    emitter_square_config: EmitterConfig,
     hide_particles: bool,
 }
 
 impl ParticleEmitter {
-    pub fn new(res_pack: &ResourcePack, scale: f32, hide_particles: bool, config: Option<Config>) -> Result<Self> {
+    pub fn new(res_pack: &ResourcePack, scale: f32, hide_particles: bool) -> Result<Self> {
         let colors_curve = {
             let start = WHITE;
             let mut mid = start;
@@ -283,42 +280,34 @@ impl ParticleEmitter {
             end.a = 0.;
             ColorCurve { start, mid, end }
         };
-        let config_default = Config::default();
-        let config = config.unwrap_or(config_default);
-        let emitter_config = EmitterConfig {
-            max_particles: config.max_particles,
-            local_coords: false,
-            texture: Some(*res_pack.hit_fx),
-            lifetime: res_pack.info.hit_fx_duration,
-            lifetime_randomness: 0.0,
-            initial_rotation_randomness: 0.0,
-            initial_direction_spread: 0.0,
-            initial_velocity: 0.0,
-            atlas: Some(AtlasConfig::new(res_pack.info.hit_fx.0 as _, res_pack.info.hit_fx.1 as _, ..)),
-            emitting: false,
-            colors_curve,
-            ..Default::default()
-        };
-        let emitter_square_config = EmitterConfig {
-            max_particles: config.max_particles,
-            local_coords: false,
-            lifetime: res_pack.info.hit_fx_duration,
-            lifetime_randomness: 0.0,
-            initial_direction_spread: 2. * std::f32::consts::PI,
-            size_randomness: 0.3,
-            emitting: false,
-            initial_velocity: 2.5 * scale,
-            initial_velocity_randomness: 1. / 10.,
-            linear_accel: -6. / 1.,
-            colors_curve,
-            ..Default::default()
-        };
         let mut res = Self {
             scale: res_pack.info.hit_fx_scale,
-            emitter: Emitter::new(emitter_config.clone()),
-            emitter_config,
-            emitter_square: Emitter::new(emitter_square_config.clone()),
-            emitter_square_config,
+            emitter: Emitter::new(EmitterConfig {
+                local_coords: false,
+                texture: Some(*res_pack.hit_fx),
+                lifetime: res_pack.info.hit_fx_duration,
+                lifetime_randomness: 0.0,
+                initial_rotation_randomness: 0.0,
+                initial_direction_spread: 0.0,
+                initial_velocity: 0.0,
+                atlas: Some(AtlasConfig::new(res_pack.info.hit_fx.0 as _, res_pack.info.hit_fx.1 as _, ..)),
+                emitting: false,
+                colors_curve,
+                ..Default::default()
+            }),
+            emitter_square: Emitter::new(EmitterConfig {
+                local_coords: false,
+                lifetime: res_pack.info.hit_fx_duration,
+                lifetime_randomness: 0.0,
+                initial_direction_spread: 2. * std::f32::consts::PI,
+                size_randomness: 0.3,
+                emitting: false,
+                initial_velocity: 2.5 * scale,
+                initial_velocity_randomness: 1. / 10.,
+                linear_accel: -6. / 1.,
+                colors_curve,
+                ..Default::default()
+            }),
             hide_particles,
         };
         res.set_scale(scale);
@@ -328,16 +317,16 @@ impl ParticleEmitter {
     pub fn emit_at(&mut self, pt: Vec2, rotation: f32, color: Color) {
         self.emitter.config.initial_rotation = rotation;
         self.emitter.config.base_color = color;
-        self.emitter.emit(&self.emitter_config, pt, 1);
+        self.emitter.emit(pt, 1);
         if !self.hide_particles {
             self.emitter_square.config.base_color = color;
-            self.emitter_square.emit(&self.emitter_square_config, pt, 4);
+            self.emitter_square.emit(pt, 4);
         }
     }
 
     pub fn draw(&mut self, dt: f32) {
-        self.emitter.draw(&self.emitter_config, vec2(0., 0.), dt);
-        self.emitter_square.draw(&self.emitter_config, vec2(0., 0.), dt);
+        self.emitter.draw(vec2(0., 0.), dt);
+        self.emitter_square.draw(vec2(0., 0.), dt);
     }
 
     pub fn set_scale(&mut self, scale: f32) {
@@ -348,7 +337,6 @@ impl ParticleEmitter {
 
 #[derive(Default)]
 pub struct NoteBuffer(BTreeMap<(i8, GLuint), Vec<(Vec<Vertex>, Vec<u16>)>>);
-pub type SfxMap = HashMap<String, Sfx>;
 
 impl NoteBuffer {
     pub fn push(&mut self, key: (i8, GLuint), vertices: [Vertex; 4]) {
@@ -410,7 +398,6 @@ pub struct Resource {
     pub sfx_click: Sfx,
     pub sfx_drag: Sfx,
     pub sfx_flick: Sfx,
-    pub extra_sfxs: SfxMap,
 
     pub chart_target: Option<MSRenderTarget>,
     pub no_effect: bool,
@@ -480,7 +467,7 @@ impl Resource {
         let res_pack = ResourcePack::from_path(config.res_pack_path.as_ref())
             .await
             .context("Failed to load resource pack")?;
-        let vec2_ratio = vec2(1.,-config.aspect_ratio.unwrap_or(info.aspect_ratio));
+            let vec2_ratio = vec2(1. * config.chart_ratio,-config.aspect_ratio.unwrap_or(info.aspect_ratio) * config.chart_ratio);
         let camera = Camera2D {
             target: vec2(0., 0.),
             zoom: vec2_ratio,
@@ -499,9 +486,9 @@ impl Resource {
         let note_width = config.note_scale * NOTE_WIDTH_RATIO_BASE;
         let note_scale = config.note_scale;
 
-        let no_effect = config.disable_effect || has_no_effect;
+        let emitter = ParticleEmitter::new(&res_pack, note_scale, res_pack.info.hide_particles)?;
 
-        let emitter = ParticleEmitter::new(&res_pack, note_scale, res_pack.info.hide_particles, Some(config.clone()))?;
+        let no_effect = config.disable_effect || has_no_effect;
 
         macroquad::window::gl_set_drawcall_buffer_capacity(MAX_SIZE * 4, MAX_SIZE * 6);
         Ok(Self {
@@ -524,7 +511,7 @@ impl Resource {
             icons: Self::load_icons().await?,
             challenge_icons: Self::load_challenge_icons().await?,
             res_pack,
-            player: if let Some(player) = player { player } else { load_tex!("player.png") },
+            player: if let Some(player) = player { player } else { load_tex!("player.jpg") },
             icon_back: load_tex!("back.png"),
             icon_retry: load_tex!("retry.png"),
             icon_resume: load_tex!("resume.png"),
@@ -538,7 +525,6 @@ impl Resource {
             sfx_click,
             sfx_drag,
             sfx_flick,
-            extra_sfxs: SfxMap::new(),
 
             chart_target: None,
             no_effect,
@@ -547,10 +533,6 @@ impl Resource {
 
             model_stack: vec![Matrix::identity()],
         })
-    }
-
-    pub fn create_sfx(&mut self, clip: AudioClip) -> Result<Sfx> {
-        self.audio.create_sfx(clip, Some(BUFFER_SIZE))
     }
 
     pub fn emit_at_origin(&mut self, rotation: f32, color: Color) {
@@ -593,7 +575,7 @@ impl Resource {
             self.camera.viewport = Some(viewport(aspect_ratio, vp));
         } else {
             self.aspect_ratio = aspect_ratio.min(vp.2 as f32 / vp.3 as f32);
-            self.camera.zoom.y = -self.aspect_ratio;
+            self.camera.zoom.y = -self.aspect_ratio * self.config.chart_ratio;
             self.camera.viewport = Some(viewport(self.aspect_ratio, vp));
         };
         true
