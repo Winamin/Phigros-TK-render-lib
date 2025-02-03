@@ -11,8 +11,8 @@ use super::{
 use crate::{
     bin::{BinaryReader, BinaryWriter},
     config::{Config, Mods},
-    core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Point, Resource, UIElement, Vector, Matrix},
-    ext::{ease_in_out_quartic, parse_time, screen_aspect, semi_white, RectExt, SafeTexture},
+    core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Point, Resource, UIElement, Vector},
+    ext::{parse_time, screen_aspect, semi_white, RectExt, SafeTexture},
     fs::FileSystem,
     info::{ChartFormat, ChartInfo},
     judge::Judge,
@@ -146,7 +146,6 @@ pub struct GameScene {
     update_fn: Option<UpdateFn>,
 
     pub touch_points: Vec<(f32, f32)>,
-    line_draw_time: Option<f64>,
 }
 
 macro_rules! reset {
@@ -161,14 +160,12 @@ macro_rules! reset {
         $tm.reset();
         $self.last_update_time = $tm.now();
         $self.state = State::Starting;
-        $self.line_draw_time = Some($tm.now());
     }};
 }
 
 impl GameScene {
     pub const BEFORE_TIME: f32 = 0.7;
     pub const FADEOUT_TIME: f32 = WAIT_TIME + AFTER_TIME + 0.3;
-    pub const BEFORE_DURATION: f32 = 1.2;
 
     pub async fn load_chart_bytes(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<Vec<u8>> {
         if let Ok(bytes) = fs.load_file(&info.chart).await {
@@ -275,7 +272,6 @@ impl GameScene {
             judge,
             gl: unsafe { get_internal_gl() },
             player,
-            line_draw_time: Some(0.5),
             chart_bytes,
             chart_format,
             effects,
@@ -322,16 +318,16 @@ impl GameScene {
         let p = match self.state {
             State::Starting => {
                 if time <= Self::BEFORE_TIME {
-                    1. - (1. - time / Self::BEFORE_TIME).clamp(0., 1.).powi(3)
+                    1. - (1. - time / Self::BEFORE_TIME).powi(3)
                 } else {
                     1.
                 }
             }
             State::BeforeMusic => 1.,
             State::Playing => 1.,
-            State::Ending | State::Playing => {
-                let t = time - self.res.track_length;
-                1. - (t / (AFTER_TIME + 0.3)).clamp(0., 1.).powi(2)
+            State::Ending => {
+                let t = time - self.res.track_length - WAIT_TIME;
+                1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
             }
         };
         let c = Color::new(1., 1., 1., self.res.alpha);
@@ -368,15 +364,14 @@ impl GameScene {
         }
 
         let margin = 0.046;
-        let score_top = top + eps * 2.2 - (1. - p) * 0.4;
-        let score = format!("{:07}", self.judge.score());
-        let ct = ui.text(&score).size(0.8).center();
-        self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), None, |ui: &mut Ui, color: Color| {
+
+        self.chart.with_element(ui, res, UIElement::Score, |ui, color, scale| {
             ui.text(format!("{:07}", self.judge.score()))
                 .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
                 .anchor(1., 0.)
                 .size(0.70867)
                 .color(Color { a: color.a * c.a, ..color })
+                .scale(scale)
                 .draw();
         });
         if res.config.show_acc {
@@ -387,37 +382,39 @@ impl GameScene {
                 .color(semi_white(0.7))
                 .draw();
         }
-        self.chart.with_element(ui, res, UIElement::Pause, Some((pause_center.x, pause_center.y)), None, |ui: &mut Ui, color: Color| {
+        self.chart.with_element(ui, res, UIElement::Pause, |ui, color, scale| {
             let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
             let ct = pause_center.coords;
             let c = Color { a: color.a * c.a, ..color };
-            ui.fill_rect(r, c);
-            r.x += pause_w * 2.;
-            ui.fill_rect(r, c);
+            ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
+                ui.fill_rect(r, c);
+                r.x += pause_w * 2.;
+                ui.fill_rect(r, c);
+            });
         });
-        let unit_h = ui.text("0").measure().h;
-        let combo_top = top + eps * 2. - (1. - p) * 0.4;
         if self.judge.combo() >= 3 {
-            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), None, |ui: &mut Ui, color: Color| {
+            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
                ui.text(self.judge.combo().to_string())
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
                     .color(Color { a: color.a * c.a, ..color })
+                    .scale(scale)
                     .draw()
                     .bottom()
             });
-            self.chart.with_element(ui, res, UIElement::Combo, Some((0., combo_top + unit_h * 0.2)), None, |ui: &mut Ui, color: Color| {
+            self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
                 ui.text(&res.config.combo)
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
                     .size(0.325)
                     .color(Color { a: color.a * c.a, ..color })
+                    .scale(scale)
                     .draw();
             });
         }
         let lf = -1. + margin;
         let bt = -top - eps * 3.64;
-        self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), None, |ui: &mut Ui, color: Color| {
+        self.chart.with_element(ui, res, UIElement::Name, |ui, color, scale| {
             let mut text_size = 0.5;
             let mut text = ui.text(&res.info.name).pos(lf, bt + (1. - p) * 0.4).anchor(0., 1.).size(text_size);
             let max_width = 0.9;
@@ -431,37 +428,40 @@ impl GameScene {
                 .anchor(0., 1.)
                 .size(text_size)
                 .color(Color { a: color.a * c.a, ..color })
+                .scale(scale)
                 .draw();
         });
-        self.chart.with_element(ui, res, UIElement::Level, Some((-lf - ct.x, bt - ct.y)), None, |ui: &mut Ui, color: Color| {
+        self.chart.with_element(ui, res, UIElement::Level, |ui, color, scale| {
             ui.text(&res.info.level)
                 .pos(-lf, bt + (1. - p) * 0.4)
                 .anchor(1., 1.)
                 .size(0.5)
                 .color(Color { a: color.a * c.a, ..color })
+                .scale(scale)
                 .draw();
         });
         let hw = 0.0015;
         let height = eps * 1.1;
-        let elapsed_time = tm.now() - self.line_draw_time.unwrap_or(0.0);
-        let animation_duration = 0.5;
-        let progress1 = (elapsed_time / self.line_draw_time.unwrap_or(1.0)).min(1.0);
-        let initial_dest = 2.0;
-        let final_dest = 2. * res.time / res.track_length;
-        let dest = initial_dest + (final_dest - initial_dest);
-            
-        /*let hw = 0.0015;
-        let height = eps * 1.1;
         let dest = 2. * res.time / res.track_length;
-        */
-        self.chart.with_element(ui, res, UIElement::Bar, None, None, |ui: &mut Ui, color: Color| {
+        self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
             let ct = Vector::new(0., top + height / 2.);
+            ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
                 ui.fill_rect(
                     Rect::new(-1., top, dest, height),
                     //Color{ a: color.a * c.a * 0.6, ..color},
                     Color::new(0.45, 0.45, 0.45, 1.),
                 );
-                ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });;
+                ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
+            });
+        });
+        self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
+        let ct = Vector::new(0., top + height / 2.);
+        ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
+            ui.fill_rect(
+                Rect::new(-1., top, dest, height),
+                Color::new(0.45, 0.45, 0.45, 1.),
+            );
+            ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
         });
 
         let progress = res.time / res.track_length;
@@ -485,11 +485,13 @@ impl GameScene {
             .draw();
 
         ui.text(time_text)
-            .pos(-1. + bar_width - 0.01, top + height / 2. - 0.03)
+            .pos(-1. + bar_width - 0.01, top + height / 2.)
             .anchor(1., 0.5)
-            .size(0.57867)
-            .color(semi_white(0.7))
+            .size(0.17867)
+            .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
+            .scale(scale)
             .draw();
+         });
         Ok(())
     }
 
@@ -840,21 +842,29 @@ impl Scene for GameScene {
         let offset = self.offset();
         let time = tm.now() as f32;
         let time = match self.state {
-        State::Starting => {
-            if time >= Self::BEFORE_DURATION { // wait for animation
-                self.res.alpha = 1.;
-                self.state = State::BeforeMusic;
-                tm.reset();
-                tm.seek_to(self.exercise_range.start as f64);
-                self.last_update_time = tm.real_time();
-                if self.first_in && self.mode == GameMode::Exercise {
-                    tm.pause();
-                    self.first_in = false;
-                }
-                tm.now() as f32
+            State::Starting => {
+                if time >= Self::BEFORE_TIME {
+                    self.res.alpha = 1.;
+                    self.state = State::BeforeMusic;
+                    tm.reset();
+                    tm.seek_to(if self.mode == GameMode::Exercise {
+                        self.exercise_range.start as f64
+                    } else {
+                        offset.min(0.) as f64
+                    });
+                    self.last_update_time = tm.real_time();
+                    if self.first_in && self.mode == GameMode::Exercise {
+                        tm.pause();
+                        self.first_in = false;
+                    }
+                    tm.now() as f32
                 } else {
-                    self.res.alpha = 1. - (1. - time / Self::BEFORE_TIME).clamp(0., 1.).powi(3);
-                    self.exercise_range.start
+                    self.res.alpha = 1. - (1. - time / Self::BEFORE_TIME).powi(3);
+                    if self.mode == GameMode::Exercise {
+                        self.exercise_range.start
+                    } else {
+                        offset
+                    }
                 }
             }
             State::BeforeMusic => {
@@ -920,7 +930,7 @@ impl Scene for GameScene {
                         GameMode::Exercise => None,
                     };
                 }
-                self.res.alpha = 1. - (t / AFTER_TIME).clamp(0., 1.).powi(2);
+                self.res.alpha = 1. - (t / AFTER_TIME).min(1.).powi(2);
                 self.res.track_length
             }
         };
@@ -962,8 +972,8 @@ impl Scene for GameScene {
         }
         if Self::interactive(res, &self.state) {
             if is_key_pressed(KeyCode::Left) {
-                res.time -= 2.;
-                let dst = (self.music.position() - 2.).max(0.);
+                res.time -= 1.;
+                let dst = (self.music.position() - 1.).max(0.);
                 self.music.seek_to(dst)?;
                 tm.seek_to(dst as f64);
             }
@@ -1034,28 +1044,7 @@ impl Scene for GameScene {
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
         let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
-        
-        let vp = res.camera.viewport.unwrap_or(ui.viewport);
-        let asp2 = vp.2 as f32 / vp.3 as f32;
-
-        let time = tm.now() as f32;
-        let p = match self.state {
-            State::Starting => {
-                if time < Self::BEFORE_DURATION {
-                    1. - (1. - time / Self::BEFORE_DURATION)
-                } else {
-                    1.
-                }
-            }
-            State::BeforeMusic => 1.,
-            State::Ending | State::Playing => {
-                let t = time - res.track_length;
-                1. - (t / Self::BEFORE_DURATION).clamp(0., 1.)
-            }
-        };
-        let ratio = 1. + (res.config.chart_ratio - 1.) * ease_in_out_quartic(p);
-        let vec2_asp = vec2(1. * ratio, -asp2 * ratio);
-
+        let vec2_asp = vec2(1. * res.config.chart_ratio, -asp * res.config.chart_ratio);
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
             set_camera(&res.camera);
         }
@@ -1067,8 +1056,7 @@ impl Scene for GameScene {
             .as_ref()
             .map(|it| if msaa { it.input() } else { it.output() })
             .or(res.camera.render_target);
-
-        let h = 1. / res.aspect_ratio;
+        push_camera_state();
         set_camera(&Camera2D {
             zoom: vec2(1., -asp),
             viewport: if res.chart_target.is_some() { None } else { Some(ui.viewport) },
@@ -1077,41 +1065,21 @@ impl Scene for GameScene {
         });
         clear_background(BLACK);
         draw_background(*res.background);
-        let vp = res.camera.viewport.unwrap();
+        pop_camera_state();
+
         let chart_target_vp = if res.chart_target.is_some() {
+            let vp = res.camera.viewport.unwrap();
             Some((vp.0 - ui.viewport.0, vp.1 - ui.viewport.1, vp.2, vp.3))
         } else {
             res.camera.viewport
         };
-
-        if res.config.chart_ratio >= 1. {
-            let dim_alpha = 0.5;
-            //let alpha = res.alpha * (1. - dim_alpha) + dim_alpha;    
-            let dim = Color::new(0.1, 0.1, 0.1, dim_alpha * res.alpha);
-            let x_range = vp.0 as f32 / ui.viewport.2 as f32;
-            draw_rectangle(-1., -h,x_range * 2., h * 2., dim);
-            draw_rectangle(1., -h,-x_range * 2., h * 2., dim);
-            draw_rectangle(x_range * 2. - 1., -h, (1. - x_range * 2.) * 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
-        }
-
-        set_camera( &Camera2D {
-            zoom: vec2_asp,
-            viewport: chart_target_vp,
-            ..Default::default()
-        });
-        
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
-        //self.gl.quad_gl.viewport(chart_target_vp);
-        if res.config.chart_ratio < 1. {
-            draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
-        }
-        self.chart.render(ui, res);
+        self.gl.quad_gl.viewport(chart_target_vp);
 
-        set_camera( &Camera2D {
-            zoom: vec2_asp,
-            viewport: chart_target_vp,
-            ..Default::default()
-        });
+        let h = 1. / res.aspect_ratio;
+        draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+
+        self.chart.render(ui, res);
 
         self.gl.quad_gl.render_pass(
             res.chart_target
@@ -1126,55 +1094,40 @@ impl Scene for GameScene {
         if res.config.particle {
             res.emitter.draw(dt);
         }
-        
         self.ui(ui, tm)?;
+        self.overlay_ui(ui, tm)?;
 
-        //pop_camera_state();
+        if self.mode == GameMode::TweakOffset {
+            push_camera_state();
+            self.gl.quad_gl.viewport(None);
+            set_camera(&Camera2D {
+                zoom: vec2(1., -screen_aspect()),
+                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
+                ..Default::default()
+            });
+            self.tweak_offset(ui, Self::interactive(&self.res, &self.state));
+            pop_camera_state();
+        }
 
         if !self.res.no_effect && !self.effects.is_empty() {
-            //push_camera_state();
+            push_camera_state();
             set_camera(&Camera2D {
-                zoom: vec2(1., asp),
+                zoom: vec2_asp,
                 ..Default::default()
             });
             for e in &self.effects {
                 e.render(&mut self.res);
             }
-            //pop_camera_state();
+            pop_camera_state();
         }
-        
-        {
-            //push_camera_state();
-            set_camera(&Camera2D {
-                zoom: vec2(1., -asp2),
-                viewport: chart_target_vp,
-                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
-                ..Default::default()
-            });
-            self.overlay_ui(ui, tm)?;
-            //pop_camera_state();
-        }
-
-        if self.mode == GameMode::TweakOffset {
-            //push_camera_state();
-            set_camera(&Camera2D {
-                zoom: vec2(1., -asp),
-                viewport: None,
-                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
-                ..Default::default()
-            });
-            self.tweak_offset(ui, Self::interactive(&self.res, &self.state));
-            //pop_camera_state();
-        }
-
         if msaa || !self.res.no_effect {
             // render the texture onto screen
             if let Some(target) = &self.res.chart_target {
                 self.gl.flush();
-                //push_camera_state();
+                push_camera_state();
                 self.gl.quad_gl.viewport(None);
                 set_camera(&Camera2D {
-                    zoom: vec2(1., asp),
+                    zoom: vec2_asp,
                     render_target: self.res.camera.render_target,
                     viewport: Some(ui.viewport),
                     ..Default::default()
@@ -1189,10 +1142,8 @@ impl Scene for GameScene {
                         ..Default::default()
                     },
                 );
-                //pop_camera_state();
+                pop_camera_state();
             }
-        } else {
-            self.gl.flush();
         }
         Ok(())
     }

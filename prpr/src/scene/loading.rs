@@ -32,7 +32,6 @@ pub struct BasicPlayer {
 
 pub struct LoadingScene {
     info: ChartInfo,
-    config: Config,
     background: SafeTexture,
     illustration: SafeTexture,
     pub load_task: LocalTask<Result<GameScene>>,
@@ -48,7 +47,7 @@ impl LoadingScene {
     pub async fn new(
         mode: GameMode,
         mut info: ChartInfo,
-        config: &Config,
+        config: Config,
         mut fs: Box<dyn FileSystem>,
         player: Option<BasicPlayer>,
         upload_fn: Option<UploadFn>,
@@ -66,9 +65,12 @@ impl LoadingScene {
             let mut blurred = Vec::with_capacity(size * 4);
             for input in blurred_rgb.chunks_exact(3) {
                 //blurred.extend_from_slice(input);
-                blurred.push(input[0]);
-                blurred.push(input[1]);
-                blurred.push(input[2]);
+                let r = (input[0] as f32 * 0.77) as u8;
+                let g = (input[1] as f32 * 0.77) as u8;
+                let b = (input[2] as f32 * 0.77) as u8;
+                blurred.push(r);
+                blurred.push(g);
+                blurred.push(b);
                 blurred.push(255);
             }
             Ok((
@@ -94,12 +96,11 @@ impl LoadingScene {
         if info.tip.is_none() {
             info.tip = Some(crate::config::TIPS.choose(&mut thread_rng()).unwrap().to_owned());
         }
-        let future = Box::pin(GameScene::new(mode, info.clone(), config.clone(), fs, player, background.clone(), illustration.clone(), upload_fn, update_fn));
+        let future = Box::pin(GameScene::new(mode, info.clone(), config, fs, player, background.clone(), illustration.clone(), upload_fn, update_fn));
         let charter = Regex::new(r"\[!:[0-9]+:([^:]*)\]").unwrap().replace_all(&info.charter, "$1").to_string();
 
         Ok(Self {
             info,
-            config: config.clone(),
             background,
             illustration,
             load_task: Some(future),
@@ -131,7 +132,7 @@ impl Scene for LoadingScene {
                         self.load_task = None;
                         self.next_scene =
                             Some(game_scene.map_or_else(|e| NextScene::PopWithResult(Box::new(e)), |it| NextScene::Replace(Box::new(it))));
-                        self.finish_time = if self.config.disable_loading { 0. } else { tm.now() as f32 + BEFORE_TIME };
+                        self.finish_time = tm.now() as f32 + BEFORE_TIME;
                         break;
                     }
                 }
@@ -181,6 +182,7 @@ impl Scene for LoadingScene {
         ui.text(&self.info.name)
             .pos(p.0, p.1)
             .anchor(0., 0.5)
+            //.max_width(main.w * 0.6)
             .size(text_size)
             .draw();
         
@@ -193,28 +195,22 @@ impl Scene for LoadingScene {
         ct.y += sub.h * 0.05;
         draw_parallelogram(sub, None, WHITE, true);
         //draw_text_aligned(ui, &(self.info.difficulty as u32).to_string(), ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.88, BLACK);
-        if self.config.difficulty.len() > 0 {
-            draw_text_aligned_fix(ui, &self.config.difficulty
-                , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK, main.w * 0.18
-            );
-        } else {
-            let first_str = Regex::new(r"[0-9?]+").unwrap();
-            let last_str = Regex::new(r"[0-9?.]+").unwrap();
-            draw_text_aligned_fix(ui, self.info.level
-                .split_whitespace()
-                .rev()
-                .nth(0)
-                //.and_then(|word| word.get(3..))
-                .and_then(|word| { first_str.find(word).map(|m| &word[m.start()..]) })
-                .and_then(|word| { last_str.find(word).map(|m| &word[..m.end()]) })
-                //.unwrap_or_default()
-                .unwrap_or(
-                    //self.info.level.split_whitespace().rev().nth(0).and_then(|word| word.find('.').map(|pos| &word[(pos + 1)..])).unwrap_or("?")
-                    "?"
-                )
-                , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK, main.w * 0.18
-            );
-        }
+        let first_str = Regex::new(r"[0-9?]+").unwrap();
+        let last_str = Regex::new(r"[0-9?.]+").unwrap();
+        draw_text_aligned_fix(ui, self.info.level
+            .split_whitespace()
+            .rev()
+            .nth(0)
+            //.and_then(|word| word.get(3..))
+            .and_then(|word| { first_str.find(word).map(|m| &word[m.start()..]) })
+            .and_then(|word| { last_str.find(word).map(|m| &word[..m.end()]) })
+            //.unwrap_or_default()
+            .unwrap_or(
+                //self.info.level.split_whitespace().rev().nth(0).and_then(|word| word.find('.').map(|pos| &word[(pos + 1)..])).unwrap_or("?")
+                "?"
+            )
+            , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK, main.w * 0.18
+        );
         //难度
         draw_text_aligned_fix(ui, self.info.level
             .split_whitespace()
@@ -222,11 +218,13 @@ impl Scene for LoadingScene {
             .unwrap_or("?")
             , ct.x, ct.y + sub.h * 0.09, (0.5, 0.), 0.30, BLACK, main.w * 0.16
         );
+
         let t = draw_text_aligned(ui, "Chart", main.x + main.w / 6.1, main.y + main.h * 1.32, (0., 0.), 0.253, WHITE);
         draw_text_aligned_fix(ui, &self.info.charter, t.x, t.y + top / 22., (0., 0.), 0.415, WHITE, 0.58);
         let w = 0.031;
         let t = draw_text_aligned(ui, "Illustration", t.x - w, t.y + w / 0.135 / 13. * 5., (0., 0.), 0.253, WHITE);
         draw_text_aligned_fix(ui, &self.info.illustrator, t.x - 0.002, t.y + top / 22., (0., 0.), 0.415, WHITE, 0.58);
+
         draw_text_aligned_fix(ui, self.info.tip.as_ref().unwrap(), -0.895, top * 0.88, (0., 1.), 0.47, WHITE, 1.5);
         let t = draw_text_aligned(ui, "Loading...", 0.865, top * 0.865, (1., 1.), 0.41, WHITE);
         let we = 0.19;
@@ -252,7 +250,7 @@ impl Scene for LoadingScene {
         Ok(())
     }
 
-     fn next_scene(&mut self, tm: &mut TimeManager) -> NextScene {
+    fn next_scene(&mut self, tm: &mut TimeManager) -> NextScene {
         if matches!(self.next_scene, Some(NextScene::PopWithResult(_))) {
             return self.next_scene.take().unwrap();
         }
