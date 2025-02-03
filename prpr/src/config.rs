@@ -80,15 +80,6 @@ pub struct Config {
     pub judge_offset: f32,
     pub phira_mode: bool,
 
-    pub render_line: bool,
-    pub render_line_extra: bool,
-    pub render_note: bool,
-    pub render_ui_pause: bool,
-    pub render_ui_score: bool,
-    pub render_ui_combo: bool,
-    pub render_ui_bar: bool,
-    pub render_bg: bool,
-
     pub max_particles: usize,
 }
 
@@ -138,15 +129,6 @@ impl Default for Config {
             disable_audio: false,
             judge_offset: 0.,
             phira_mode: false,
-
-            render_line: true,
-            render_line_extra: true,
-            render_note: true,
-            render_ui_pause: true,
-            render_ui_score: true,
-            render_ui_combo: true,
-            render_ui_bar: true,
-            render_bg: true,
 
             max_particles: 600000,
         }
