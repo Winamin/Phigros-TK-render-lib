@@ -7,11 +7,10 @@ use crate::{
         Object, TweenId, EPS,
     },
     ext::NotNanExt,
-    info::ChartFormat,
-    judge::{HitSound, JudgeStatus},
+    judge::JudgeStatus,
 };
 use anyhow::{bail, Context, Result};
-use std::{cell::RefCell, collections::HashMap};
+use std::cell::RefCell;
 use tracing::warn;
 
 trait Take {
@@ -93,7 +92,7 @@ fn sanitize_events(events: &mut [PECEvent], id: usize, desc: &str) {
                 "Overlap detected in {desc} events: [{last_start}, {last_end}) and [{}, {}). Clipping the last one to [{last_end}, {})",
                 e.start_time,
                 e.end_time,
-                e.end_time
+                last_end
             );
             e.start_time = last_end;
         }
@@ -144,7 +143,7 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32) -> Result<J
         for note in notes {
             height.set_time(note.time);
             note.height = height.now();
-            if let NoteKind::Hold { end_time, end_height, end_speed: _ } = &mut note.kind {
+            if let NoteKind::Hold { end_time, end_height } = &mut note.kind {
                 height.set_time(*end_time);
                 *end_height = height.now();
             }
@@ -173,7 +172,6 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32) -> Result<J
         notes: pec.notes,
         color: Anim::default(),
         parent: None,
-        anchor: [0.5, 0.5],
         z_index: 0,
         show_below: false,
         attach_ui: None,
@@ -246,13 +244,11 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
                         '2' => NoteKind::Hold {
                             end_time: it.take_time(r)?,
                             end_height: 0.0,
-                            end_speed: 1.0,
                         },
                         '3' => NoteKind::Flick,
                         '4' => NoteKind::Drag,
                         _ => unreachable!(),
                     };
-                    let hitsound = HitSound::default_from_kind(&kind);
                     let position_x = it.take_f32()? / 1024.;
                     // TODO we don't understand..
                     let above = it.take_usize()? == 1;
@@ -267,17 +263,17 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
                             ..Default::default()
                         },
                         kind,
-                        hitsound,
                         time,
                         height: 0.0,
                         speed: 1.0,
+			end_speed: 1.0,
+			start_height: 0.0,
 
                         above,
                         multiple_hint: false,
                         fake,
                         judge: JudgeStatus::NotJudged,
-                        attr: false,
-                        format: ChartFormat::Pec,
+			format: false
                     });
                     if it.next() == Some("#") {
                         last_note!().speed = it.take_f32()?;
@@ -382,6 +378,5 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
             ..Default::default()
         },
         extra,
-        HashMap::new(),
     ))
 }
