@@ -74,6 +74,15 @@ pub struct Config {
     pub disable_loading: bool,
     pub show_acc: bool,
 
+    pub render_line: bool,
+    pub render_line_extra: bool,
+    pub render_note: bool,
+    pub render_ui_pause: bool,
+    pub render_ui_score: bool,
+    pub render_ui_combo: bool,
+    pub render_ui_bar: bool,
+    pub render_bg: bool,
+
     // for compatibility
     pub autoplay: Option<bool>,
     pub disable_audio: bool,
@@ -124,7 +133,14 @@ impl Default for Config {
             difficulty: "".to_string(),
             show_acc: false,
             disable_loading: false,
-
+            render_line: true,
+            render_line_extra: true,
+            render_note: true,
+            render_ui_pause: true,
+            render_ui_score: true,
+            render_ui_combo: true,
+            render_ui_bar: true,
+            render_bg: true,
             autoplay: None,
             disable_audio: false,
             judge_offset: 0.,
