@@ -1044,7 +1044,9 @@ impl Scene for GameScene {
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
         let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
-        let vec2_asp = vec2(1. * res.config.chart_ratio, -asp * res.config.chart_ratio);
+        let vp = res.camera.viewport.unwrap_or(ui.viewport);
+        let asp2 = vp.2 as f32 / vp.3 as f32;
+        let vec2_asp = vec2(1. * &res.config.chart_ratio, -asp2 * &res.config.chart_ratio);
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
             set_camera(&res.camera);
         }
@@ -1056,7 +1058,7 @@ impl Scene for GameScene {
             .as_ref()
             .map(|it| if msaa { it.input() } else { it.output() })
             .or(res.camera.render_target);
-        push_camera_state();
+        //push_camera_state();
         set_camera(&Camera2D {
             zoom: vec2(1., -asp),
             viewport: if res.chart_target.is_some() { None } else { Some(ui.viewport) },
@@ -1065,7 +1067,7 @@ impl Scene for GameScene {
         });
         clear_background(BLACK);
         draw_background(*res.background);
-        pop_camera_state();
+        //pop_camera_state();
 
         let chart_target_vp = if res.chart_target.is_some() {
             let vp = res.camera.viewport.unwrap();
@@ -1073,13 +1075,26 @@ impl Scene for GameScene {
         } else {
             res.camera.viewport
         };
-        self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
-        self.gl.quad_gl.viewport(chart_target_vp);
+        //self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
+        //self.gl.quad_gl.viewport(chart_target_vp);
 
         let h = 1. / res.aspect_ratio;
+        set_camera( &Camera2D {
+            zoom: vec2_asp,
+            viewport: chart_target_vp,
+            ..Default::default()
+        });
+        
+        self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
         draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
 
         self.chart.render(ui, res);
+
+        set_camera( &Camera2D {
+            zoom: vec2_asp,
+            viewport: chart_target_vp,
+            ..Default::default()
+        });
 
         self.gl.quad_gl.render_pass(
             res.chart_target
@@ -1098,15 +1113,15 @@ impl Scene for GameScene {
         self.overlay_ui(ui, tm)?;
 
         if self.mode == GameMode::TweakOffset {
-            push_camera_state();
+            //push_camera_state();
             self.gl.quad_gl.viewport(None);
             set_camera(&Camera2D {
-                zoom: vec2(1., -screen_aspect()),
+                zoom: vec2(1., asp),
                 render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
                 ..Default::default()
             });
             self.tweak_offset(ui, Self::interactive(&self.res, &self.state));
-            pop_camera_state();
+            //pop_camera_state();
         }
 
         if !self.res.no_effect && !self.effects.is_empty() {
@@ -1118,16 +1133,16 @@ impl Scene for GameScene {
             for e in &self.effects {
                 e.render(&mut self.res);
             }
-            pop_camera_state();
+            //pop_camera_state();
         }
         if msaa || !self.res.no_effect {
             // render the texture onto screen
             if let Some(target) = &self.res.chart_target {
                 self.gl.flush();
-                push_camera_state();
+                //push_camera_state();
                 self.gl.quad_gl.viewport(None);
                 set_camera(&Camera2D {
-                    zoom: vec2_asp,
+                    zoom: vec2(1., asp),
                     render_target: self.res.camera.render_target,
                     viewport: Some(ui.viewport),
                     ..Default::default()
@@ -1142,7 +1157,7 @@ impl Scene for GameScene {
                         ..Default::default()
                     },
                 );
-                pop_camera_state();
+                //pop_camera_state();
             }
         }
         Ok(())
