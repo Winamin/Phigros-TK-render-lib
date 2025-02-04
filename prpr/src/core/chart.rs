@@ -110,6 +110,9 @@ impl Chart {
     }
 
     pub fn render(&self, ui: &mut Ui, res: &mut Resource) {
+        let vp = res.camera.viewport.unwrap_or(ui.viewport);
+        let asp2 = vp.2 as f32 / vp.3 as f32;
+        let vec2_asp2 = vec2(1., -asp2);
         for video in &self.extra.videos {
             video.render(res);
         }
@@ -127,9 +130,17 @@ impl Chart {
                 }
             }
             if !res.no_effect {
+                //push_camera_state();
+                set_camera(&Camera2D {
+                    zoom: vec2_asp2,
+                    //render_target: res.camera.render_target,
+                    //viewport: Some(ui.viewport),
+                    ..Default::default()
+                });
                 for effect in &self.extra.effects {
                     effect.render(res);
                 }
+                //pop_camera_state();
             }
         });
     }
