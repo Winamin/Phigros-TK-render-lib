@@ -64,6 +64,10 @@ pub struct Config {
     pub sample_count: u32,
     pub show_acc: bool,
     pub speed: f32,
+    // test
+    pub show_progress_text: bool,
+    pub show_time_text: bool,
+    //test
     pub touch_debug: bool,
     pub volume_music: f32,
     pub volume_sfx: f32,
@@ -112,6 +116,8 @@ impl Default for Config {
             volume_bgm: 1.,
 
             autoplay: None,
+            show_progress_text: false,
+            show_time_text: false,
         }
     }
 }
