@@ -442,7 +442,7 @@ impl GameScene {
         });
         let hw = 0.0015;
         let height = eps * 1.1;
-        let dest = 2. * res.time / res.track_length;
+        let dest = (2. * res.time / res.track_length).min(1.0);
         self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
             let ct = Vector::new(0., top + height / 2.);
             ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
@@ -477,14 +477,14 @@ impl GameScene {
         let total_time_text = fmt_time(res.track_length);
         let time_text = format!("{}", current_time_text);
 
-        ui.text(progress_text)
+        if res.config.show_progress_text {ui.text(progress_text)
             .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
             .anchor(1., 0.)
             .size(0.4)
             .color(semi_white(0.7))
             .draw();
 
-        ui.text(time_text)
+        if res.config.show_time_text {
             .pos(-1. + bar_width - 0.01, top + height / 2.)
             .anchor(1., 0.5)
             .size(0.17867)
@@ -1069,6 +1069,8 @@ impl Scene for GameScene {
             .as_ref()
             .map(|it| if msaa { it.input() } else { it.output() })
             .or(res.camera.render_target);
+
+        let h = 1. / res.aspect_ratio;
         //push_camera_state();
         set_camera(&Camera2D {
             zoom: vec2(1., -asp),
@@ -1079,7 +1081,6 @@ impl Scene for GameScene {
         clear_background(BLACK);
         draw_background(*res.background);
         //pop_camera_state();
-
         let chart_target_vp = if res.chart_target.is_some() {
             let vp = res.camera.viewport.unwrap();
             Some((vp.0 - ui.viewport.0, vp.1 - ui.viewport.1, vp.2, vp.3))
@@ -1089,7 +1090,14 @@ impl Scene for GameScene {
         //self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
         //self.gl.quad_gl.viewport(chart_target_vp);
 
-        let h = 1. / res.aspect_ratio;
+        if res.config.chart_ratio >= 1. {
+            let dim = Color::new(0., 0., 0., 0.5);
+            let x_range = vp.0 as f32 / ui.viewport.2 as f32;
+            draw_rectangle(-1., -h,x_range * 2., h * 2., dim);
+            draw_rectangle(1., -h,-x_range * 2., h * 2., dim);
+            draw_rectangle(x_range * 2. - 1., -h, (1. - x_range * 2.) * 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+        }
+        
         set_camera( &Camera2D {
             zoom: vec2_asp,
             viewport: chart_target_vp,
@@ -1097,8 +1105,10 @@ impl Scene for GameScene {
         });
         
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
-        draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
-
+        
+        if res.config.chart_ratio < 1. {
+            draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+        }
         self.chart.render(ui, res);
 
         set_camera( &Camera2D {
