@@ -483,7 +483,7 @@ impl GameScene {
             .size(0.4)
             .color(semi_white(0.7))
             .draw();
-
+        }
         if res.config.show_time_text {
             .pos(-1. + bar_width - 0.01, top + height / 2.)
             .anchor(1., 0.5)
@@ -491,6 +491,7 @@ impl GameScene {
             .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
             .scale(scale)
             .draw();
+            }
          });
         Ok(())
     }
