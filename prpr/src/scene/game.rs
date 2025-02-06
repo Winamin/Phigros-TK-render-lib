@@ -484,7 +484,7 @@ impl GameScene {
             .color(semi_white(0.7))
             .draw();
         }
-        if res.config.show_time_text {
+        if res.config.show_time_text {ui.text(time_text)
             .pos(-1. + bar_width - 0.01, top + height / 2.)
             .anchor(1., 0.5)
             .size(0.17867)
@@ -1055,11 +1055,6 @@ impl Scene for GameScene {
             1. + (res.config.chart_ratio - 1.) * ease_in_out_quartic(p)
         };
         */
-        let vec2_asp = vec2(1. * ratio, -asp2 * ratio);
-
-        if res.update_size(ui.viewport) || self.mode == GameMode::View {
-            set_camera(&res.camera);
-        }
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
             set_camera(&res.camera);
         }
