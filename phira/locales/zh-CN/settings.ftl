@@ -44,6 +44,8 @@ item-touch-debug-sub = 游玩过程中显示触摸点
 item-buffer_size = 调节Buffer_size
 item-combo = 自定义COMBO名称
 item-flid_x = 镜像模式
+item-show_progress_text = 进度条（比例显示）
+item-show_time_text = 进度条时间显示
 
 load-cali-failed = 加载音频失败
 
