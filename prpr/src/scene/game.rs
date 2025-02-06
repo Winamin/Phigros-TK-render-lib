@@ -1047,6 +1047,17 @@ impl Scene for GameScene {
         let vp = res.camera.viewport.unwrap_or(ui.viewport);
         let asp2 = vp.2 as f32 / vp.3 as f32;
         let vec2_asp = vec2(1. * &res.config.chart_ratio, -asp2 * &res.config.chart_ratio);
+
+        let ratio = if res.config.chart_ratio == 1. || res.config.disable_loading {
+            res.config.chart_ratio
+        } else {
+            1. + (res.config.chart_ratio - 1.) * ease_in_out_quartic(p)
+        };
+        let vec2_asp = vec2(1. * ratio, -asp2 * ratio);
+
+        if res.update_size(ui.viewport) || self.mode == GameMode::View {
+            set_camera(&res.camera);
+        }
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
             set_camera(&res.camera);
         }
