@@ -442,7 +442,7 @@ impl GameScene {
         });
         let hw = 0.0015;
         let height = eps * 1.1;
-        let dest = (2. * res.time / res.track_length).min(1.0);
+        let dest = (2. * res.time / res.track_length).min(2.0);
         self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
             let ct = Vector::new(0., top + height / 2.);
             ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
