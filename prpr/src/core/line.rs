@@ -116,6 +116,7 @@ pub struct JudgeLine {
 
 impl JudgeLine {
     pub fn update(&mut self, res: &mut Resource, tr: Matrix, bpm_list: &mut BpmList, index: usize) {
+        // self.object.set_time(res.time); // this is done by chart, chart has to calculate transform for us
         let rot = self.object.rotation.now();
         self.height.set_time(res.time);
         let line_height = self.height.now();
@@ -131,6 +132,9 @@ impl JudgeLine {
                 anim.set_time(res.time);
             }
             JudgeLineKind::Paint(anim, ..) => {
+                anim.set_time(res.time);
+            }
+            JudgeLineKind::TextureGif(anim, ..) => {
                 anim.set_time(res.time);
             }
             _ => {}
@@ -163,14 +167,24 @@ impl JudgeLine {
     }
 
     pub fn now_transform(&self, res: &Resource, lines: &[JudgeLine]) -> Matrix {
-        if let Some(parent) = self.parent {
+        /*if let Some(parent) = self.parent {
             let po = &lines[parent].object;
             let mut tr = Rotation2::new(po.rotation.now().to_radians()) * self.object.now_translation(res);
             tr += po.now_translation(res);
             self.object.now_rotation().append_translation(&tr)
         } else {
             self.object.now(res)
+        }*/
+        fn fetch_pos(line: &JudgeLine, res: &Resource, lines: &[JudgeLine]) -> Vector {
+            if let Some(parent) = line.parent {
+                let parent = &lines[parent];
+                let mut parent_translation = fetch_pos(parent, res, lines);
+                parent_translation += Rotation2::new(parent.object.rotation.now().to_radians()) * line.object.now_translation(res);
+                return parent_translation;
+            }
+            line.object.now_translation(res)
         }
+            self.object.now_rotation().append_translation(&fetch_pos(self, res, lines))
     }
 
     pub fn render(&self, ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
@@ -180,82 +194,129 @@ impl JudgeLine {
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| match &self.kind {
                     JudgeLineKind::Normal => {
-                        let mut color = color.unwrap_or(res.judge_line_color);
-                        color.a *= alpha.max(0.0);
-                        if res.config.chart_debug {
-                            color.a = 0.10 + 0.90 * color.a;
+                        if res.config.render_line {
+                            let mut color = color.unwrap_or(res.judge_line_color);
+                            color.a *= alpha.max(0.0);
+                            if res.config.chart_debug {
+                                color.a = 0.10 + 0.90 * color.a;
+                            } else if color.a == 0.0 {
+                                return;
+                            }
+                            let len = res.info.line_length;
+                            draw_line(-len, 0., len, 0., 0.0075, color);
                         }
-                        let len = res.info.line_length;
-                        draw_line(-len, 0., len, 0., 0.0075, color);
                     }
                     JudgeLineKind::Texture(texture, _) => {
-                        let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0);
-                        let hf = vec2(texture.width(), texture.height()); // Sync RPE
-                        //let hf = vec2(texture.width() / res.aspect_ratio, texture.height() / res.aspect_ratio);
-                        draw_texture_ex(
-                            **texture,
-                            -hf.x / 2.,
-                            -hf.y / 2.,
-                            color,
-                            DrawTextureParams {
-                                dest_size: Some(hf),
-                                flip_y: true,
-                                ..Default::default()
-                            },
-                        );
-                    }
-                    JudgeLineKind::Text(anim) => {
-                        let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0);
-                        let now = anim.now();
-                        res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |_| {
-                            draw_text_aligned(ui, &now, 0., 0., (0.5, 0.5), 1., color);
-                        });
-                    }
-                    JudgeLineKind::Paint(anim, state) => {
-                        let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0) * 2.55;
-                        let mut gl = unsafe { get_internal_gl() };
-                        let mut guard = state.borrow_mut();
-                        let vp = get_viewport();
-                        let pass = *guard.0.get_or_insert_with(|| {
-                            let ctx = &mut gl.quad_context;
-                            let tex = Texture::new_render_texture(
-                                ctx,
-                                TextureParams {
-                                    width: vp.2 as _,
-                                    height: vp.3 as _,
-                                    format: miniquad::TextureFormat::RGBA8,
-                                    filter: FilterMode::Linear,
-                                    wrap: TextureWrap::Clamp,
+                        if res.config.render_line_extra {
+                            let mut color = color.unwrap_or(WHITE);
+                            color.a = alpha.max(0.0);
+                            if res.config.chart_debug {
+                                color.a = 0.10 + 0.90 * color.a;
+                            } else if color.a == 0.0 {
+                                return;
+                            }
+                            // let hf = vec2(texture.width() / res.aspect_ratio, texture.height() / res.aspect_ratio);
+                            let hf = vec2(texture.width(), texture.height()); // Sync RPE
+                            draw_texture_ex(
+                                **texture,
+                                -hf.x / 2.,
+                                -hf.y / 2.,
+                                color,
+                                DrawTextureParams {
+                                    dest_size: Some(hf),
+                                    flip_y: true,
+                                    pivot: Some(Vec2::new(self.anchor[0], -self.anchor[1] + 1.)),
+                                    ..Default::default()
                                 },
                             );
-                            RenderPass::new(ctx, tex, None)
-                        });
-                        gl.flush();
-                        let old_pass = gl.quad_gl.get_active_render_pass();
-                        gl.quad_gl.render_pass(Some(pass));
-                        gl.quad_gl.viewport(None);
-                        let size = anim.now();
-                        if size <= 0. {
-                            if guard.1 {
-                                clear_background(Color::default());
-                                guard.1 = false;
-                            }
-                        } else {
-                            ui.fill_circle(0., 0., size / vp.2 as f32 * 2., color);
-                            guard.1 = true;
                         }
-                        gl.flush();
-                        gl.quad_gl.render_pass(old_pass);
-                        gl.quad_gl.viewport(Some(vp));
+                    }
+                    JudgeLineKind::TextureGif(anim, frames, _) => {
+                        if res.config.render_line_extra {
+                            let t = anim.now_opt().unwrap_or(0.0);
+                            let frame = frames.get_prog_frame(t);
+                            let mut color = color.unwrap_or(WHITE);
+                            color.a = alpha.max(0.0);
+                            if res.config.chart_debug {
+                                color.a = 0.10 + 0.90 * color.a;
+                            } else if color.a == 0.0 {
+                                return;
+                            }
+                            let hf = vec2(frame.width(), frame.height());
+                            draw_texture_ex(
+                                **frame,
+                                -hf.x / 2.,
+                                -hf.y / 2.,
+                                color,
+                                DrawTextureParams {
+                                    dest_size: Some(hf),
+                                    flip_y: true,
+                                    pivot: Some(Vec2::new(self.anchor[0], -self.anchor[1] + 1.)),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                    JudgeLineKind::Text(anim) => {
+                        if res.config.render_line_extra {
+                                let mut color = color.unwrap_or(WHITE);
+                            color.a = alpha.max(0.0);
+                            if res.config.chart_debug {
+                                color.a = 0.10 + 0.90 * color.a;
+                            } else if color.a == 0.0 {
+                                return;
+                            }
+                            let now = anim.now();
+                            res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |_| {
+                                ui.text(&now).pos(0., 0.).anchor(self.anchor[0], -self.anchor[1] + 1.).size(1.).color(color).multiline().draw();
+                            });
+                        }
+                    }
+                    JudgeLineKind::Paint(anim, state) => {
+                        {
+                            let mut color = color.unwrap_or(WHITE);
+                            color.a = alpha.max(0.0) * 2.55;
+                            let mut gl = unsafe { get_internal_gl() };
+                            let mut guard = state.borrow_mut();
+                            let vp = get_viewport();
+                            let pass = *guard.0.get_or_insert_with(|| {
+                                let ctx = &mut gl.quad_context;
+                                let tex = Texture::new_render_texture(
+                                    ctx,
+                                    TextureParams {
+                                        width: vp.2 as _,
+                                        height: vp.3 as _,
+                                        format: miniquad::TextureFormat::RGBA8,
+                                        filter: FilterMode::Linear,
+                                        wrap: TextureWrap::Clamp,
+                                    },
+                                );
+                                RenderPass::new(ctx, tex, None)
+                            });
+                            gl.flush();
+                            let old_pass = gl.quad_gl.get_active_render_pass();
+                            gl.quad_gl.render_pass(Some(pass));
+                            gl.quad_gl.viewport(None);
+                            let size = anim.now();
+                            if size <= 0. {
+                                if guard.1 {
+                                    clear_background(Color::default());
+                                    guard.1 = false;
+                                }
+                            } else {
+                                ui.fill_circle(0., 0., size / vp.2 as f32 * 2., color);
+                                guard.1 = true;
+                            }
+                            gl.flush();
+                            gl.quad_gl.render_pass(old_pass);
+                            gl.quad_gl.viewport(Some(vp));
+                        }
                     }
                 })
             });
             if let JudgeLineKind::Paint(_, state) = &self.kind {
                 let guard = state.borrow_mut();
-                if guard.1 {
+                if guard.1 && res.config.render_line_extra {
                     let ctx = unsafe { get_internal_gl() }.quad_context;
                     let tex = guard.0.as_ref().unwrap().texture(ctx);
                     let top = 1. / res.aspect_ratio;
@@ -283,14 +344,23 @@ impl JudgeLine {
             if res.config.has_mod(Mods::FADE_OUT) {
                 config.invisible_time = LIMIT_BAD;
             }
+            let mut line_set_debug_alpha = false;
             if alpha < 0.0 {
                 if !settings.pe_alpha_extension {
-                    return;
+                    if res.config.chart_debug {
+                        line_set_debug_alpha = true;
+                    } else {
+                        return;
+                    }
                 }
                 let w = (-alpha).floor() as u32;
                 match w {
                     1 => {
-                        return;
+                        if res.config.chart_debug {
+                            line_set_debug_alpha = true;
+                        } else {
+                            return;
+                        }
                     }
                     2 => {
                         config.draw_below = false;
@@ -304,7 +374,7 @@ impl JudgeLine {
                     _ => {}
                 }
             }
-            let (vw, vh) = (1.1, 1.);
+            let (vw, vh) = (1.1 / res.config.chart_ratio, 1. / res.config.chart_ratio);
             let p = [
                 res.screen_to_world(Point::new(-vw, -vh)),
                 res.screen_to_world(Point::new(-vw, vh)),
@@ -314,40 +384,58 @@ impl JudgeLine {
             let height_above = p[0].y.max(p[1].y.max(p[2].y.max(p[3].y))) * res.aspect_ratio;
             let height_below = -p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) * res.aspect_ratio;
             let agg = res.config.aggressive;
-            for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| it.above) {
-                note.render(res, &mut config, bpm_list);
-            }
-            for index in &self.cache.above_indices {
-                let speed = self.notes[*index].speed;
-                let limit = height_above / speed;
-                for note in self.notes[*index..].iter() {
-                    if !note.above || speed != note.speed {
+            if res.config.note_scale > 0. && res.config.render_note {
+                for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| it.above) {
+                    let line_height = {
+                        let mut height = self.height.clone();
+                        height.set_time(note.time.min(res.time));
+                        height.now()
+                    };
+                    if agg && note.height - line_height + note.object.translation.1.now() > height_above / note.speed && matches!(note.format, ChartFormat::Pgr | ChartFormat::Rpe) {
                         break;
                     }
-                    if agg && note.height - config.line_height + note.object.translation.1.now() > limit {
-                        break;
-                    }
-                    note.render(res, &mut config, bpm_list);
+                    note.render(ui, res, &mut config, bpm_list, line_set_debug_alpha);
                 }
-            }
-            res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
-                for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| !it.above) {
-                    note.render(res, &mut config, bpm_list);
-                }
-                for index in &self.cache.below_indices {
+                for index in &self.cache.above_indices {
                     let speed = self.notes[*index].speed;
-                    let limit = height_below / speed;
+                    let limit = height_above / speed;
                     for note in self.notes[*index..].iter() {
-                        if speed != note.speed {
+                        if !note.above || speed != note.speed {
                             break;
                         }
                         if agg && note.height - config.line_height + note.object.translation.1.now() > limit {
                             break;
                         }
-                        note.render(res, &mut config, bpm_list);
+                        note.render(ui, res, &mut config, bpm_list, line_set_debug_alpha);
                     }
                 }
-            });
+                res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
+                    for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| !it.above) {
+                        let line_height = {
+                            let mut height = self.height.clone();
+                            height.set_time(note.time.min(res.time));
+                            height.now()
+                        };
+                        if agg && note.height - line_height + note.object.translation.1.now() > height_below / note.speed && matches!(note.format, ChartFormat::Pgr | ChartFormat::Rpe) {
+                            break;
+                        }
+                        note.render(ui, res, &mut config, bpm_list, line_set_debug_alpha);
+                    }
+                    for index in &self.cache.below_indices {
+                        let speed = self.notes[*index].speed;
+                        let limit = height_below / speed;
+                        for note in self.notes[*index..].iter() {
+                            if speed != note.speed {
+                                break;
+                            }
+                            if agg && note.height - config.line_height + note.object.translation.1.now() > limit {
+                                break;
+                            }
+                            note.render(ui, res, &mut config, bpm_list, line_set_debug_alpha);
+                        }
+                    }
+                });
+            }
             if res.config.chart_debug {
                 res.apply_model(|_| {
                     ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).size(0.5).draw();
