@@ -223,11 +223,6 @@ impl Note {
         if config.invisible_time.is_finite() && self.time - config.invisible_time < res.time {
             return;
         }
-        let scale = (if self.multiple_hint {
-            res.res_pack.note_style_mh.click.width() / res.res_pack.note_style.click.width()
-        } else {
-            1.0
-        }) * res.note_width;
         let ctrl_obj = &mut config.ctrl_obj;
         self.init_ctrl_obj(ctrl_obj, config.line_height);
         let mut color = self.object.now_color();
@@ -238,6 +233,15 @@ impl Note {
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
+
+        if res.config.aggressive && matches!(self.format, ChartFormat::Pec) && matches!(self.kind, NoteKind::Hold { .. }) {
+            let h = if self.time <= res.time { line_height } else { height };
+            let bottom = h - line_height;
+            if bottom - line_height > 2. / res.config.chart_ratio {
+                return;
+            }
+        }
+        
         //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
 
         // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
@@ -252,6 +256,13 @@ impl Note {
                 return;
             }
         }
+
+        let scale = (if self.multiple_hint {
+            res.res_pack.note_style_mh.click.width() / res.res_pack.note_style.click.width()
+        } else {
+            1.0
+        }) * res.note_width;
+        
         let order = self.kind.order();
         let style = if res.config.double_hint && self.multiple_hint {
             &res.res_pack.note_style_mh
