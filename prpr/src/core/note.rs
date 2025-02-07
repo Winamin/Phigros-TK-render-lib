@@ -5,6 +5,7 @@ use crate::{
     judge::JudgeStatus, 
     parse::RPE_HEIGHT,
     core::HEIGHT_RATIO,
+    info::ChartFormat,
 };
 
 
