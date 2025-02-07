@@ -114,64 +114,6 @@ pub struct JudgeLine {
     pub cache: JudgeLineCache,
 }
 
-impl JudgeLineCache {
-    pub fn new(notes: &mut Vec<Note>) -> Self {
-        notes.sort_by_key(|it| (it.plain(), !it.above, it.speed.not_nan(), ((it.height + it.object.translation.1.now()) * it.speed).not_nan()));
-        let mut res = Self {
-            update_order: Vec::new(),
-            not_plain_count: 0,
-            above_indices: Vec::new(),
-            below_indices: Vec::new(),
-        };
-        res.reset(notes);
-        res
-    }
-
-    pub(crate) fn reset(&mut self, notes: &mut Vec<Note>) {
-        self.update_order = (0..notes.len() as u32).collect();
-        self.above_indices.clear();
-        self.below_indices.clear();
-        let mut index = notes.iter().position(|it| it.plain()).unwrap_or(notes.len());
-        self.not_plain_count = index;
-        while notes.get(index).map_or(false, |it| it.above) {
-            self.above_indices.push(index);
-            let speed = notes[index].speed;
-            loop {
-                index += 1;
-                if !notes.get(index).map_or(false, |it| it.above && it.speed == speed) {
-                    break;
-                }
-            }
-        }
-        while index != notes.len() {
-            self.below_indices.push(index);
-            let speed = notes[index].speed;
-            loop {
-                index += 1;
-                if !notes.get(index).map_or(false, |it| it.speed == speed) {
-                    break;
-                }
-            }
-        }
-    }
-}
-
-pub struct JudgeLine {
-    pub object: Object,
-    pub ctrl_obj: RefCell<CtrlObject>,
-    pub kind: JudgeLineKind,
-    pub height: AnimFloat,
-    pub incline: AnimFloat,
-    pub notes: Vec<Note>,
-    pub color: Anim<Color>,
-    pub parent: Option<usize>,
-    pub z_index: i32,
-    pub show_below: bool,
-    pub attach_ui: Option<UIElement>,
-
-    pub cache: JudgeLineCache,
-}
-
 impl JudgeLine {
     pub fn update(&mut self, res: &mut Resource, tr: Matrix, bpm_list: &mut BpmList, index: usize) {
         let rot = self.object.rotation.now();
@@ -242,8 +184,6 @@ impl JudgeLine {
                         color.a *= alpha.max(0.0);
                         if res.config.chart_debug {
                             color.a = 0.10 + 0.90 * color.a;
-                        } else if color.a == 0.0 {
-                                return;
                         }
                         let len = res.info.line_length;
                         draw_line(-len, 0., len, 0., 0.0075, color);
@@ -251,11 +191,6 @@ impl JudgeLine {
                     JudgeLineKind::Texture(texture, _) => {
                         let mut color = color.unwrap_or(WHITE);
                         color.a = alpha.max(0.0);
-                        if res.config.chart_debug {
-                                color.a = 0.10 + 0.90 * color.a;
-                            } else if color.a == 0.0 {
-                                return;
-                        }
                         let hf = vec2(texture.width(), texture.height()); // Sync RPE
                         //let hf = vec2(texture.width() / res.aspect_ratio, texture.height() / res.aspect_ratio);
                         draw_texture_ex(
@@ -273,11 +208,6 @@ impl JudgeLine {
                     JudgeLineKind::Text(anim) => {
                         let mut color = color.unwrap_or(WHITE);
                         color.a = alpha.max(0.0);
-                        if res.config.chart_debug {
-                                color.a = 0.10 + 0.90 * color.a;
-                            } else if color.a == 0.0 {
-                                return;
-                        }
                         let now = anim.now();
                         res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |_| {
                             draw_text_aligned(ui, &now, 0., 0., (0.5, 0.5), 1., color);
