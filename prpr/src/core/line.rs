@@ -15,13 +15,13 @@ use std::cell::RefCell;
 #[serde(rename_all = "lowercase")]
 #[repr(u8)]
 pub enum UIElement {
-    Bar = 1,
-    Pause,
-    ComboNumber,
-    Combo,
-    Score,
-    Name,
-    Level,
+    Pause = 1,
+    ComboNumber = 2,
+    Combo = 3,
+    Score = 4,
+    Bar = 5,
+    Name = 6,
+    Level = 7,
 }
 
 impl UIElement {
