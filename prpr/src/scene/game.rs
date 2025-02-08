@@ -734,7 +734,7 @@ impl GameScene {
         self.chart.offset + self.res.config.offset + self.info_offset
     }
 
-    fn tweak_offset(&mut self, ui: &mut Ui, ita: bool) {
+    fn tweak_offset(&mut self, ui: &mut Ui, ita: bool, tm: &mut TimeManager) {
         ui.scope(|ui| {
             let width = 0.55;
             let height = 0.4;
@@ -1070,7 +1070,7 @@ impl Scene for GameScene {
         } else {
             res.camera.viewport
         };
-
+        let h = 1. / res.aspect_ratio;
         if res.config.chart_ratio >= 1. {
             let dim_alpha = 0.5;
             //let alpha = res.alpha * (1. - dim_alpha) + dim_alpha;    
