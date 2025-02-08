@@ -163,6 +163,21 @@ macro_rules! reset {
     }};
 }
 
+macro_rules! reset_speed {
+    ($self:ident, $res:expr, $tm:ident) => {{
+        $self.bad_notes.clear();
+        $self.judge.reset();
+        $self.chart.reset();
+        $res.judge_line_color = Color::from_hex($res.res_pack.info.color_perfect_line);
+        $self.music.pause();
+        $self.music.seek_to(0.);
+        $tm.speed = $res.config.speed as _;
+        $tm.reset();
+        $self.last_update_time = $tm.now();
+        $self.state = State::Starting;
+    }};
+}
+
 impl GameScene {
     pub const BEFORE_TIME: f32 = 0.7;
     pub const BEFORE_DURATION: f32 = 1.2;
@@ -406,7 +421,7 @@ impl GameScene {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
                 let mut text_size = 1.;
                 let max_width = 0.55;
-                let mut text = ui.text(&combo)
+                let mut text = ui.text(&res.config.combo)
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
                     .color(Color::new(0., 0., 0., 0.));
@@ -416,7 +431,7 @@ impl GameScene {
                     text_size *= max_width / text_width
                }
                ui.text(self.judge.combo().to_string())
-                    ui.text(&combo)
+                    ui.text(&res.config.combo)
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
                     .color(Color { a: color.a * c.a, ..color })
@@ -756,6 +771,8 @@ impl GameScene {
     }
 
     fn tweak_offset(&mut self, ui: &mut Ui, ita: bool, tm: &mut TimeManager) {
+        let width = 0.55;
+        let height = 0.3;
         ui.scope(|ui| {
             let width = 0.55;
             let height = 0.3;
