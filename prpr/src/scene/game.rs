@@ -441,7 +441,7 @@ impl GameScene {
         let height = eps * 1.1;
         let dest = (2. * res.time / res.track_length).min(2.0);
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
-            let ct = Vector::new(0., top + height / 2.);
+            //let ct = Vector::new(0., top + height / 2.);
                 ui.fill_rect(
                     Rect::new(-1., top, dest, height),
                     //Color{ a: color.a * c.a * 0.6, ..color},
