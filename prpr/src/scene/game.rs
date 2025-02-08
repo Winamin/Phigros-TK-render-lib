@@ -385,13 +385,11 @@ impl GameScene {
         }
         self.chart.with_element(ui, res, UIElement::Pause, Some((pause_center.x, pause_center.y)), Some((pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2)), |ui, color| {
             let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
-            let ct = pause_center.coords;
+            //let ct = pause_center.coords;
             let c = Color { a: color.a * c.a, ..color };
-            ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
                 ui.fill_rect(r, c);
                 r.x += pause_w * 2.;
                 ui.fill_rect(r, c);
-            });
         });
         let unit_h = ui.text("0").measure().h;
         let combo_top = top + eps * 1.346 - (1. - p) * 0.4;
@@ -453,7 +451,6 @@ impl GameScene {
         });
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
         let ct = Vector::new(0., top + height / 2.);
-        ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
             ui.fill_rect(
                 Rect::new(-1., top, dest, height),
                 Color::new(0.45, 0.45, 0.45, 1.),
@@ -486,7 +483,6 @@ impl GameScene {
             .anchor(1., 0.5)
             .size(0.17867)
             .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
-            .scale(scale)
             .draw();
             }
          });
