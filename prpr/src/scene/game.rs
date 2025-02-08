@@ -366,7 +366,8 @@ impl GameScene {
         }
 
         let margin = 0.046;
-
+        let score_top = top + eps * 2.2 - (1. - p) * 0.4;
+        let ct = ui.text(&score).size(0.8).center();
         self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
             ui.text(format!("{:07}", self.judge.score()))
                 .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
