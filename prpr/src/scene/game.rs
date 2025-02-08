@@ -456,7 +456,7 @@ impl GameScene {
                 Color::new(0.45, 0.45, 0.45, 1.),
             );
             ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
-        });
+        //});
 
         let progress = res.time / res.track_length;
         let bar_width = progress * 2.0;
