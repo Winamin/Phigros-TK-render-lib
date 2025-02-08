@@ -430,7 +430,7 @@ impl GameScene {
                 if text_width > max_width {
                     text_size *= max_width / text_width
                }
-               ui.text(self.judge.combo().to_string())
+               ui.text(self.judge.combo().to_string());
                     ui.text(&res.config.combo)
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
