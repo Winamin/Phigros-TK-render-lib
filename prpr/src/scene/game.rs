@@ -421,7 +421,7 @@ impl GameScene {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
                 let mut text_size = 1.;
                 let max_width = 0.55;
-                let mut text = ui.text(&res.config.combo)
+                let mut text = ui.text(self.judge.combo().to_string())
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
                     .color(Color::new(0., 0., 0., 0.));
