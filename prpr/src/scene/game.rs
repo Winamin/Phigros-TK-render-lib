@@ -1135,7 +1135,7 @@ impl Scene for GameScene {
         if self.mode == GameMode::TweakOffset {
             //push_camera_state();
             set_camera(&Camera2D {
-                zoom: vec2(1., asp),
+                zoom: vec2(1., -asp),
                 viewport: None,
                 render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
                 ..Default::default()
