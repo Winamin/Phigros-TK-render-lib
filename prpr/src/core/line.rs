@@ -187,7 +187,7 @@ impl JudgeLine {
 
     pub fn render(&self, ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
-        let color = self.color.now_opt();
+        let mut color = self.color.now_opt();
         res.with_model(self.now_transform(res, lines), |res| {
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| match &self.kind {
