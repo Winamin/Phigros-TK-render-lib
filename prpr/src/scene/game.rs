@@ -369,6 +369,14 @@ impl GameScene {
         let score_top = top + eps * 2.2 - (1. - p) * 0.4;
         let ct = ui.text(&score).size(0.8).center();
         self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
+            let mut text_size = 0.70867;
+            let mut text = ui.text(&score).size(text_size);
+            let max_width = 0.55;
+            let text_width = text.measure().w;
+            if text_width > max_width {
+                text_size *= max_width / text_width
+            }
+            drop(text);
             ui.text(format!("{:07}", self.judge.score()))
                 .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
                 .anchor(1., 0.)
@@ -396,12 +404,25 @@ impl GameScene {
         let combo_top = top + eps * 1.346 - (1. - p) * 0.4;
         if self.judge.combo() >= 3 {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
+                let mut text_size = 1.;
+                let max_width = 0.55;
+                let mut text = ui.text(&combo)
+                    .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
+                    .anchor(0.5, 0.)
+                    .color(Color::new(0., 0., 0., 0.));
+                let text_width = text.measure().w;
+                let text_btm = text.draw().bottom();
+                if text_width > max_width {
+                    text_size *= max_width / text_width
+               }
                ui.text(self.judge.combo().to_string())
+                    ui.text(&combo)
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
                     .color(Color { a: color.a * c.a, ..color })
-                    .draw()
-                    .bottom()
+                    .size(text_size)
+                    .draw();
+                text_btm
             });
             self.chart.with_element(ui, res, UIElement::Combo, Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), |ui, color| {
                 ui.text(&res.config.combo)
@@ -416,7 +437,7 @@ impl GameScene {
         let bt = -top - eps * 3.64;
         self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
             let mut text_size = 0.5;
-            let mut text = ui.text(&res.info.name).pos(lf, bt + (1. - p) * 0.4).anchor(0., 1.).size(text_size);
+            let mut text = ui.text(&res.info.name).size(text_size);
             let max_width = 0.9;
             let text_width = text.measure().w;
             if text_width > max_width {
@@ -430,7 +451,7 @@ impl GameScene {
                 .color(Color { a: color.a * c.a, ..color })
                 .draw();
         });
-        self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
+        self.chart.with_element(ui, res, UIElement::Level, Some((-lf - ct.x, bt - ct.y)), Some((1. - margin * 0.7, -top - eps * 2.)), |ui, color| {
             ui.text(&res.info.level)
                 .pos(-lf, bt + (1. - p) * 0.4)
                 .anchor(1., 1.)
@@ -737,12 +758,17 @@ impl GameScene {
     fn tweak_offset(&mut self, ui: &mut Ui, ita: bool, tm: &mut TimeManager) {
         ui.scope(|ui| {
             let width = 0.55;
-            let height = 0.4;
+            let height = 0.3;
             ui.dx(1. - width - 0.02);
             ui.dy(ui.top - height - 0.02);
             ui.fill_rect(Rect::new(0., 0., width, height), GRAY);
             ui.dy(0.02);
             ui.text(tl!("adjust-offset")).pos(width / 2., 0.).anchor(0.5, 0.).size(0.7).draw();
+            ui.dx(width / 1.22);
+            if ui.button("cancel", Rect::new(0.02, 0., 0.06, 0.06), "×") {
+                self.next_scene = Some(NextScene::PopWithResult(Box::new(None::<f32>)));
+            }
+            ui.dx(-width / 1.22);
             ui.dy(0.16);
             let r = ui
                 .text(format!("{}ms", (self.info_offset * 1000.).round() as i32))
@@ -752,18 +778,20 @@ impl GameScene {
                 .no_baseline()
                 .draw();
             let d = 0.14;
+            let mut bpm_list = self.chart.bpm_list.borrow_mut();
+            let beat = 15. / bpm_list.now_bpm(tm.now() as f32);
             if ui.button("lg_sub", Rect::new(d, r.center().y, 0., 0.).feather(0.026), "-") && ita {
-                self.info_offset -= 0.05;
+                self.info_offset -= beat;
             }
             if ui.button("lg_add", Rect::new(width - d, r.center().y, 0., 0.).feather(0.026), "+") && ita {
-                self.info_offset += 0.05;
+                self.info_offset -= beat;
             }
             let d = 0.08;
             if ui.button("sm_sub", Rect::new(d, r.center().y, 0., 0.).feather(0.022), "-") && ita {
-                self.info_offset -= 0.005;
+                self.info_offset -= 0.01;
             }
             if ui.button("sm_add", Rect::new(width - d, r.center().y, 0., 0.).feather(0.022), "+") && ita {
-                self.info_offset += 0.005;
+                self.info_offset -= 0.01;
             }
             let d = 0.03;
             if ui.button("ti_sub", Rect::new(d, r.center().y, 0., 0.).feather(0.017), "-") && ita {
@@ -772,7 +800,7 @@ impl GameScene {
             if ui.button("ti_add", Rect::new(width - d, r.center().y, 0., 0.).feather(0.017), "+") && ita {
                 self.info_offset += 0.001;
             }
-            ui.dy(0.14);
+            /*ui.dy(0.14);
             let pad = 0.02;
             let spacing = 0.01;
             let mut r = Rect::new(pad, 0., (width - pad * 2. - spacing * 2.) / 3., 0.06);
@@ -786,6 +814,23 @@ impl GameScene {
             r.x += r.w + spacing;
             if ui.button("save", r, tl!("offset-save")) {
                 self.next_scene = Some(NextScene::PopWithResult(Box::new(Some(self.info_offset))));
+            }*/
+        });
+        ui.scope(|ui| {
+            ui.dx(1. - width * 0.97);
+            ui.dy(ui.top - height * 0.75);
+            ui.slider(tl!("speed"), 0.1..2.0, 0.05, &mut self.res.config.speed, Some(0.3));
+            if ui.button("save-speed", Rect::new(0.44, 0.033, 0.05, 0.05), "=") && (tm.speed - self.res.config.speed as f64).abs() > 0.01 {
+                debug!("recreating music");
+                self.music = self.res.audio.create_music(
+                    self.res.music.clone(),
+                    MusicParams {
+                        amplifier: self.res.config.volume_music as _,
+                        playback_rate: self.res.config.speed as _,
+                        ..Default::default()
+                    },
+                ).expect("failed to create music");
+                reset_speed!(self, self.res, tm);
             }
         });
     }
