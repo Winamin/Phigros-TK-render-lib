@@ -1039,16 +1039,10 @@ impl Scene for GameScene {
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
         let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
+        
         let vp = res.camera.viewport.unwrap_or(ui.viewport);
         let asp2 = vp.2 as f32 / vp.3 as f32;
         let vec2_asp = vec2(1. * &res.config.chart_ratio, -asp2 * &res.config.chart_ratio);
-
-        /*let ratio = if res.config.chart_ratio == 1. || res.config.disable_loading {
-            res.config.chart_ratio
-        } else {
-            1. + (res.config.chart_ratio - 1.) * ease_in_out_quartic(p)
-        };
-        */
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
             set_camera(&res.camera);
         }
@@ -1060,8 +1054,6 @@ impl Scene for GameScene {
             .as_ref()
             .map(|it| if msaa { it.input() } else { it.output() })
             .or(res.camera.render_target);
-
-        let h = 1. / res.aspect_ratio;
         //push_camera_state();
         set_camera(&Camera2D {
             zoom: vec2(1., -asp),
@@ -1070,27 +1062,18 @@ impl Scene for GameScene {
             ..Default::default()
         });
         clear_background(BLACK);
-        draw_background(*res.background);
-        //pop_camera_state();
+        if res.config.render_bg {
+            draw_background(*res.background);
+        }
+
         let chart_target_vp = if res.chart_target.is_some() {
             let vp = res.camera.viewport.unwrap();
             Some((vp.0 - ui.viewport.0, vp.1 - ui.viewport.1, vp.2, vp.3))
         } else {
             res.camera.viewport
         };
-        //self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
-        //self.gl.quad_gl.viewport(chart_target_vp);
 
-        if res.config.chart_ratio >= 1. {
-            let dim_alpha = 0.5;
-            //let alpha = res.alpha * (1. - dim_alpha) + dim_alpha;    
-            let dim = Color::new(0.1, 0.1, 0.1, dim_alpha * res.alpha);
-            let x_range = vp.0 as f32 / ui.viewport.2 as f32;
-            draw_rectangle(-1., -h,x_range * 2., h * 2., dim);
-            draw_rectangle(1., -h,-x_range * 2., h * 2., dim);
-            draw_rectangle(x_range * 2. - 1., -h, (1. - x_range * 2.) * 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
-        }
-        
+        let h = 1. / res.aspect_ratio;
         set_camera( &Camera2D {
             zoom: vec2_asp,
             viewport: chart_target_vp,
@@ -1098,10 +1081,8 @@ impl Scene for GameScene {
         });
         
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
-        
-        if res.config.chart_ratio < 1. {
-            draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
-        }
+        //self.gl.quad_gl.viewport(chart_target_vp);
+        draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
         self.chart.render(ui, res);
 
         set_camera( &Camera2D {
@@ -1123,25 +1104,15 @@ impl Scene for GameScene {
         if res.config.particle {
             res.emitter.draw(dt);
         }
+        
         self.ui(ui, tm)?;
-        self.overlay_ui(ui, tm)?;
 
-        if self.mode == GameMode::TweakOffset {
-            //push_camera_state();
-            set_camera(&Camera2D {
-                zoom: vec2(1., -asp),
-                viewport: None,
-                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
-                ..Default::default()
-            });
-            self.tweak_offset(ui, Self::interactive(&self.res, &self.state));
-            //pop_camera_state();
-        }
+        //pop_camera_state();
 
         if !self.res.no_effect && !self.effects.is_empty() {
-            push_camera_state();
+            //push_camera_state();
             set_camera(&Camera2D {
-                zoom: vec2_asp,
+                zoom: vec2(1., asp),
                 ..Default::default()
             });
             for e in &self.effects {
@@ -1149,6 +1120,31 @@ impl Scene for GameScene {
             }
             //pop_camera_state();
         }
+        
+        {
+            //push_camera_state();
+            set_camera(&Camera2D {
+                zoom: vec2(1., -asp2),
+                viewport: chart_target_vp,
+                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
+                ..Default::default()
+            });
+            self.overlay_ui(ui, tm)?;
+            //pop_camera_state();
+        }
+
+        if self.mode == GameMode::TweakOffset {
+            //push_camera_state();
+            self.gl.quad_gl.viewport(None);
+            set_camera(&Camera2D {
+                zoom: vec2(1., asp),
+                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
+                ..Default::default()
+            });
+            self.tweak_offset(ui, Self::interactive(&self.res, &self.state), tm);
+            //pop_camera_state();
+        }
+
         if msaa || !self.res.no_effect {
             // render the texture onto screen
             if let Some(target) = &self.res.chart_target {
@@ -1173,9 +1169,12 @@ impl Scene for GameScene {
                 );
                 //pop_camera_state();
             }
+        } else {
+            self.gl.flush();
         }
         Ok(())
     }
+
 
     fn next_scene(&mut self, tm: &mut TimeManager) -> NextScene {
         if self.should_exit {
