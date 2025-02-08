@@ -165,6 +165,8 @@ macro_rules! reset {
 
 impl GameScene {
     pub const BEFORE_TIME: f32 = 0.7;
+    pub const BEFORE_DURATION: f32 = 1.2;
+    pub const WAIT_AFTER_TIME: f32 = AFTER_TIME + 0.3;
     pub const FADEOUT_TIME: f32 = WAIT_TIME + AFTER_TIME + 0.3;
 
     pub async fn load_chart_bytes(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<Vec<u8>> {
@@ -365,7 +367,7 @@ impl GameScene {
 
         let margin = 0.046;
 
-        self.chart.with_element(ui, res, UIElement::Score, |ui, color, scale| {
+        self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
             ui.text(format!("{:07}", self.judge.score()))
                 .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
                 .anchor(1., 0.)
@@ -382,7 +384,7 @@ impl GameScene {
                 .color(semi_white(0.7))
                 .draw();
         }
-        self.chart.with_element(ui, res, UIElement::Pause, |ui, color, scale| {
+        self.chart.with_element(ui, res, UIElement::Pause, Some((pause_center.x, pause_center.y)), Some((pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2)), |ui, color| {
             let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
             let ct = pause_center.coords;
             let c = Color { a: color.a * c.a, ..color };
@@ -393,7 +395,7 @@ impl GameScene {
             });
         });
         if self.judge.combo() >= 3 {
-            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, |ui, color, scale| {
+            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
                ui.text(self.judge.combo().to_string())
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
@@ -402,7 +404,7 @@ impl GameScene {
                     .draw()
                     .bottom()
             });
-            self.chart.with_element(ui, res, UIElement::Combo, |ui, color, scale| {
+            self.chart.with_element(ui, res, UIElement::Combo, Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), |ui, color| {
                 ui.text(&res.config.combo)
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
@@ -414,7 +416,7 @@ impl GameScene {
         }
         let lf = -1. + margin;
         let bt = -top - eps * 3.64;
-        self.chart.with_element(ui, res, UIElement::Name, |ui, color, scale| {
+        self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
             let mut text_size = 0.5;
             let mut text = ui.text(&res.info.name).pos(lf, bt + (1. - p) * 0.4).anchor(0., 1.).size(text_size);
             let max_width = 0.9;
@@ -431,7 +433,7 @@ impl GameScene {
                 .scale(scale)
                 .draw();
         });
-        self.chart.with_element(ui, res, UIElement::Level, |ui, color, scale| {
+        self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
             ui.text(&res.info.level)
                 .pos(-lf, bt + (1. - p) * 0.4)
                 .anchor(1., 1.)
@@ -443,7 +445,7 @@ impl GameScene {
         let hw = 0.0015;
         let height = eps * 1.1;
         let dest = (2. * res.time / res.track_length).min(2.0);
-        self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
+        self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
             let ct = Vector::new(0., top + height / 2.);
             ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
                 ui.fill_rect(
@@ -454,7 +456,7 @@ impl GameScene {
                 ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
             });
         });
-        self.chart.with_element(ui, res, UIElement::Bar, |ui, color, scale| {
+        self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
         let ct = Vector::new(0., top + height / 2.);
         ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
             ui.fill_rect(
