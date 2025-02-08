@@ -1083,12 +1083,12 @@ impl Scene for GameScene {
 
         if res.config.chart_ratio >= 1. {
             let dim_alpha = 0.5;
-            let alpha = res.alpha * (1. - dim_alpha) + dim_alpha;    
-            let dim = Color::new(0.1, 0.1, 0.1, dim_alpha);
+            //let alpha = res.alpha * (1. - dim_alpha) + dim_alpha;    
+            let dim = Color::new(0.1, 0.1, 0.1, dim_alpha * res.alpha);
             let x_range = vp.0 as f32 / ui.viewport.2 as f32;
             draw_rectangle(-1., -h,x_range * 2., h * 2., dim);
             draw_rectangle(1., -h,-x_range * 2., h * 2., dim);
-            draw_rectangle(x_range * 2. - 1., -h, (1. - x_range * 2.) * 2., h * 2., Color::new(0., 0., 0., alpha * res.info.background_dim));
+            draw_rectangle(x_range * 2. - 1., -h, (1. - x_range * 2.) * 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
         }
         
         set_camera( &Camera2D {
