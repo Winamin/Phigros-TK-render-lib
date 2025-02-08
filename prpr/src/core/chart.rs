@@ -56,18 +56,47 @@ impl Chart {
     }
 
     #[inline]
-    pub fn with_element<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, f: impl FnOnce(&mut Ui, Color, Matrix) -> R) -> R {
+    pub fn with_element<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, ct: Option<(f32, f32)>, pt: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
+        if let Some(id) = self.attach_ui[element as usize - 1] {
+            let lines = &self.lines;
+            let line = &lines[id];
+            let obj = &line.object;
+            let mut tr = JudgeLine::fetch_pos(line, res, lines);
+            tr.y = -tr.y;
+            let mut color = self.lines[id].color.now_opt().unwrap_or(WHITE);
+            color.a *= obj.now_alpha().max(0.); 
+            let scale = obj.now_scale_fix(ct.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
+            let ro = obj.new_rotation_wrt_point(-obj.rotation.now().to_radians(), pt.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
+            ui.with(Matrix::new_translation(&tr) * ro * scale, |ui| f(ui, color))
+        } else {
+            f(ui, WHITE)
+        }
+    }
+
+    pub fn with_element_noscale<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, ct: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
         if let Some(id) = self.attach_ui[element as usize - 1] {
             let obj = &self.lines[id].object;
             let mut tr = obj.now_translation(res);
             tr.y = -tr.y;
             let mut color = self.lines[id].color.now_opt().unwrap_or(WHITE);
-            color.a *= obj.now_alpha().max(0.);
-            ui.with(obj.now_rotation().append_translation(&tr), |ui| f(ui, color, obj.now_scale()))
+            color.a *= obj.now_alpha().max(0.); 
+            let mut scale = obj.now_scale_fix(ct.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x , y)));
+            scale.m11 = 1.0;
+            ui.with(obj.now_rotation().append_translation(&tr) * scale, |ui| f(ui, color))
         } else {
-            f(ui, WHITE, Matrix::identity())
+            f(ui, WHITE)
         }
     }
+
+    pub async fn load_textures(&mut self, fs: &mut dyn FileSystem) -> Result<()> {
+        for line in &mut self.lines {
+            if let JudgeLineKind::Texture(tex, path) = &mut line.kind {
+                *tex = image::load_from_memory(&fs.load_file(path).await.with_context(|| format!("failed to load illustration {path}"))?)?.into();
+            }
+        }
+        Ok(())
+    }
+
 
     pub async fn load_textures(&mut self, fs: &mut dyn FileSystem) -> Result<()> {
         for line in &mut self.lines {
