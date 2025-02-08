@@ -364,7 +364,7 @@ impl GameScene {
         if tm.now() as f32 - self.pause_first_time <= PAUSE_CLICK_INTERVAL {
             ui.fill_circle(pause_center.x, pause_center.y, 0.05, Color::new(1., 1., 1., 0.5));
         }
-
+        let score = format!("{:07}", self.judge.score())
         let margin = 0.046;
         let score_top = top + eps * 2.2 - (1. - p) * 0.4;
         let ct = ui.text(&score).size(0.8).center();
