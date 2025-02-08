@@ -373,7 +373,6 @@ impl GameScene {
                 .anchor(1., 0.)
                 .size(0.70867)
                 .color(Color { a: color.a * c.a, ..color })
-                .scale(scale)
                 .draw();
         });
         if res.config.show_acc {
@@ -394,13 +393,14 @@ impl GameScene {
                 ui.fill_rect(r, c);
             });
         });
+        let unit_h = ui.text("0").measure().h;
+        let combo_top = top + eps * 1.346 - (1. - p) * 0.4;
         if self.judge.combo() >= 3 {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
                ui.text(self.judge.combo().to_string())
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
                     .color(Color { a: color.a * c.a, ..color })
-                    .scale(scale)
                     .draw()
                     .bottom()
             });
@@ -410,7 +410,6 @@ impl GameScene {
                     .anchor(0.5, 0.)
                     .size(0.325)
                     .color(Color { a: color.a * c.a, ..color })
-                    .scale(scale)
                     .draw();
             });
         }
@@ -430,7 +429,6 @@ impl GameScene {
                 .anchor(0., 1.)
                 .size(text_size)
                 .color(Color { a: color.a * c.a, ..color })
-                .scale(scale)
                 .draw();
         });
         self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
@@ -439,7 +437,6 @@ impl GameScene {
                 .anchor(1., 1.)
                 .size(0.5)
                 .color(Color { a: color.a * c.a, ..color })
-                .scale(scale)
                 .draw();
         });
         let hw = 0.0015;
@@ -447,14 +444,12 @@ impl GameScene {
         let dest = (2. * res.time / res.track_length).min(2.0);
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
             let ct = Vector::new(0., top + height / 2.);
-            ui.with(scale.prepend_translation(&-ct).append_translation(&ct), |ui| {
                 ui.fill_rect(
                     Rect::new(-1., top, dest, height),
                     //Color{ a: color.a * c.a * 0.6, ..color},
-                    Color::new(0.45, 0.45, 0.45, 1.),
+                    Color::new(0.565, 0.565, 0.565, color.a * c.a),
                 );
-                ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
-            });
+                ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color::new(1., 1., 1., color.a * c.a));
         });
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
         let ct = Vector::new(0., top + height / 2.);
