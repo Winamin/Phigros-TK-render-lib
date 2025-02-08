@@ -97,16 +97,6 @@ impl Chart {
         Ok(())
     }
 
-
-    pub async fn load_textures(&mut self, fs: &mut dyn FileSystem) -> Result<()> {
-        for line in &mut self.lines {
-            if let JudgeLineKind::Texture(tex, path) = &mut line.kind {
-                *tex = image::load_from_memory(&fs.load_file(path).await.with_context(|| format!("failed to load illustration {path}"))?)?.into();
-            }
-        }
-        Ok(())
-    }
-
     pub fn reset(&mut self) {
         self.lines
             .iter_mut()
