@@ -203,6 +203,9 @@ impl JudgeLine {
                         draw_line(-len, 0., len, 0., 0.0075, color);
                     }
                     JudgeLineKind::Texture(texture, _) => {
+                        if res.time <= 0. && matches!(color, WHITE) {
+                            color = BLACK;
+                        }
                         let mut color = color.unwrap_or(WHITE);
                         color.a = alpha.max(0.0);
                         if res.config.chart_debug {
