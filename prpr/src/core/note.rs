@@ -174,7 +174,7 @@ impl Note {
             && self.object.dead()
     }
 
-    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Mat4, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
+    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix4<f32>, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
         self.object.set_time(res.time);
         let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
             if res.time >= *at {
@@ -183,7 +183,7 @@ impl Note {
                 Some(if perfect {
                     res.res_pack.info.fx_perfect()
                 } else {
-                    res.cache.fx_good
+                    res.res_pack.info.fx_good()
                 })
             } else {
                 None
@@ -205,7 +205,11 @@ impl Note {
         }
     }
 
-    pub fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Matrix3<f32> {
+    fn init_ctrl_obj(&self, ctrl_obj: &mut CtrlObject, line_height: f32) {
+        ctrl_obj.set_height((self.height - line_height + self.object.translation.1.now() / self.speed) * RPE_HEIGHT / 2.);
+    }
+    
+    pub fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Matrix4<f32> {
         let incline_val = 1. - incline_sin * (base * res.aspect_ratio + self.object.translation.1.now()) * RPE_HEIGHT / 2. / 360.;
         let mut tr = self.object.now_translation(res);
         tr.x *= incline_val * ctrl_obj.pos.now_opt().unwrap_or(1.);
