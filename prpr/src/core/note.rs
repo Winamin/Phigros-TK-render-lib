@@ -7,9 +7,9 @@ use crate::{
     core::HEIGHT_RATIO,
 };
 
-
 use macroquad::prelude::*;
 use ::rand::{thread_rng, Rng};
+use glam::Mat4;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
@@ -24,6 +24,7 @@ pub enum NoteKind {
 }
 
 impl NoteKind {
+    #[inline]
     pub fn order(&self) -> i8 {
         match self {
             Self::Hold { .. } => 0,
@@ -35,10 +36,10 @@ impl NoteKind {
 }
 
 pub struct Note {
-    pub object: Object,
+    pub time: f32, // 高频访问字段放在前面
     pub kind: NoteKind,
-    pub time: f32,
     pub height: f32,
+    pub object: Object,
     pub speed: f32,
     pub end_speed: f32,
     pub start_height: f32,
@@ -60,6 +61,21 @@ pub struct RenderConfig<'a> {
     pub incline_sin: f32,
 }
 
+struct ResourceCache {
+    fx_perfect: Color,
+    fx_good: Color,
+    hold_texture: Texture2D,
+}
+
+impl ResourceCache {
+    fn new(res: &Resource) -> Self {
+        Self {
+            fx_perfect: res.res_pack.info.fx_perfect(),
+            fx_good: res.res_pack.info.fx_good(),
+            hold_texture: *res.res_pack.note_style.hold,
+        }
+    }
+}
 fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color: Color, mut params: DrawTextureParams, clip: bool) {
     let Vec2 { x: w, y: h } = params.dest_size.unwrap();
     if h < 0. {
@@ -82,6 +98,7 @@ fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color
     params.flip_y = true;
     draw_tex_pts(res, texture, order, p, color, params);
 }
+
 fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], color: Color, params: DrawTextureParams) {
     let mut p = p.map(|it| res.world_to_screen(it));
     if p[0].x.min(p[1].x.min(p[2].x.min(p[3].x))) > 1. / res.config.chart_ratio
@@ -131,41 +148,26 @@ fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Col
     );
 }
 
-fn random_rotate() -> f32 {
-    let mut rng = thread_rng();
-    let rotation_degrees: f32 = match rng.gen_range(0..4) {
-        0 => 0.,
-        1 => 90.,
-        2 => 180.,
-        3 => 270.,
-        _ => 0.,
-    };
-    rotation_degrees
-}
-
 impl Note {
     pub fn rotation(&self, line: &JudgeLine) -> f32 {
         line.object.rotation.now() + if self.above { 0. } else { 180. }
     }
 
+    #[inline]
     pub fn plain(&self) -> bool {
         !self.fake && !matches!(self.kind, NoteKind::Hold { .. }) && self.object.translation.1.keyframes.len() <= 1
-        // && self.ctrl_obj.is_default()
     }
 
-    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
+    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Mat4, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
         self.object.set_time(res.time);
-        //let mut _immediate_particle = false;
         let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
             if res.time >= *at {
-                //_immediate_particle = true;
                 let beat = if self.format { 30. / bpm_list.now_bpm(index as f32) } else { 30. / bpm_list.now_bpm(self.time) };
-                //println!("{} {} {}", bpm_list.now_bpm(0.), beat, res.config.speed);
-                *at = res.time + beat / res.config.speed; //HOLD_PARTICLE_INTERVAL
+                *at = res.time + beat / res.config.speed;
                 Some(if perfect {
-                    res.res_pack.info.fx_perfect()
+                    res.cache.fx_perfect
                 } else {
-                    res.res_pack.info.fx_good()
+                    res.cache.fx_good
                 })
             } else {
                 None
@@ -177,26 +179,17 @@ impl Note {
         if let Some(color) = color {
             self.init_ctrl_obj(ctrl_obj, line_height);
             let rotation = if res.config.chart_debug { 
-                if self.above { 0. } else { 180. } } 
-                else { random_rotate() 
+                if self.above { 0. } else { 180. } 
+            } else { 
+                random_rotate() 
             };
-            res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
+            res.with_model(*parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
                 res.emit_at_origin(parent_rot + rotation, color)
             });
         }
     }
-    
 
-    pub fn dead(&self) -> bool {
-        (!matches!(self.kind, NoteKind::Hold { .. }) || matches!(self.judge, JudgeStatus::Judged)) && self.object.dead()
-        // && self.ctrl_obj.dead()
-    }
-
-    fn init_ctrl_obj(&self, ctrl_obj: &mut CtrlObject, line_height: f32) {
-        ctrl_obj.set_height((self.height - line_height + self.object.translation.1.now() / self.speed) * RPE_HEIGHT / 2.);
-    }
-
-    pub fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Matrix {
+    fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Mat4 {
         let incline_val = 1. - incline_sin * (base * res.aspect_ratio + self.object.translation.1.now()) * RPE_HEIGHT / 2. / 360.;
         let mut tr = self.object.now_translation(res);
         tr.x *= incline_val * ctrl_obj.pos.now_opt().unwrap_or(1.);
@@ -205,7 +198,6 @@ impl Note {
         scale.x *= ctrl_obj.size.now_opt().unwrap_or(1.);
         self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr)
     }
-
     pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
             return;
