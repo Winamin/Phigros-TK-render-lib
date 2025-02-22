@@ -9,7 +9,7 @@ use crate::{
 
 use macroquad::prelude::*;
 use ::rand::{thread_rng, Rng};
-use glam::Mat4;
+use nalgebra::Matrix3;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
@@ -131,6 +131,17 @@ fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], co
         .push((order, texture.raw_miniquad_texture_handle().gl_internal_id()), vertices);
 }
 
+fn random_rotate() -> f32 {
+    let mut rng = thread_rng();
+    match rng.gen_range(0..4) {
+        0 => 0.,
+        1 => 90.,
+        2 => 180.,
+        3 => 270.,
+        _ => 0.,
+    }
+}
+
 fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Color) {
     let hf = vec2(scale, tex.height() * scale / tex.width());
     draw_tex(
@@ -158,6 +169,11 @@ impl Note {
         !self.fake && !matches!(self.kind, NoteKind::Hold { .. }) && self.object.translation.1.keyframes.len() <= 1
     }
 
+    pub fn dead(&self) -> bool {
+        (!matches!(self.kind, NoteKind::Hold { .. }) || matches!(self.judge, JudgeStatus::Judged)) 
+            && self.object.dead()
+    }
+
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Mat4, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
         self.object.set_time(res.time);
         let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
@@ -165,7 +181,7 @@ impl Note {
                 let beat = if self.format { 30. / bpm_list.now_bpm(index as f32) } else { 30. / bpm_list.now_bpm(self.time) };
                 *at = res.time + beat / res.config.speed;
                 Some(if perfect {
-                    res.cache.fx_perfect
+                    res.res_pack.info.fx_perfect()
                 } else {
                     res.cache.fx_good
                 })
@@ -189,7 +205,7 @@ impl Note {
         }
     }
 
-    fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Mat4 {
+    pub fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Matrix3<f32> {
         let incline_val = 1. - incline_sin * (base * res.aspect_ratio + self.object.translation.1.now()) * RPE_HEIGHT / 2. / 360.;
         let mut tr = self.object.now_translation(res);
         tr.x *= incline_val * ctrl_obj.pos.now_opt().unwrap_or(1.);
