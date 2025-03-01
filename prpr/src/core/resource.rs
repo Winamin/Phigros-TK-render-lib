@@ -13,7 +13,6 @@ use sasa::{AudioClip, AudioManager, Sfx};
 use serde::Deserialize;
 use std::{cell::RefCell, collections::BTreeMap, ops::DerefMut, path::Path, sync::atomic::AtomicU32};
 use nalgebra::Matrix3;
-use smallvec::SmallVec;
 
 pub const MAX_SIZE: usize = 64; // needs tweaking
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
@@ -366,25 +365,26 @@ impl NoteBuffer {
     }
 }
 
-pub struct Resource<CachedMatrix> {
+pub struct Resource {
     pub time: f32,
+    pub config: Config,
     pub audio: AudioManager,
     pub music: AudioClip,
     pub track_length: f32,
     pub sfx_click: Sfx,
     pub sfx_drag: Sfx,
     pub sfx_flick: Sfx,
-    pub alpha: f32,
+    pub info: ChartInfo,
     pub aspect_ratio: f32,
-    pub note_width: f32,
     pub dpi: u32,
     pub last_vp: (i32, i32, i32, i32),
-    pub camera: Camera2D,
+    pub note_width: f32,
+
+    pub alpha: f32,
     pub judge_line_color: Color,
-    
-    pub config: Config,
-    pub info: ChartInfo,
-    
+
+    pub camera: Camera2D,
+
     pub background: SafeTexture,
     pub illustration: SafeTexture,
     pub icons: [SafeTexture; 8],
@@ -403,7 +403,7 @@ pub struct Resource<CachedMatrix> {
 
     pub note_buffer: RefCell<NoteBuffer>,
 
-    pub model_stack: SmallVec<[CachedMatrix; 8]>,
+    pub model_stack: Vec<Matrix>,
 }
 
 impl Resource {
