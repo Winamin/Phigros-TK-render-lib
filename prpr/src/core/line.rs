@@ -236,7 +236,7 @@ impl JudgeLine {
                                 return;
                         }
                         let now = anim.now();
-                        res.apply_model(&Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |_| {
+                        res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |_| {
                             draw_text_aligned(ui, &now, 0., 0., (0.5, 0.5), 1., color);
                         });
                     }
