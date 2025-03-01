@@ -366,7 +366,7 @@ impl NoteBuffer {
     }
 }
 
-pub struct Resource {
+pub struct Resource<CachedMatrix> {
     pub time: f32,
     pub audio: AudioManager,
     pub music: AudioClip,
