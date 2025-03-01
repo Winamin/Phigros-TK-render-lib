@@ -206,7 +206,6 @@ pub struct ResourcePack {
     pub hit_fx: SafeTexture,
 }
 
-#[derive(Clone)]
 impl ResourcePack {
     pub async fn from_path<T: AsRef<Path>>(path: Option<T>) -> Result<Self> {
         Self::load(
@@ -387,6 +386,7 @@ impl NoteBuffer {
     }
 }
 
+#[derive(Clone)]
 pub struct Resource {
     pub time: f32,
     pub alpha: f32,
