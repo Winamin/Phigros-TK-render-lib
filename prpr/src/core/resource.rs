@@ -14,6 +14,8 @@ use serde::Deserialize;
 use std::{cell::RefCell, collections::BTreeMap, ops::DerefMut, path::Path, sync::atomic::AtomicU32};
 use nalgebra::Matrix3;
 use tokio::try_join;
+use smallvec::{SmallVec, smallvec};
+use std::sync::atomic::Ordering;
 
 pub const MAX_SIZE: usize = 64; // needs tweaking
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
@@ -356,7 +358,6 @@ impl ParticleEmitter {
     }
 }
 
-#[derive(Default)]
 pub struct NoteBuffer(BTreeMap<(i8, GLuint), Vec<(Vec<Vertex>, Vec<u16>)>>);
 
 impl NoteBuffer {
@@ -392,6 +393,7 @@ pub struct Resource {
     pub note_width: f32,
     pub dpi: u32,
     pub last_vp: (i32, i32, i32, i32),
+    pub camera: Camera2D,
     pub judge_line_color: Color,
     
     pub config: Config,
@@ -478,9 +480,10 @@ impl Resource {
         has_no_effect: bool,
     ) -> Result<Self> {
         macro_rules! load_tex {
-            ($path:literal) => {
-                SafeTexture::from(Texture2D::from_image(&load_image($path).await?))
-            };
+            ($path:literal) => {{
+                let image = load_image($path).await?;
+                Ok(SafeTexture::from(Texture2D::from_image(&image)))
+            }};
         }
 
         let (res_pack, icons, challenge_icons, player_tex, icon_back, icon_retry, icon_resume, icon_proceed) = try_join!(
@@ -494,10 +497,10 @@ impl Resource {
                     load_tex!("player.jpg").await
                 }
             },
-            load_tex!("back.png"),
-            load_tex!("retry.png"),
-            load_tex!("resume.png"),
-            load_tex!("proceed.png")
+            async { load_tex!("back.png").await },
+            async { load_tex!("retry.png").await },
+            async { load_tex!("resume.png").await },
+            async { load_tex!("proceed.png").await }
         )?;
 
         let vec2_ratio = vec2(1., -config.aspect_ratio.unwrap_or(info.aspect_ratio));
@@ -512,7 +515,7 @@ impl Resource {
             async { Ok(res_pack.clone()) }
         )?;
 
-        let mut audio = create_audio_manager(&config)?;
+        let mut audio = create_audio_manger(&config)?;
         let music = AudioClip::new(music_data)?;
         let track_length = music.length();
         let buffer_size = Some(config.buffer_size as usize);
@@ -656,5 +659,6 @@ impl Default for NoteBuffer {
             vertices: Vec::with_capacity(4096),
             indices: Vec::with_capacity(6144),
         }
+        NoteBuffer(BTreeMap::new())
     }
 }
