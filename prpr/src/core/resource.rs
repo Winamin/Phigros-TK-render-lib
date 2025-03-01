@@ -12,7 +12,8 @@ use miniquad::{gl::{GLuint, GL_LINEAR}, Texture, TextureWrap};
 use sasa::{AudioClip, AudioManager, Sfx};
 use serde::Deserialize;
 use std::{cell::RefCell, collections::BTreeMap, ops::DerefMut, path::Path, sync::atomic::AtomicU32};
-use glam::Mat3;
+use nalgebra::Matrix3;
+use tokio::try_join;
 
 pub const MAX_SIZE: usize = 64; // needs tweaking
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
@@ -94,6 +95,25 @@ pub struct ResPackInfo {
 
     #[serde(default)]
     pub description: String,
+}
+
+#[derive(Clone)]
+struct CachedMatrix {
+    matrix: Matrix,
+    inv_matrix: Option<Matrix>,
+}
+
+impl CachedMatrix {
+    fn new(matrix: Matrix) -> Self {
+        Self { matrix, inv_matrix: None }
+    }
+
+    fn inverse(&mut self) -> Option<&Matrix> {
+        if self.inv_matrix.is_none() {
+            self.inv_matrix = self.matrix.try_inverse();
+        }
+        self.inv_matrix.as_ref().and_then(|m| Some(m))
+    }
 }
 
 impl ResPackInfo {
@@ -366,20 +386,17 @@ impl NoteBuffer {
 }
 
 pub struct Resource {
-    pub config: Config,
-    pub info: ChartInfo,
+    pub time: f32,
+    pub alpha: f32,
     pub aspect_ratio: f32,
+    pub note_width: f32,
     pub dpi: u32,
     pub last_vp: (i32, i32, i32, i32),
-    pub note_width: f32,
-
-    pub time: f32,
-
-    pub alpha: f32,
     pub judge_line_color: Color,
-
-    pub camera: Camera2D,
-
+    
+    pub config: Config,
+    pub info: ChartInfo,
+    
     pub background: SafeTexture,
     pub illustration: SafeTexture,
     pub icons: [SafeTexture; 8],
@@ -405,7 +422,7 @@ pub struct Resource {
 
     pub note_buffer: RefCell<NoteBuffer>,
 
-    pub model_stack: Vec<Matrix>,
+    pub model_stack: SmallVec<[CachedMatrix; 8]>,
 }
 
 impl Resource {
@@ -462,77 +479,91 @@ impl Resource {
     ) -> Result<Self> {
         macro_rules! load_tex {
             ($path:literal) => {
-                SafeTexture::from(Texture2D::from_image(&load_image($path).await?))
+                SafeTexture::from(Texture2D::from_image(&load_image($path).await?)
             };
         }
-        let res_pack = ResourcePack::from_path(config.res_pack_path.as_ref())
-            .await
-            .context("Failed to load resource pack")?;
-            let vec2_ratio = vec2(1.,-config.aspect_ratio.unwrap_or(info.aspect_ratio));
+
+        let (res_pack, icons, challenge_icons, player_tex, icon_back, icon_retry, icon_resume, icon_proceed) = try_join!(
+            ResourcePack::from_path(config.res_pack_path.as_ref()),
+            Self::load_icons(),
+            Self::load_challenge_icons(),
+            async {
+                if let Some(p) = player {
+                    Ok(p)
+                } else {
+                    load_tex!("player.jpg").await
+                }
+            },
+            load_tex!("back.png"),
+            load_tex!("retry.png"),
+            load_tex!("resume.png"),
+            load_tex!("proceed.png")
+        )?;
+
+        let vec2_ratio = vec2(1., -config.aspect_ratio.unwrap_or(info.aspect_ratio));
         let camera = Camera2D {
             target: vec2(0., 0.),
             zoom: vec2_ratio,
             ..Default::default()
         };
 
-        let mut audio = create_audio_manger(&config)?;
-        let music = AudioClip::new(fs.load_file(&info.music).await?)?;
+        let (music_data, res_pack_clone) = try_join!(
+            fs.load_file(&info.music),
+            async { Ok(res_pack.clone()) }
+        )?;
+
+        let mut audio = create_audio_manager(&config)?;
+        let music = AudioClip::new(music_data)?;
         let track_length = music.length();
         let buffer_size = Some(config.buffer_size as usize);
-        let sfx_click = audio.create_sfx(res_pack.sfx_click.clone(), buffer_size)?;
-        let sfx_drag = audio.create_sfx(res_pack.sfx_drag.clone(), buffer_size)?;
-        let sfx_flick = audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size)?;
+
+        let (sfx_click, sfx_drag, sfx_flick) = try_join!(
+            audio.create_sfx(res_pack.sfx_click.clone(), buffer_size),
+            audio.create_sfx(res_pack.sfx_drag.clone(), buffer_size),
+            audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size)
+        )?;
 
         let aspect_ratio = config.aspect_ratio.unwrap_or(info.aspect_ratio);
         let note_width = config.note_scale * NOTE_WIDTH_RATIO_BASE;
         let note_scale = config.note_scale;
 
         let emitter = ParticleEmitter::new(&res_pack, note_scale, res_pack.info.hide_particles)?;
-
         let no_effect = config.disable_effect || has_no_effect;
 
         macroquad::window::gl_set_drawcall_buffer_capacity(MAX_SIZE * 4, MAX_SIZE * 6);
+
         Ok(Self {
             config,
             info,
             aspect_ratio,
-            dpi: DPI_VALUE.load(std::sync::atomic::Ordering::SeqCst),
+            dpi: DPI_VALUE.load(Ordering::SeqCst),
             last_vp: (0, 0, 0, 0),
             note_width,
-
             time: 0.,
-
             alpha: 1.,
             judge_line_color: res_pack.info.fx_perfect_line(),
-
             camera,
-
             background,
             illustration,
-            icons: Self::load_icons().await?,
-            challenge_icons: Self::load_challenge_icons().await?,
+            icons,
+            challenge_icons,
             res_pack,
-            player: if let Some(player) = player { player } else { load_tex!("player.jpg") },
-            icon_back: load_tex!("back.png"),
-            icon_retry: load_tex!("retry.png"),
-            icon_resume: load_tex!("resume.png"),
-            icon_proceed: load_tex!("proceed.png"),
-
+            player: player_tex,
+            icon_back,
+            icon_retry,
+            icon_resume,
+            icon_proceed,
             emitter,
-
             audio,
             music,
             track_length,
             sfx_click,
             sfx_drag,
             sfx_flick,
-
             chart_target: None,
             no_effect,
-
             note_buffer: RefCell::new(NoteBuffer::default()),
-
-            model_stack: vec![Matrix::identity()],
+            model_stack: smallvec![CachedMatrix::new(Matrix::identity())],
         })
     }
 
@@ -540,10 +571,15 @@ impl Resource {
         if !self.config.particle {
             return;
         }
-        let pt = self.world_to_screen(Point::default());
+        
+        let current_matrix = &self.model_stack.last().unwrap().matrix;
+        let pt = current_matrix.transform_point(&Point::default());
+        
         self.emitter.emit_at(
             vec2(if self.config.flip_x() { -pt.x } else { pt.x }, -pt.y),
-            if self.res_pack.info.hit_fx_rotate { rotation.to_radians() } else { 0. },
+            if self.res_pack.info.hit_fx_rotate { 
+                rotation.to_radians() 
+            } else { 0.0 },
             color,
         );
     }
@@ -556,57 +592,69 @@ impl Resource {
         if !self.no_effect || self.config.sample_count != 1 {
             self.chart_target = Some(MSRenderTarget::new((vp.2 as u32, vp.3 as u32), self.config.sample_count));
         }
-        fn viewport(aspect_ratio: f32, (x, y, w, h): (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
-            let w = w as f32;
-            let h = h as f32;
-            let (rw, rh) = {
-                let ew = h * aspect_ratio;
-                if ew > w {
-                    let eh = w / aspect_ratio;
-                    (w, eh)
-                } else {
-                    (ew, h)
-                }
-            };
-            (x + ((w - rw) / 2.).round() as i32, y + ((h - rh) / 2.).round() as i32, rw as i32, rh as i32)
-        }
-        let aspect_ratio = self.config.aspect_ratio.unwrap_or(self.info.aspect_ratio);
-        if self.config.fix_aspect_ratio {
-            self.aspect_ratio = aspect_ratio;
-            self.camera.viewport = Some(viewport(aspect_ratio, vp));
+
+        let aspect_ratio_config = self.config.aspect_ratio.unwrap_or(self.info.aspect_ratio);
+        self.aspect_ratio = if self.config.fix_aspect_ratio {
+            aspect_ratio_config
         } else {
-            self.aspect_ratio = aspect_ratio.min(vp.2 as f32 / vp.3 as f32);
-            self.camera.zoom.y = -self.aspect_ratio;
-            self.camera.viewport = Some(viewport(self.aspect_ratio, vp));
+            aspect_ratio_config.min(vp.2 as f32 / vp.3 as f32)
         };
+        self.camera.zoom.y = -self.aspect_ratio;
+        self.camera.viewport = Some(viewport(self.aspect_ratio, vp));
         true
     }
 
     pub fn world_to_screen(&self, pt: Point) -> Point {
-        self.model_stack.last().unwrap().transform_point(&pt)
+        self.model_stack.last().unwrap().matrix.transform_point(&pt)
     }
 
-    pub fn screen_to_world(&self, pt: Point) -> Point {
-        self.model_stack.last().unwrap().try_inverse().unwrap().transform_point(&pt)
+    pub fn screen_to_world(&mut self, pt: Point) -> Point {
+        let last = self.model_stack.last_mut().unwrap();
+        last.inverse()
+            .expect("Matrix should be invertible")
+            .transform_point(&pt)
     }
 
     #[inline]
     pub fn with_model(&mut self, model: Matrix3<f32>, f: impl FnOnce(&mut Self)) {
-        let model = self.model_stack.last().unwrap() * model;
-        self.model_stack.push(model);
+        let current = &self.model_stack.last().unwrap().matrix;
+        let new_matrix = CachedMatrix::new(current * model);
+        self.model_stack.push(new_matrix);
         f(self);
         self.model_stack.pop();
     }
 
     #[inline]
     pub fn apply_model(&mut self, f: impl FnOnce(&mut Self)) {
-        self.apply_model_of(&self.model_stack.last().unwrap().clone(), f);
-    }
-
-    #[inline]
-    pub fn apply_model_of(&mut self, mat: &Matrix, f: impl FnOnce(&mut Self)) {
-        unsafe { get_internal_gl() }.quad_gl.push_model_matrix(nalgebra_to_glm(mat));
+        let gl = unsafe { get_internal_gl() }.quad_gl;
+        let current = &self.model_stack.last().unwrap().matrix;
+        gl.push_model_matrix(nalgebra_to_glm(current));
         f(self);
-        unsafe { get_internal_gl() }.quad_gl.pop_model_matrix();
+        gl.pop_model_matrix();
+    }
+}
+
+fn viewport(aspect_ratio: f32, (x, y, w, h): (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    let (w_f, h_f) = (w as f32, h as f32);
+    let (rw, rh) = if h_f * aspect_ratio > w_f {
+        (w_f, w_f / aspect_ratio)
+    } else {
+        (h_f * aspect_ratio, h_f)
+    };
+    
+    (
+        x + ((w_f - rw) / 2.0).round() as i32,
+        y + ((h_f - rh) / 2.0).round() as i32,
+        rw as i32,
+        rh as i32,
+    )
+}
+
+impl Default for NoteBuffer {
+    fn default() -> Self {
+        Self {
+            vertices: Vec::with_capacity(4096),
+            indices: Vec::with_capacity(6144),
+        }
     }
 }
