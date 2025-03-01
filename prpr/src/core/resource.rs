@@ -12,7 +12,8 @@ use miniquad::{gl::{GLuint, GL_LINEAR}, Texture, TextureWrap};
 use sasa::{AudioClip, AudioManager, Sfx};
 use serde::Deserialize;
 use std::{cell::RefCell, collections::BTreeMap, ops::DerefMut, path::Path, sync::atomic::AtomicU32};
-use glam::Mat3;
+use nalgebra::Matrix3;
+use smallvec::SmallVec;
 
 pub const MAX_SIZE: usize = 64; // needs tweaking
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
