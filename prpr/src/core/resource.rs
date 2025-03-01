@@ -481,8 +481,10 @@ impl Resource {
     ) -> Result<Self> {
         macro_rules! load_tex {
             ($path:literal) => {{
-                let image = load_image($path).await?;
-                Ok(SafeTexture::from(Texture2D::from_image(&image)))
+                async {
+                    let image = load_image($path).await?;
+                    Ok::<_, anyhow::Error>(SafeTexture::from(Texture2D::from_image(&image)))
+                }
             }};
         }
 
@@ -497,10 +499,10 @@ impl Resource {
                     load_tex!("player.jpg").await
                 }
             },
-            async { load_tex!("back.png").await },
-            async { load_tex!("retry.png").await },
-            async { load_tex!("resume.png").await },
-            async { load_tex!("proceed.png").await }
+            load_tex!("back.png"),
+            load_tex!("retry.png"),
+            load_tex!("resume.png"),
+            load_tex!("proceed.png")
         )?;
 
         let vec2_ratio = vec2(1., -config.aspect_ratio.unwrap_or(info.aspect_ratio));
@@ -521,9 +523,9 @@ impl Resource {
         let buffer_size = Some(config.buffer_size as usize);
 
         let (sfx_click, sfx_drag, sfx_flick) = try_join!(
-            audio.create_sfx(res_pack.sfx_click.clone(), buffer_size),
-            audio.create_sfx(res_pack.sfx_drag.clone(), buffer_size),
-            audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size)
+            async { audio.create_sfx(res_pack.sfx_click.clone(), buffer_size) },
+            async { audio.create_sfx(res_pack.sfx_drag.clone(), buffer_size) },
+            async { audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size) }
         )?;
 
         let aspect_ratio = config.aspect_ratio.unwrap_or(info.aspect_ratio);
@@ -655,10 +657,6 @@ fn viewport(aspect_ratio: f32, (x, y, w, h): (i32, i32, i32, i32)) -> (i32, i32,
 
 impl Default for NoteBuffer {
     fn default() -> Self {
-        Self {
-            vertices: Vec::with_capacity(4096),
-            indices: Vec::with_capacity(6144),
-        }
         NoteBuffer(BTreeMap::new())
     }
 }
