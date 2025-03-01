@@ -12,7 +12,7 @@ use miniquad::{gl::{GLuint, GL_LINEAR}, Texture, TextureWrap};
 use sasa::{AudioClip, AudioManager, Sfx};
 use serde::Deserialize;
 use std::{cell::RefCell, collections::BTreeMap, ops::DerefMut, path::Path, sync::atomic::AtomicU32};
-use nalgebra::Matrix3;
+use glam::Mat3;
 
 pub const MAX_SIZE: usize = 64; // needs tweaking
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
@@ -591,7 +591,7 @@ impl Resource {
     }
 
     #[inline]
-    pub fn with_model(&mut self, model: Matrix3<f32>, f: impl FnOnce(&mut Self)) {
+    pub fn with_model(&mut self, model: Mat3, f: impl FnOnce(&mut Self)) {
         let model = self.model_stack.last().unwrap() * model;
         self.model_stack.push(model);
         f(self);
