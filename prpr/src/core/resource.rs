@@ -479,7 +479,7 @@ impl Resource {
     ) -> Result<Self> {
         macro_rules! load_tex {
             ($path:literal) => {
-                SafeTexture::from(Texture2D::from_image(&load_image($path).await?)
+                SafeTexture::from(Texture2D::from_image(&load_image($path).await?))
             };
         }
 
