@@ -206,6 +206,7 @@ pub struct ResourcePack {
     pub hit_fx: SafeTexture,
 }
 
+#[derive(Clone)]
 impl ResourcePack {
     pub async fn from_path<T: AsRef<Path>>(path: Option<T>) -> Result<Self> {
         Self::load(
@@ -514,7 +515,7 @@ impl Resource {
 
         let (music_data, res_pack_clone) = try_join!(
             fs.load_file(&info.music),
-            async { Ok(res_pack.clone()) }
+            async { Ok::<_, anyhow::Error>(res_pack.clone()) }
         )?;
 
         let mut audio = create_audio_manger(&config)?;
@@ -630,7 +631,7 @@ impl Resource {
     }
 
     #[inline]
-    pub fn apply_model(&mut self, f: impl FnOnce(&mut Self)) {
+    pub fn apply_model_of(&mut self, mat: Matrix3<f32>, f: impl FnOnce(&mut Self)) {
         let gl = unsafe { get_internal_gl() }.quad_gl;
         let current = &self.model_stack.last().unwrap().matrix;
         gl.push_model_matrix(nalgebra_to_glm(current));
