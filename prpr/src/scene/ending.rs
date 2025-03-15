@@ -292,7 +292,7 @@ impl Scene for EndingScene {
                 format!(" {:.2}x", self.speed)
             };
             let text = if self.autoplay {
-                format!("AUTOPLAY {spd}")
+                format!("{spd}")
             } else if !self.rated {
                 format!("{spd}")
             } else if let Some(state) = &self.update_state {
