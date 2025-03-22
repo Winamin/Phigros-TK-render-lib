@@ -10,6 +10,7 @@ fn main() {
     println!("cargo:rustc-link-lib=swscale");
     println!("cargo:rustc-link-lib=bz2");
     println!("cargo:rustc-link-lib=lzma");
+    println!("cargo:rustc-link-search=native=C:\\msys64\\mingw64\\lib");
     let libs_dir = std::env::var("PRPR_AVC_LIBS").unwrap_or_else(|_| format!("{}/static-lib", std::env::var("CARGO_MANIFEST_DIR").unwrap()));
     let libs_path = Path::new(&libs_dir).join(std::env::var("TARGET").unwrap());
     let libs_path = libs_path.display();
