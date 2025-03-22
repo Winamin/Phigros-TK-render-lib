@@ -1,10 +1,6 @@
 use std::path::Path;
 
 fn main() {
-    pkg_config::Config::new()
-        .atleast_version("58.76.100")
-        .probe("libavformat")
-        .unwrap();
     println!("cargo:rustc-link-lib=avformat");
     println!("cargo:rustc-link-lib=swresample");
     println!("cargo:rustc-link-lib=avfilter");
