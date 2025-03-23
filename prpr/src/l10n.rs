@@ -87,7 +87,7 @@ impl L10nGlobal {
         let mut order = Vec::new();
         let locale_lang: LanguageIdentifier = locale_lang.parse().unwrap_or_else(|_| {
     "en-US".parse().expect("Default language should be valid")
-});
+        });
         let locale_lang: LanguageIdentifier = locale_lang.parse().unwrap();
         for (id, lang) in LANG_IDENTS.iter().enumerate() {
             lang_map.insert(lang.clone(), id);
