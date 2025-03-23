@@ -85,8 +85,7 @@ impl L10nGlobal {
     pub fn new() -> Self {
         let mut lang_map = HashMap::new();
         let mut order = Vec::new();
-        let locale_lang: LanguageIdentifier = locale_lang.parse().unwrap_or_else(|_| {
-    "en-US".parse().expect("Default language should be valid")
+        let locale_lang: LanguageIdentifier = locale_lang.parse().unwrap_or_else(|_| {"en-US".parse().expect("Default language should be valid")
         });
         let locale_lang: LanguageIdentifier = locale_lang.parse().unwrap();
         for (id, lang) in LANG_IDENTS.iter().enumerate() {
