@@ -7,13 +7,4 @@ fn main() {
     println!("cargo:rustc-link-search={libs_path}");
     println!("cargo:rustc-link-lib=z");
     println!("cargo:rerun-if-changed={libs_path}");
-    println!("cargo:rustc-link-lib=avformat");
-    println!("cargo:rustc-link-lib=swresample");
-    println!("cargo:rustc-link-lib=avfilter");
-    println!("cargo:rustc-link-lib=avdevice");
-    println!("cargo:rustc-link-lib=avcodec");
-    println!("cargo:rustc-link-lib=avutil");
-    println!("cargo:rustc-link-lib=swscale");
-    println!("cargo:rustc-link-lib=bz2");
-    println!("cargo:rustc-link-lib=lzma");
 }
