@@ -31,58 +31,109 @@ pub struct Chart {
 
 impl Chart {
     pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra) -> Self {
-        let mut attach_ui = [None; 7];
-        let mut order = (0..lines.len())
-            .filter(|it| {
-                if let Some(element) = lines[*it].attach_ui {
-                    attach_ui[element as usize - 1] = Some(*it);
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect::<Vec<_>>();
-        order.sort_by_key(|it| (lines[*it].z_index, *it));
+        let (attach_ui, order) = Self::init_attach_ui_and_order(&lines);
         Self {
             offset,
             lines,
             bpm_list: RefCell::new(bpm_list),
             settings,
             extra,
-
             order,
             attach_ui,
         }
     }
 
+    fn init_attach_ui_and_order(lines: &[JudgeLine]) -> ([Option<usize>; 7], Vec<usize>) {
+        let mut attach_ui = [None; 7];
+        let mut unassigned = Vec::new();
+
+        for (idx, line) in lines.iter().enumerate() {
+            if let Some(element) = line.attach_ui {
+                attach_ui[element as usize - 1] = Some(idx);
+            } else {
+                unassigned.push(idx);
+            }
+        }
+
+        unassigned.sort_by_key(|&idx| (lines[idx].z_index, idx));
+        (attach_ui, unassigned)
+    }
+
+    fn get_element_properties(
+        &self,
+        element: UIElement,
+        res: &Resource,
+        ct: Option<(f32, f32)>,
+        pt: Option<(f32, f32)>,
+    ) -> Option<(Matrix, Color)> {
+        let id = self.attach_ui[element as usize - 1]?;
+        let line = &self.lines[id];
+        let obj = &line.object;
+
+        let base_color = line.color.now_opt().unwrap_or(WHITE);
+        let alpha = obj.now_alpha().max(0.0);
+        let color = Color::new(base_color.r, base_color.g, base_color.b, base_color.a * alpha);
+
+        Some((self.calculate_transform(line, res, ct, pt), color))
+    }
+
+    fn calculate_transform(&self, line: &JudgeLine, res: &Resource, ct: Option<(f32, f32)>, pt: Option<(f32, f32)>) -> Matrix {
+        let mut translation = JudgeLine::fetch_pos(line, res, &self.lines);
+        translation.y = -translation.y;
+
+        let scale = line.object.now_scale_fix(
+            ct.map_or_else(Vector::default, |(x, y)| Vector::new(x, y))
+        );
+
+        let rotation = line.object.new_rotation_wrt_point(
+            -line.object.rotation.now().to_radians(),
+            pt.map_or_else(Vector::default, |(x, y)| Vector::new(x, y))
+        );
+
+        Matrix::new_translation(&translation) * rotation * scale
+    }
+
     #[inline]
-    pub fn with_element<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, ct: Option<(f32, f32)>, pt: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
-        if let Some(id) = self.attach_ui[element as usize - 1] {
-            let lines = &self.lines;
-            let line = &lines[id];
-            let obj = &line.object;
-            let mut tr = JudgeLine::fetch_pos(line, res, lines);
-            tr.y = -tr.y;
-            let mut color = self.lines[id].color.now_opt().unwrap_or(WHITE);
-            color.a *= obj.now_alpha().max(0.); 
-            let scale = obj.now_scale_fix(ct.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
-            let ro = obj.new_rotation_wrt_point(-obj.rotation.now().to_radians(), pt.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
-            ui.with(Matrix::new_translation(&tr) * ro * scale, |ui| f(ui, color))
-        } else {
-            f(ui, WHITE)
+    pub fn with_element<R>(
+        &self,
+        ui: &mut Ui,
+        res: &Resource,
+        element: UIElement,
+        ct: Option<(f32, f32)>,
+        pt: Option<(f32, f32)>,
+        f: impl FnOnce(&mut Ui, Color) -> R,
+    ) -> R {
+        match self.get_element_properties(element, res, ct, pt) {
+            Some((transform, color)) => ui.with(transform, |ui| f(ui, color)),
+            None => f(ui, WHITE),
         }
     }
 
-    pub fn with_element_noscale<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, ct: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
+    pub fn with_element_noscale<R>(
+        &self,
+        ui: &mut Ui,
+        res: &Resource,
+        element: UIElement,
+        ct: Option<(f32, f32)>,
+        f: impl FnOnce(&mut Ui, Color) -> R,
+    ) -> R {
         if let Some(id) = self.attach_ui[element as usize - 1] {
-            let obj = &self.lines[id].object;
-            let mut tr = obj.now_translation(res);
-            tr.y = -tr.y;
-            let mut color = self.lines[id].color.now_opt().unwrap_or(WHITE);
-            color.a *= obj.now_alpha().max(0.); 
-            let mut scale = obj.now_scale_fix(ct.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x , y)));
+            let line = &self.lines[id];
+            let obj = &line.object;
+            
+            let mut translation = obj.now_translation(res);
+            translation.y = -translation.y;
+            
+            let mut scale = obj.now_scale_fix(ct.map_or_else(Vector::default, |(x, y)| Vector::new(x, y)));
             scale.m11 = 1.0;
-            ui.with(obj.now_rotation().append_translation(&tr) * scale, |ui| f(ui, color))
+
+            let transform = obj.now_rotation().append_translation(&translation) * scale;
+            
+            let base_color = line.color.now_opt().unwrap_or(WHITE);
+            let alpha = obj.now_alpha().max(0.0);
+            let color = Color::new(base_color.r, base_color.g, base_color.b, base_color.a * alpha);
+
+            ui.with(transform, |ui| f(ui, color))
         } else {
             f(ui, WHITE)
         }
@@ -91,63 +142,80 @@ impl Chart {
     pub async fn load_textures(&mut self, fs: &mut dyn FileSystem) -> Result<()> {
         for line in &mut self.lines {
             if let JudgeLineKind::Texture(tex, path) = &mut line.kind {
-                *tex = image::load_from_memory(&fs.load_file(path).await.with_context(|| format!("failed to load illustration {path}"))?)?.into();
+                let data = fs.load_file(path)
+                    .await
+                    .with_context(|| format!("Failed to load texture: {}", path))?;
+                *tex = image::load_from_memory(&data)?.into();
             }
         }
         Ok(())
     }
 
     pub fn reset(&mut self) {
-        self.lines
-            .iter_mut()
-            .flat_map(|it| it.notes.iter_mut())
-            .for_each(|note| note.judge = JudgeStatus::NotJudged);
-        for line in &mut self.lines {
-            line.cache.reset(&mut line.notes);
-        }
-        for video in &mut self.extra.videos {
-            video.next_frame = 0;
-        }
+        self.lines.iter_mut().for_each(|line| line.reset_notes());
+        self.extra.videos.iter_mut().for_each(|video| video.next_frame = 0);
     }
 
     pub fn update(&mut self, res: &mut Resource) {
-        for line in &mut self.lines {
-            line.object.set_time(res.time);
-        }
-        // TODO optimize
-        let trs = self.lines.iter().map(|it| it.now_transform(res, &self.lines)).collect::<Vec<_>>();
-        let mut guard = self.bpm_list.borrow_mut();
-        for (index, (line, tr)) in self.lines.iter_mut().zip(trs).enumerate() {
-            line.update(res, tr, &mut guard, index);
-        }
-        drop(guard);
-        for effect in &mut self.extra.effects {
-            effect.update(res);
-        }
+        // Pre-calculate all transforms
+        let transforms: Vec<_> = self.lines
+            .iter()
+            .map(|line| line.now_transform(res, &self.lines))
+            .collect();
+
+        let mut bpm_guard = self.bpm_list.borrow_mut();
+        self.lines.iter_mut()
+            .zip(transforms)
+            .enumerate()
+            .for_each(|(idx, (line, tr))| {
+                line.update(res, tr, &mut bpm_guard, idx);
+            });
+
+        self.extra.effects.iter_mut().for_each(|effect| effect.update(res));
+        self.update_videos(res);
+    }
+
+    fn update_videos(&mut self, res: &mut Resource) {
         for video in &mut self.extra.videos {
-            if let Err(err) = video.update(res.time) {
-                warn!("video error: {err:?}");
+            if let Err(e) = video.update(res.time) {
+                warn!("Video update error: {:?}", e);
             }
         }
     }
 
     pub fn render(&self, ui: &mut Ui, res: &mut Resource) {
-        for video in &self.extra.videos {
-            video.render(res);
-        }
-        res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(if res.config.flip_x() { -1. } else { 1. }, -1.)), |res| {
-            let mut guard = self.bpm_list.borrow_mut();
-            for id in &self.order {
-                self.lines[*id].render(ui, res, &self.lines, &mut guard, &self.settings, *id);
+        self.render_videos(res);
+        
+        res.apply_model_of(
+            &Matrix::identity().append_nonuniform_scaling(&Vector::new(
+                if res.config.flip_x() { -1.0 } else { 1.0 },
+                -1.0
+            )),
+            |res| {
+                let mut bpm_guard = self.bpm_list.borrow_mut();
+                self.render_lines(ui, res, &mut bpm_guard);
+                res.note_buffer.borrow_mut().draw_all();
+                self.finalize_rendering(res);
             }
-            drop(guard);
-            res.note_buffer.borrow_mut().draw_all();
-            if res.config.sample_count > 1 {
-                unsafe { get_internal_gl() }.flush();
-                if let Some(target) = &res.chart_target {
-                    target.blit();
-                }
-            }
+        );
+    }
+
+    fn render_videos(&self, res: &mut Resource) {
+        self.extra.videos.iter().for_each(|video| video.render(res));
+    }
+
+    fn render_lines(&self, ui: &mut Ui, res: &mut Resource, bpm_guard: &mut BpmList) {
+        self.order.iter().for_each(|&idx| {
+            self.lines[idx].render(ui, res, &self.lines, bpm_guard, &self.settings, idx);
         });
+    }
+
+    fn finalize_rendering(&self, res: &mut Resource) {
+        if res.config.sample_count > 1 {
+            unsafe { get_internal_gl() }.flush();
+            if let Some(target) = &res.chart_target {
+                target.blit();
+            }
+        }
     }
 }
