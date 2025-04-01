@@ -152,8 +152,15 @@ impl Chart {
     }
 
     pub fn reset(&mut self) {
-        self.lines.iter_mut().for_each(|line| line.reset_notes());
-        self.extra.videos.iter_mut().for_each(|video| video.next_frame = 0);
+        for line in &mut self.lines {
+            line.cache.reset(&mut line.notes);
+            for note in &mut line.notes {
+                note.judge = JudgeStatus::NotJudged;
+            }
+        }
+        for video in &mut self.extra.videos {
+            video.next_frame = 0;
+        }
     }
 
     pub fn update(&mut self, res: &mut Resource) {
@@ -162,14 +169,16 @@ impl Chart {
             .iter()
             .map(|line| line.now_transform(res, &self.lines))
             .collect();
-
-        let mut bpm_guard = self.bpm_list.borrow_mut();
-        self.lines.iter_mut()
-            .zip(transforms)
-            .enumerate()
-            .for_each(|(idx, (line, tr))| {
-                line.update(res, tr, &mut bpm_guard, idx);
-            });
+        
+        {
+            let mut bpm_guard = self.bpm_list.borrow_mut();
+            self.lines.iter_mut()
+                .zip(transforms)
+                .enumerate()
+                .for_each(|(idx, (line, tr))| {
+                    line.update(res, tr, &mut bpm_guard, idx);
+                });
+        }
 
         self.extra.effects.iter_mut().for_each(|effect| effect.update(res));
         self.update_videos(res);
