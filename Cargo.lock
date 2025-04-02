@@ -3303,7 +3303,7 @@ dependencies = [
 [[package]]
 name = "sasa"
 version = "0.1.0"
-source = "git+https://github.com/Winamin/sasa#0e07b607aded037b9f26e19b533e5ccfdb80d6d1"
+source = "git+https://github.com/Winamin/sasa#eceeb165515c04bda015836923b0bbd9e3cc2027"
 dependencies = [
  "anyhow",
  "cpal",
