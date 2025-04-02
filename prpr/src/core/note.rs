@@ -5,14 +5,11 @@ use crate::{
     judge::JudgeStatus, 
     parse::RPE_HEIGHT,
     core::HEIGHT_RATIO,
-    ext::draw_text_aligned,
-    ui::Ui,
 };
 
 use macroquad::prelude::*;
 use ::rand::{thread_rng, Rng};
 use nalgebra::Matrix3;
-use std::collections::HashMap;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
@@ -52,8 +49,6 @@ pub struct Note {
     pub fake: bool,
     pub judge: JudgeStatus,
     pub format: bool,
-
-    pub debug_trigger_map: HashMap<i32, f32>,
 }
 
 pub struct RenderConfig<'a> {
@@ -224,7 +219,7 @@ impl Note {
         scale.x *= ctrl_obj.size.now_opt().unwrap_or(1.);
         self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr)
     }
-    pub fn render(&self, ui: &mut Ui, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
+    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
             return;
         }
@@ -414,15 +409,6 @@ impl Note {
                 if self.fake && res.time >= self.time {return};
                 draw(res, *style.drag);
             }
-        }
-        if res.config.chart_debug {
-            let col = (self.object.translation.0.now() * 100.0).round() as i32;
-            let trigger_time = res.debug_trigger_map.entry(col).or_insert(self.time);
-            let diff_ms = (self.time - *trigger_time) * 1000.0;
-            let diff_str = format!("{:+.0}ms", diff_ms);
-            res.with_model(self.now_transform(res, ctrl_obj, 0.0, config.incline_sin), |res| {
-                draw_text_aligned(ui, &diff_str, 0.0, -20.0, (0.5, 1.0), 16.0, YELLOW);
-            });
         }
     }
 }

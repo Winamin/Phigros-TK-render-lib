@@ -335,7 +335,6 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
                 fake: note.is_fake != 0,
                 judge: JudgeStatus::NotJudged,
                 format: false,
-                debug_trigger_map: HashMap::new(),
             })
         })
         .collect()
