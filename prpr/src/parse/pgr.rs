@@ -208,7 +208,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                 fake: false,
                 judge: JudgeStatus::NotJudged,
                 format: true
-                //只有pgr才true
+                debug_trigger_map: HashMap::new(),
             })
         })
         .collect()

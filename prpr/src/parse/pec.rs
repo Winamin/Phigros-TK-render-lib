@@ -273,7 +273,8 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
                         multiple_hint: false,
                         fake,
                         judge: JudgeStatus::NotJudged,
-			format: false
+			format: false,
+                        debug_trigger_map: HashMap::new(),
                     });
                     if it.next() == Some("#") {
                         last_note!().speed = it.take_f32()?;
@@ -378,5 +379,5 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
             ..Default::default()
         },
         extra,
-    ))
+     ))
 }

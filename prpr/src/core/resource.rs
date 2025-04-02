@@ -379,6 +379,7 @@ pub struct Resource {
     pub dpi: u32,
     pub last_vp: (i32, i32, i32, i32),
     pub note_width: f32,
+    pub debug_trigger_map: HashMap<i32, f32>,
 
     pub alpha: f32,
     pub judge_line_color: Color,
