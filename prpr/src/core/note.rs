@@ -12,6 +12,7 @@ use crate::{
 use macroquad::prelude::*;
 use ::rand::{thread_rng, Rng};
 use nalgebra::Matrix3;
+use std::collections::HashMap;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
@@ -51,6 +52,8 @@ pub struct Note {
     pub fake: bool,
     pub judge: JudgeStatus,
     pub format: bool,
+
+    pub debug_trigger_map: HashMap<i32, f32>,
 }
 
 pub struct RenderConfig<'a> {
@@ -413,7 +416,9 @@ impl Note {
             }
         }
         if res.config.chart_debug {
-            let diff_ms = (res.time - self.time) * 1000.0;
+            let col = (self.object.translation.0.now() * 100.0).round() as i32;
+            let trigger_time = res.debug_trigger_map.entry(col).or_insert(self.time);
+            let diff_ms = (self.time - *trigger_time) * 1000.0;
             let diff_str = format!("{:+.0}ms", diff_ms);
             res.with_model(self.now_transform(res, ctrl_obj, 0.0, config.incline_sin), |res| {
                 draw_text_aligned(ui, &diff_str, 0.0, -20.0, (0.5, 1.0), 16.0, YELLOW);
