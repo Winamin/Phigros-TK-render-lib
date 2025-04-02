@@ -293,16 +293,17 @@ impl Scene for EndingScene {
             };
             let text = if self.autoplay {
                 if let Some(state) = &self.update_state {
-                    format!("NEW BEST +{:07}", state.improvement)
+                    format!("NEW BEST  0000000  +{:07}")
                 } else {
                     "NEW BEST".to_owned()
                 }
+                format!("{spd}")
             } else if !self.rated {
                 format!("{spd}")
             } else if let Some(state) = &self.update_state {
                 format!("{spd}  {}", 
                     if state.best {
-                        format!("NEW BEST +{:07}", state.improvement)
+                        format!(state.improvement, "NEW BEST +{:07}")
                     } else {
                         "".to_owned()
                     }
@@ -311,7 +312,7 @@ impl Scene for EndingScene {
                 "Uploading…".to_owned()
             };
             let pa = ran(t, 0.2, 0.6).powi(5);
-            let r = draw_text_aligned(ui, &text, main.x + dx + 0.01, main.bottom() - 0.040, (0., 1.), 0.34, Color::new(1., 1., 1., pa));
+            let r = draw_text_aligned(ui, &text, main.x + dx + 0.01, main.bottom() - 0.040, (0., 1.), 0.24, Color::new(1., 1., 1., pa));
             let r = draw_text_aligned(ui, &format!("{:07}", res.score), r.x - 0.005, r.y - 0.022, (0., 1.), 1.05, Color::new(1., 1., 1., pa));
             let icon = icon_index(res.score, res.num_of_notes == res.max_combo);
             let p = ran(t, 1.2, 1.6).powi(5);
