@@ -410,6 +410,13 @@ impl Note {
                 draw(res, *style.drag);
             }
         }
+        if res.config.chart_debug {
+            let diff_ms = (res.time - self.time) * 1000.0;
+            let diff_str = format!("{:+.0}ms", diff_ms);
+            res.with_model(self.now_transform(res, ctrl_obj, 0.0, config.incline_sin), |res| {
+                draw_text_aligned(&diff_str, 0., -20., (0.5, 1.0), 16, YELLOW);
+            });
+        }
     }
 }
 
