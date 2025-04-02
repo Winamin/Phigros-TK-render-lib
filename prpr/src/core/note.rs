@@ -6,7 +6,7 @@ use crate::{
     parse::RPE_HEIGHT,
     core::HEIGHT_RATIO,
     ext::draw_text_aligned,
-    ui::Ui;
+    ui::Ui,
 };
 
 use macroquad::prelude::*;
