@@ -10,6 +10,7 @@ use crate::{
 use macroquad::prelude::*;
 use ::rand::{thread_rng, Rng};
 use nalgebra::Matrix3;
+use crate::ext::draw_text_aligned;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
