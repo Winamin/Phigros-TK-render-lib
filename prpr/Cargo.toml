@@ -75,10 +75,10 @@ block = "0.1.6"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1"
-sasa = { git = "https://github.com/Mivik/sasa", default-features = false, features = ["oboe"] }
+sasa = { git = "https://github.com/Winamin/sasa", default-features = false, features = ["oboe"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-sasa = { git = "https://github.com/Mivik/sasa" }
+sasa = { git = "https://github.com/Winamin/sasa" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.23", features = ["rt-multi-thread", "fs"] }
