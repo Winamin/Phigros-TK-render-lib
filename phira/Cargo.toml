@@ -54,7 +54,7 @@ logos = "0.13.0"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 ndk-sys = "0.2"
-ndk-context = "0.1
+ndk-context = "0.1"
 sasa = { git = "https://github.com/Winamin/sasa" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
