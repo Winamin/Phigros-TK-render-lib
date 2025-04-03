@@ -348,8 +348,8 @@ impl Scene for EndingScene {
         let s2 = Rect::new(s1.x - d * 4. * slope, s1.bottom() + d, s1.w, s1.h);
         draw_parallelogram(s2, None, c2, true);
         {
-            let dy = 0.024;
-            let dy2 = 0.014;
+            let dy = 0.022;
+            let dy2 = 0.016;
             let bg = 0.55;
             let sm = 0.23;
             let pa = ran(t, 1.1, 1.4).powi(5);
