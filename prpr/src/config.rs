@@ -74,7 +74,7 @@ pub struct Config {
     pub volume_bgm: f32,
 
     // for compatibility
-    pub autoplay: bool,
+    pub autoplay: Option<bool>,
 }
 
 impl Default for Config {
@@ -115,7 +115,7 @@ impl Default for Config {
             volume_sfx: 1.,
             volume_bgm: 1.,
 
-            autoplay: false,
+            autoplay: None,
             show_progress_text: false,
             show_time_text: false,
         }
@@ -124,7 +124,9 @@ impl Default for Config {
 
 impl Config {
     pub fn init(&mut self) {
-        self.mods.set(Mods::AUTOPLAY, self.autoplay);
+        if let Some(flag) = self.autoplay {
+            self.mods.set(Mods::AUTOPLAY, flag);
+        }
     }
 
     #[inline]
