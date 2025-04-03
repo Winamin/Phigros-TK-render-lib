@@ -130,6 +130,7 @@ impl EndingScene {
 
             btn_retry: RectButton::new(),
             btn_proceed: RectButton::new(),
+            initial_score: 0,
         })
     }
 }
@@ -293,22 +294,24 @@ impl Scene for EndingScene {
             };
             let text = if self.autoplay {
                 if let Some(state) = &self.update_state {
-                    format!("NEW BEST   0000000   +{:07} {spd}", state.improvement)
+                    format!("NEW BEST   {:07}   +{:07} {spd}", self.initial_score, state.improvement)
                 } else {
                     format!("NEW BEST {spd}")
                 }
-            } else if !self.rated {
-                format!("{spd}")
-            } else if let Some(state) = &self.update_state {
-                format!("{spd}  {}", 
-                    if state.best {
-                        format!("NEW BEST +{:07}", state.improvement)
-                    } else {
-                        "".to_owned()
-                    }
-                )
             } else {
-                "Uploading…".to_owned()
+                if let Some(state) = &self.update_state {
+                    format!("NEW BEST   {:07}   +{:07} {spd}", self.initial_score, state.improvement)
+                } else if !self.rated {
+                    format!("{spd}")
+                } else {
+                    format!("{spd}  {}", 
+                        if state.best {
+                            format!("NEW BEST +{:07}", state.improvement)
+                        } else {
+                            "".to_owned()
+                        }
+                    )
+                }
             };
             let pa = ran(t, 0.2, 0.6).powi(5);
             let r = draw_text_aligned(ui, &text, main.x + dx + 0.01, main.bottom() - 0.040, (0., 1.), 0.29, Color::new(1., 1., 1., pa));
@@ -350,7 +353,7 @@ impl Scene for EndingScene {
         let s2 = Rect::new(s1.x - d * 4. * slope, s1.bottom() + d, s1.w, s1.h);
         draw_parallelogram(s2, None, c2, true);
         {
-            let dy = 0.022;
+            let dy = 0.024;
             let dy2 = 0.014;
             let bg = 0.55;
             let sm = 0.23;
