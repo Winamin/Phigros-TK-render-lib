@@ -297,7 +297,7 @@ impl Scene for EndingScene {
                 } else {
                     "NEW BEST".to_owned();
                 }
-                format!("{spd}")
+                //format!("{spd}")
             } else if !self.rated {
                 format!("{spd}")
             } else if let Some(state) = &self.update_state {
