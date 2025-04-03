@@ -292,19 +292,16 @@ impl Scene for EndingScene {
                 format!(" {:.2}x", self.speed)
             };
             let text = if self.autoplay {
-                if let Some(state) = &self.update_state {
-                    format!("NEW BEST 0000000 +{:07} {spd}", state.improvement)
-                } else {
-                    format!("NEW BEST {spd}")
-                }
+                format!("NEW BEST +{:07}", state.improvement)
             } else if !self.rated {
                 format!("{spd}")
             } else if let Some(state) = &self.update_state {
-                format!("{spd}  {}", 
+                format!(
+                    "{spd}  {}",
                     if state.best {
                         format!("NEW BEST +{:07}", state.improvement)
                     } else {
-                        "".to_owned()
+                        format!(" ")//String::new()
                     }
                 )
             } else {
