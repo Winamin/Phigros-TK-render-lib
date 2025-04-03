@@ -348,10 +348,10 @@ impl Scene for EndingScene {
         let s2 = Rect::new(s1.x - d * 4. * slope, s1.bottom() + d, s1.w, s1.h);
         draw_parallelogram(s2, None, c2, true);
         {
-            let dy = 0.022;
-            let dy2 = 0.016;
+            let dy = 0.028;
+            let dy2 = 0.010;
             let bg = 0.55;
-            let sm = 0.23;
+            let sm = 0.21;
             let pa = ran(t, 1.1, 1.4).powi(5);
             let draw_count = |ui: &mut Ui, ratio: f32, name: &str, count: u32| {
                 let r = draw_text_aligned(ui, name, s2.x + s2.w * ratio, s2.bottom() - dy, (0.5, 1.), sm, Color::new(1., 1., 1., pa));
@@ -362,9 +362,9 @@ impl Scene for EndingScene {
             draw_count(ui, 0.45, "Bad", res.counts[2]);
             draw_count(ui, 0.59, "Miss", res.counts[3]);
 
-            let sm = 0.3;
-            let l = s2.x + s2.w * 0.70;
-            let rt = s2.x + s2.w * 0.92;
+            let sm = 0.32;
+            let l = s2.x + s2.w * 0.72;
+            let rt = s2.x + s2.w * 0.93;
             let cy = s2.center().y;
             let r = draw_text_aligned(ui, "Early", l, cy - dy2 / 2.3, (0., 1.), sm, Color::new(1., 1., 1., pa));
             draw_text_aligned(ui, &res.early.to_string(), rt, r.bottom(), (1., 1.), sm, Color::new(1., 1., 1., pa));
