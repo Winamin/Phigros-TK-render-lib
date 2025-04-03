@@ -295,7 +295,7 @@ impl Scene for EndingScene {
                 if let Some(state) = &self.update_state {
                     format!("NEW BEST  0000000  +{:07}", state.improvement)
                 } else {
-                    "NEW BEST".to_owned();
+                    "NEW BEST".to_owned()
                 }
                 //format!("{spd}")
             } else if !self.rated {
