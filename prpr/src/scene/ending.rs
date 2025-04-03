@@ -58,6 +58,7 @@ pub struct EndingScene {
 
     btn_retry: RectButton,
     btn_proceed: RectButton,
+    initial_score: u32,
 }
 
 impl EndingScene {
@@ -293,24 +294,18 @@ impl Scene for EndingScene {
                 format!(" {:.2}x", self.speed)
             };
             let text = if self.autoplay {
-                if let Some(state) = &self.update_state {
-                    format!("NEW BEST   {:07}   +{:07} {spd}", self.initial_score, state.improvement)
-                } else {
-                    format!("NEW BEST {spd}")
+                match &self.update_state {
+                    Some(state) => format!("NEW BEST   {:07}   +{:07} {spd}", self.initial_score, state.improvement),
+                    None => format!("NEW BEST {spd}"),
                 }
             } else {
-                if let Some(state) = &self.update_state {
-                    format!("NEW BEST   {:07}   +{:07} {spd}", self.initial_score, state.improvement)
-                } else if !self.rated {
-                    format!("{spd}")
-                } else {
-                    format!("{spd}  {}", 
-                        if state.best {
-                            format!("NEW BEST +{:07}", state.improvement)
-                        } else {
-                            "".to_owned()
-                        }
-                    )
+                match &self.update_state {
+                    Some(state) => format!("NEW BEST   {:07}   +{:07} {spd}", self.initial_score, state.improvement),
+                    None => if !self.rated {
+                        format!("{spd}")
+                    } else {
+                        "Uploading…".to_owned()
+                    },
                 }
             };
             let pa = ran(t, 0.2, 0.6).powi(5);
