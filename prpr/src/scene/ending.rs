@@ -293,11 +293,11 @@ impl Scene for EndingScene {
             };
             let text = if self.autoplay {
                 if let Some(state) = &self.update_state {
-                    format!("NEW BEST  0000000  +{:07}", state.improvement)
+                    format!("NEW BEST 0000000 +{:07}", state.improvement)
                 } else {
                     "NEW BEST".to_owned()
                 }
-                //format!("{spd}")
+                format!("{spd}")
             } else if !self.rated {
                 format!("{spd}")
             } else if let Some(state) = &self.update_state {
