@@ -353,7 +353,7 @@ impl Scene for EndingScene {
             let dy = 0.022;
             let dy2 = 0.014;
             let bg = 0.55;
-            let sm = 0.21;
+            let sm = 0.23;
             let pa = ran(t, 1.1, 1.4).powi(5);
             let draw_count = |ui: &mut Ui, ratio: f32, name: &str, count: u32| {
                 let r = draw_text_aligned(ui, name, s2.x + s2.w * ratio, s2.bottom() - dy, (0.5, 1.), sm, Color::new(1., 1., 1., pa));
