@@ -379,7 +379,7 @@ pub struct Resource {
     pub dpi: u32,
     pub last_vp: (i32, i32, i32, i32),
     pub note_width: f32,
-    pub start_anim: f32,
+    pub start_anim: F32,
 
     pub alpha: f32,
     pub judge_line_color: Color,
