@@ -409,11 +409,10 @@ impl GameScene {
         }
         self.chart.with_element(ui, res, UIElement::Pause, Some((pause_center.x, pause_center.y)), Some((pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2)), |ui, color| {
             let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
-            //let ct = pause_center.coords;
             let c = Color { a: color.a * c.a, ..color };
-                ui.fill_rect(r, c);
-                r.x += pause_w * 2.;
-                ui.fill_rect(r, c);
+            ui.fill_rect(r, c);
+            r.x += pause_w * 2.;
+            ui.fill_rect(r, c);
         });
         let unit_h = ui.text("0").measure().h;
         let combo_top = top + eps * 1.346 - (1. - p) * 0.4;
@@ -429,9 +428,8 @@ impl GameScene {
                 let text_btm = text.draw().bottom();
                 if text_width > max_width {
                     text_size *= max_width / text_width
-               }
-               ui.text(self.judge.combo().to_string());
-                    ui.text(self.judge.combo().to_string())
+                }
+                ui.text(self.judge.combo().to_string())
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
                     .color(Color { a: color.a * c.a, ..color })
@@ -494,53 +492,55 @@ impl GameScene {
         };
         let hw = 0.0015;
         let height = eps * 1.1;
-        let dest = (2. * res.time / res.track_length).min(2.0);
+        let mut dest = (2. * res.time / res.track_length).min(2.0);
+        let mut bar_y = top;
+        let mut bar_alpha = 1.0;
+        if matches!(self.state, State::Ending) {
+            let t = time - self.res.track_length - WAIT_TIME;
+            let progress = (t / (AFTER_TIME + 0.3)).min(1.0);
+            bar_alpha = 1.0 - progress.powi(2);
+            bar_y = top - progress * height * 2.0;
+        }
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
-            //let ct = Vector::new(0., top + height / 2.);
-                ui.fill_rect(
-                    Rect::new(-1., top, dest, height),
-                    //Color{ a: color.a * c.a * 0.6, ..color},
-                    Color::new(0.565, 0.565, 0.565, color.a * c.a),
-                );
-                ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color::new(1., 1., 1., color.a * c.a));
+            ui.fill_rect(
+                Rect::new(-1., bar_y, dest, height),
+                Color::new(0.565, 0.565, 0.565, color.a * c.a * bar_alpha),
+            );
+            ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color::new(1., 1., 1., color.a * c.a * bar_alpha));
         });
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
-        let ct = Vector::new(0., top + height / 2.);
+            let ct = Vector::new(0., top + height / 2.);
             ui.fill_rect(
-                Rect::new(-1., top, dest, height),
-                Color::new(0.45, 0.45, 0.45, 1.),
+                Rect::new(-1., bar_y, dest, height),
+                Color::new(0.45, 0.45, 0.45, bar_alpha),
             );
-            ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color { a: color.a * c.a, ..color });
-        //});
-
-        let progress = res.time / res.track_length;
-        let bar_width = progress * 2.0;
-            
-        let progress_percentage = (progress * 100.).min(100.);
-        let truncated_percentage = ((progress_percentage * 10000.0).floor() / 10000.0).min(100.0);
-        let progress_text = format!("{:.4}%", truncated_percentage);
-            
-        let parts: Vec<&str> = progress_text.split('.').collect();    
-            
-        let current_time_text = fmt_time(res.time);
-        let total_time_text = fmt_time(res.track_length);
-        let time_text = format!("{}", current_time_text);
-
-        if res.config.show_progress_text {ui.text(progress_text)
-            .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
-            .anchor(1., 0.)
-            .size(0.4)
-            .color(semi_white(0.7))
-            .draw();
-        }
-        if res.config.show_time_text {ui.text(time_text)
-            .pos(-1. + bar_width - 0.01, top + height / 2.)
-            .anchor(1., 0.5)
-            .size(0.17867)
-            .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
-            .draw();
+            ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color { a: color.a * c.a * bar_alpha, ..color });
+            let progress = res.time / res.track_length;
+            let bar_width = progress * 2.0;
+            let progress_percentage = (progress * 100.).min(100.);
+            let truncated_percentage = ((progress_percentage * 10000.0).floor() / 10000.0).min(100.0);
+            let progress_text = format!("{:.4}%", truncated_percentage);
+            let parts: Vec<&str> = progress_text.split('.').collect();
+            let current_time_text = fmt_time(res.time);
+            let total_time_text = fmt_time(res.track_length);
+            let time_text = format!("{}", current_time_text);
+            if res.config.show_progress_text {
+                ui.text(progress_text)
+                    .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
+                    .anchor(1., 0.)
+                    .size(0.4)
+                    .color(semi_white(0.7))
+                    .draw();
             }
-         });
+            if res.config.show_time_text {
+                ui.text(time_text)
+                    .pos(-1. + bar_width - 0.01, top + height / 2.)
+                    .anchor(1., 0.5)
+                    .size(0.17867)
+                    .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
+                    .draw();
+            }
+        });
         Ok(())
     }
 
@@ -835,21 +835,6 @@ impl GameScene {
             if ui.button("ti_add", Rect::new(width - d, r.center().y, 0., 0.).feather(0.017), "+") && ita {
                 self.info_offset += 0.001;
             }
-            /*ui.dy(0.14);
-            let pad = 0.02;
-            let spacing = 0.01;
-            let mut r = Rect::new(pad, 0., (width - pad * 2. - spacing * 2.) / 3., 0.06);
-            if ui.button("cancel", r, tl!("offset-cancel")) {
-                self.next_scene = Some(NextScene::PopWithResult(Box::new(None::<f32>)));
-            }
-            r.x += r.w + spacing;
-            if ui.button("reset", r, tl!("offset-reset")) {
-                self.info_offset = 0.;
-            }
-            r.x += r.w + spacing;
-            if ui.button("save", r, tl!("offset-save")) {
-                self.next_scene = Some(NextScene::PopWithResult(Box::new(Some(self.info_offset))));
-            }*/
         });
         ui.scope(|ui| {
             ui.dx(1. - width * 0.97);
@@ -962,7 +947,6 @@ impl Scene for GameScene {
                 let t = time - self.res.track_length - WAIT_TIME;
                 if t >= AFTER_TIME + 0.3 {
                     let mut record_data = None;
-                    // TODO strengthen the protection
                     #[cfg(feature = "closed")]
                     if let Some(upload_fn) = &self.upload_fn {
                         if !self.res.config.offline_mode && !self.res.config.autoplay() && self.res.config.speed >= 1.0 - 1e-3 {
@@ -1134,7 +1118,6 @@ impl Scene for GameScene {
             .as_ref()
             .map(|it| if msaa { it.input() } else { it.output() })
             .or(res.camera.render_target);
-        //push_camera_state();
         set_camera(&Camera2D {
             zoom: vec2(1., -asp),
             viewport: if res.chart_target.is_some() { None } else { Some(ui.viewport) },
@@ -1153,7 +1136,6 @@ impl Scene for GameScene {
         let h = 1. / res.aspect_ratio;
         if res.config.chart_ratio >= 1. {
             let dim_alpha = 0.7;
-            //let alpha = res.alpha * (1. - dim_alpha) + dim_alpha;    
             let dim = Color::new(0.1, 0.1, 0.1, dim_alpha * res.alpha);
             let x_range = vp.0 as f32 / ui.viewport.2 as f32;
             draw_rectangle(-1., -h,x_range * 2., h * 2., dim);
@@ -1168,7 +1150,6 @@ impl Scene for GameScene {
         });
         
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
-        //self.gl.quad_gl.viewport(chart_target_vp);
         draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
         self.chart.render(ui, res);
 
@@ -1194,10 +1175,7 @@ impl Scene for GameScene {
         
         self.ui(ui, tm)?;
 
-        //pop_camera_state();
-
         if !self.res.no_effect && !self.effects.is_empty() {
-            //push_camera_state();
             set_camera(&Camera2D {
                 zoom: vec2(1., asp),
                 ..Default::default()
@@ -1205,11 +1183,9 @@ impl Scene for GameScene {
             for e in &self.effects {
                 e.render(&mut self.res);
             }
-            //pop_camera_state();
         }
         
         {
-            //push_camera_state();
             set_camera(&Camera2D {
                 zoom: vec2(1., -asp2),
                 viewport: chart_target_vp,
@@ -1217,27 +1193,11 @@ impl Scene for GameScene {
                 ..Default::default()
             });
             self.overlay_ui(ui, tm)?;
-            //pop_camera_state();
-        }
-
-        if self.mode == GameMode::TweakOffset {
-            //push_camera_state();
-            self.gl.quad_gl.viewport(None);
-            set_camera(&Camera2D {
-                zoom: vec2(1., asp),
-                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
-                ..Default::default()
-            });
-            self.tweak_offset(ui, Self::interactive(&self.res, &self.state), tm);
-            //pop_camera_state();
         }
 
         if msaa || !self.res.no_effect {
-            // render the texture onto screen
             if let Some(target) = &self.res.chart_target {
                 self.gl.flush();
-                //push_camera_state();
-                self.gl.quad_gl.viewport(None);
                 set_camera(&Camera2D {
                     zoom: vec2(1., asp),
                     render_target: self.res.camera.render_target,
@@ -1254,14 +1214,12 @@ impl Scene for GameScene {
                         ..Default::default()
                     },
                 );
-                //pop_camera_state();
             }
         } else {
             self.gl.flush();
         }
         Ok(())
     }
-
 
     fn next_scene(&mut self, tm: &mut TimeManager) -> NextScene {
         if self.should_exit {
