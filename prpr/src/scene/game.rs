@@ -496,7 +496,7 @@ impl GameScene {
         let mut bar_y = top;
         let mut bar_alpha = 1.0;
         if matches!(self.state, State::Ending) {
-            let t = time - self.res.track_length - WAIT_TIME;
+            let t = time - res.track_length - WAIT_TIME;
             let progress = (t / (AFTER_TIME + 0.3)).min(1.0);
             bar_alpha = 1.0 - progress.powi(2);
             bar_y = top - progress * height * 2.0;
