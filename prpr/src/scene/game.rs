@@ -349,12 +349,20 @@ impl GameScene {
         };
         let c = Color::new(1., 1., 1., self.res.alpha);
         let res = &mut self.res;
+<<<<<<< HEAD
         let aspect_ratio = res.aspect_ratio;
         let top = -1.;
         let eps = 2e-2;
         let pause_w = 0.011;
         let pause_h = pause_w * 3.5;
         let pause_center = Point::new(-aspect_ratio + 0.040, top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
+=======
+        let eps = 2e-2 / res.aspect_ratio;
+        let top = -1. / res.aspect_ratio;
+        let pause_w = 0.011;
+        let pause_h = pause_w * 3.4;
+        let pause_center = Point::new(pause_w * 4.4 - 1., top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
+>>>>>>> parent of f2c61e8 (refactor: ui)
         if res.config.interactive
             && !tm.paused()
             && self.pause_rewind.is_none()
@@ -383,8 +391,13 @@ impl GameScene {
         let score = format!("{:07}", self.judge.score());
         let margin = 0.0425 * aspect_ratio;
         let score_top = top + eps * 2.2 - (1. - p) * 0.4;
+<<<<<<< HEAD
         let ct = ui.text(&score).size(0.8 * aspect_ratio).center();
         self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + aspect_ratio - margin, ct.y + score_top)), Some((aspect_ratio - margin + 0.001, top + eps * 2.8125)), |ui, color| {
+=======
+        let ct = ui.text(&score).size(0.8).center();
+        self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
+>>>>>>> parent of f2c61e8 (refactor: ui)
             let mut text_size = 0.70867;
             let mut text = ui.text(&score).size(text_size);
             let max_width = 0.55 * aspect_ratio;
@@ -421,7 +434,11 @@ impl GameScene {
         if self.judge.combo() >= 3 {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
                 let mut text_size = 1.;
+<<<<<<< HEAD
                 let max_width = 0.55 * aspect_ratio;
+=======
+                let max_width = 0.55;
+>>>>>>> parent of f2c61e8 (refactor: ui)
                 let mut text = ui.text(&res.config.combo)
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
