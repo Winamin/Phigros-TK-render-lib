@@ -349,6 +349,7 @@ impl GameScene {
         };
         let c = Color::new(1., 1., 1., self.res.alpha);
         let res = &mut self.res;
+        let aspect_ratio = res.aspect_ratio;
         let scale_ratio = 1.777777777777777;
         let top = -1.;
         let eps = 2e-2;
@@ -361,7 +362,7 @@ impl GameScene {
             && Judge::get_touches().iter().any(|touch| {
                 touch.phase == TouchPhase::Started && {
                     let p = touch.position;
-                    let p = Point::new(p.x, p.y);
+                    let p = Point::new(p.x * aspect_ratio, p.y * aspect_ratio);
                     (pause_center - p).norm() < 0.05
                 }
             })
@@ -381,20 +382,20 @@ impl GameScene {
             ui.fill_circle(pause_center.x, pause_center.y, 0.05 * scale_ratio, Color::new(1., 1., 1., 0.5));
         }
         let score = format!("{:07}", self.judge.score());
-        let margin = 0.046;
+        let margin = 0.0425 * aspect_ratio;
         let score_top = top + eps * 2.2 - (1. - p) * 0.4;
-        let ct = ui.text(&score).size(0.8).center();
-        self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
+        let ct = ui.text(&score).size(0.8 * aspect_ratio).center();
+        self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + aspect_ratio - margin, ct.y + score_top)), Some((aspect_ratio - margin + 0.001, top + eps * 2.8125)), |ui, color| {
             let mut text_size = 0.71 * scale_ratio;
             let mut text = ui.text(&score).size(text_size);
-            let max_width = 0.55;
+            let max_width = 0.55 * aspect_ratio;
             let text_width = text.measure().w;
             if text_width > max_width {
                 text_size *= max_width / text_width
             }
             drop(text);
             ui.text(format!("{:07}", self.judge.score()))
-                .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
+                .pos(aspect_ratio - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
                 .anchor(1., 0.)
                 .size(0.70867)
                 .color(Color { a: color.a * c.a, ..color })
@@ -402,7 +403,7 @@ impl GameScene {
         });
         if res.config.show_acc {
             ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
-                .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
+                .pos(aspect_ratio - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07 + 0.05)
                 .anchor(1., 0.)
                 .size(0.4 * scale_ratio)
                 .color(semi_white(0.7))
@@ -421,7 +422,7 @@ impl GameScene {
         if self.judge.combo() >= 3 {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
                 let mut text_size = 0.98 * scale_ratio;
-                let max_width = 0.55;
+                let max_width = 0.55 * aspect_ratio;
                 let mut text = ui.text(&res.config.combo)
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
@@ -449,7 +450,7 @@ impl GameScene {
                     .draw();
             });
         }
-        let lf = -1. + margin;
+        let lf = -aspect_ratio + margin;
         let bt = -top - eps * 3.64;
         self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
             let mut text_size = 0.5;
@@ -495,15 +496,15 @@ impl GameScene {
         };
         let hw = 0.0015;
         let height = eps * 1.1;
-        let dest = (2. * res.time / res.track_length).min(2.0);
-        self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
+        let dest = (aspect_ratio * 2. * res.time / res.track_length).max(0.).min(aspect_ratio * 2.);
+        self.chart.with_element(ui, res, UIElement::Bar, Some((-aspect_ratio, top + height / 2.)), Some((-aspect_ratio, top + height / 2.)), |ui, color| {
             //let ct = Vector::new(0., top + height / 2.);
                 ui.fill_rect(
-                    Rect::new(-1., top, dest, height),
+                    Rect::new(-aspect_ratio, top, dest, height),
                     //Color{ a: color.a * c.a * 0.6, ..color},
                     Color::new(0.565, 0.565, 0.565, color.a * c.a),
                 );
-                ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color::new(1., 1., 1., color.a * c.a));
+                ui.fill_rect(Rect::new(-aspect_ratio + dest - hw, top, hw * 2., height), Color::new(1., 1., 1., color.a * c.a));
         });
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
         let ct = Vector::new(0., top + height / 2.);
