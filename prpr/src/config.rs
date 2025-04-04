@@ -67,7 +67,7 @@ pub struct Config {
     // test
     pub show_progress_text: bool,
     pub show_time_text: bool,
-    pub watermark: String,
+    pub watermark: string,
     //test
     pub touch_debug: bool,
     pub volume_music: f32,
