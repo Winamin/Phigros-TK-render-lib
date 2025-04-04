@@ -1152,7 +1152,7 @@ impl Scene for GameScene {
         };
         let h = 1. / res.aspect_ratio;
         if res.config.chart_ratio >= 1. {
-            let dim_alpha = 0.5;
+            let dim_alpha = 0.7;
             //let alpha = res.alpha * (1. - dim_alpha) + dim_alpha;    
             let dim = Color::new(0.1, 0.1, 0.1, dim_alpha * res.alpha);
             let x_range = vp.0 as f32 / ui.viewport.2 as f32;
