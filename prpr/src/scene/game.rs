@@ -632,9 +632,6 @@ impl GameScene {
                             self.music.seek_to(self.exercise_range.start)?;
                             pos = self.exercise_range.start;
                         }
-                        if !res.config.disable_audio {
-                            self.music.play()?;
-                        }
                         res.time -= 1.;
                         let dst = pos - 1.;
                         if dst < 0. {
