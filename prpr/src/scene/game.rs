@@ -352,9 +352,9 @@ impl GameScene {
         let aspect_ratio = res.aspect_ratio;
         let top = -1.;
         let eps = 2e-2;
-        let pause_w = 0.011 * scale_ratio;
+        let pause_w = 0.011;
         let pause_h = pause_w * 3.5;
-        let pause_center = Point::new(-aspect_ratio + 0.040 * scale_ratio, top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
+        let pause_center = Point::new(-aspect_ratio + 0.040, top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
         if res.config.interactive
             && !tm.paused()
             && self.pause_rewind.is_none()
