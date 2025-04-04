@@ -200,7 +200,11 @@ impl JudgeLine {
                                 return;
                         }
                         let full_len = res.info.line_length;
-                        let exp_factor = res.start_anim;
+                        let exp_factor = if res.time <= crate::scene::game::GameScene::BEFORE_TIME {
+                            1.0 - (1.0 - res.time / crate::scene::game::GameScene::BEFORE_TIME).powi(3)
+                        } else {
+                            1.0
+                        };
                         let current_len = full_len * exp_factor;
                         draw_line(-current_len, 0., current_len, 0., 0.0075, color);
                     }

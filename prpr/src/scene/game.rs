@@ -20,7 +20,6 @@ use crate::{
     task::Task,
     time::TimeManager,
     ui::{RectButton, Ui},
-    core::BpmList,
 };
 use anyhow::{bail, Context, Result};
 use concat_string::concat_string;
@@ -330,13 +329,6 @@ impl GameScene {
     fn touch_scale(&self) -> f32 {
         (screen_width() / screen_height()) / self.res.aspect_ratio
     }
-    
-    fn draw_judge_lines(&self, ui: &mut Ui, res: &mut Resource, bpm_list: &mut BpmList, p: f32) {
-        res.start_anim = p;
-        for (i, line) in self.chart.lines.iter().enumerate() {
-            line.render(ui, res, &self.chart.lines, bpm_list, &self.chart.settings, i);
-        }
-    }
 
     fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
         let time = tm.now() as f32;
@@ -355,7 +347,6 @@ impl GameScene {
                 1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
             }
         };
-
         let c = Color::new(1., 1., 1., self.res.alpha);
         let res = &mut self.res;
         let eps = 2e-2 / res.aspect_ratio;
@@ -1160,31 +1151,7 @@ impl Scene for GameScene {
         
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
         draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
-
-        let time = tm.now() as f32;
-        let p = match self.state {
-            State::Starting => {
-                if time <= Self::BEFORE_TIME {
-                    1.0 - (1.0 - time / Self::BEFORE_TIME).powi(3)
-                } else {
-                    1.0
-                }
-            }
-            State::BeforeMusic | State::Playing => 1.0,
-            State::Ending => {
-                let t = time - self.res.track_length - WAIT_TIME;
-                1.0 - (t / (AFTER_TIME + 0.3)).min(1.0).powi(2)
-            }
-        };
-
-        self.draw_judge_lines(
-            ui,
-            &mut self.res,
-            &mut *self.chart.bpm_list.borrow_mut(),
-            p
-        );
-        self.chart.render(ui, &mut self.res);
-        self.ui(ui, tm)?;
+        self.chart.render(ui, res);
 
         set_camera( &Camera2D {
             zoom: vec2_asp,
