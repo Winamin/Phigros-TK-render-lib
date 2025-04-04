@@ -474,6 +474,24 @@ impl GameScene {
                 .color(Color { a: color.a * c.a, ..color })
                 .draw();
         });
+        {
+            let watermark = res.config.watermark.clone();
+            if res.config.chart_ratio >= 0.95 {
+                ui.text(&watermark)
+                    .pos(0., -top * 0.98 + (1. - p) * 0.4)
+                    .anchor(0.5, 1.)
+                    .size(0.25 * scale_ratio)
+                    .color(Color::new(1., 1., 1., 0.5 * c.a))
+                    .draw();
+            } else {
+                ui.text(&watermark)
+                    .pos(0., (-top * 0.98 + (1. - p) * 0.4) / res.config.chart_ratio)
+                    .anchor(0.5, 1.)
+                    .size(0.25 * scale_ratio / res.config.chart_ratio)
+                    .color(Color::new(1., 1., 1., 0.5 * c.a))
+                    .draw();
+            }
+        };
         let hw = 0.0015;
         let height = eps * 1.1;
         let dest = (2. * res.time / res.track_length).min(2.0);

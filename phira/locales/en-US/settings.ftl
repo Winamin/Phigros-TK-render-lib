@@ -42,6 +42,7 @@ item-touch-debug = Touch debug mode
 item-touch-debug-sub = Display touch points
 item-buffer_size = Adjust Buffer_size
 item-combo = customize COMBO text
+item-watermark = Watermark Text
 item-flid_x = Mirror Mode
 item-show_progress_text = Progress bar (scale display)
 item-show_time_text = Progress bar time display
