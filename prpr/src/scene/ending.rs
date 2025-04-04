@@ -369,7 +369,7 @@ impl Scene for EndingScene {
             let cy = s2.center().y;
             let r = draw_text_aligned(ui, "Early", l, cy - dy2 / 2.3, (0., 1.), sm, Color::new(1., 1., 1., pa));
             draw_text_aligned(ui, &res.early.to_string(), rt, r.bottom(), (1., 1.), sm, Color::new(1., 1., 1., pa));
-            let r = draw_text_aligned(ui, text_late, l, cy + dy2 / 2.3, (0., 0.), sm, Color::new(1., 1., 1., pa));
+            let r = draw_text_aligned(ui, "Late", l, cy + dy2 / 2.3, (0., 0.), sm, Color::new(1., 1., 1., pa));
             draw_text_aligned(ui, &res.late.to_string(), rt, r.y, (1., 0.), sm, Color::new(1., 1., 1., pa));
         }
         gl.pop_model_matrix();
