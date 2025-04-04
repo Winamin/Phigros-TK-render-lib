@@ -20,6 +20,7 @@ use crate::{
     task::Task,
     time::TimeManager,
     ui::{RectButton, Ui},
+    core::BpmList,
 };
 use anyhow::{bail, Context, Result};
 use concat_string::concat_string;
@@ -332,8 +333,8 @@ impl GameScene {
     
     fn draw_judge_lines(&self, ui: &mut Ui, res: &mut Resource, bpm_list: &mut BpmList, p: f32) {
         res.start_anim = p;
-        for (i, line) in self.chart.judge_lines.iter().enumerate() {
-            line.render(ui, res, &self.chart.judge_lines, bpm_list, &self.chart.settings, i);
+        for (i, line) in self.chart.lines.iter().enumerate() {
+            line.render(ui, res, &self.chart.lines, bpm_list, &self.chart.settings, i);
         }
     }
 
