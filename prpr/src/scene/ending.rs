@@ -251,7 +251,7 @@ impl Scene for EndingScene {
         let slope = PARALLELOGRAM_SLOPE;
         let ratio = 0.2;
         draw_parallelogram_ex(
-            Rect::new(r.x, r.y + r.h * (1. - ratio) - 0.05, r.w - r.h * (1. - ratio) * slope, r.h * ratio),
+            Rect::new(r.x, r.y + r.h * (1. - ratio) - 0.1, r.w - r.h * (1. - ratio) * slope, r.h * ratio),
             None,
             Color::default(),
             Color::new(0., 0., 0., 0.6),
