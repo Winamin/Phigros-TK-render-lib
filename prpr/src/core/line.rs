@@ -192,17 +192,24 @@ impl JudgeLine {
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| match &self.kind {
                     JudgeLineKind::Normal => {
+                        let mut color = color.unwrap_or(res.judge_line_color);
+                        color.a *= alpha.max(0.0);
+                        if res.config.chart_debug {
+                            color.a = 0.10 + 0.90 * color.a;
+                        } else if color.a == 0.0 {
+                                return;
+                        }
                         let full_len = res.info.line_length;
-                        let duration = 4.5;
+                        let duration = 4.03;
                         let t_norm = (res.time / duration).min(1.0);
-                        let threshold = 0.5;
+                        let threshold = 0.2;
                         let exp_factor = if t_norm < threshold {
-                            0.5 * (t_norm / threshold).powi(3)
+                            0.5 * (t_norm / threshold).powi(2)
                         } else {
-                            0.5 + 0.5 * (1.0 - ((1.0 - t_norm) / (1.0 - threshold)).powi(3))
+                            0.5 + 0.5 * (1.0 - ((1.0 - t_norm) / (1.0 - threshold)).powi(2))
                         };
                         let current_len = full_len * exp_factor;
-                        draw_line(-current_len, 0., current_len, 0., 0.0075, color.unwrap_or(WHITE));
+                        draw_line(-current_len, 0., current_len, 0., 0.0075, color);
                     }
                     JudgeLineKind::Texture(texture, _) => {
                         if res.time <= 0. && matches!(color, Some(WHITE)) {
