@@ -200,12 +200,7 @@ impl JudgeLine {
                                 return;
                         }
                         let full_len = res.info.line_length;
-                        let before_time = 0.7;
-                        let exp_factor = if res.time <= before_time {
-                            1.0 - (1.0 - res.time / before_time).powi(3)
-                        } else {
-                            1.0
-                        };
+                        let exp_factor = res.start_anim;
                         let current_len = full_len * exp_factor;
                         draw_line(-current_len, 0., current_len, 0., 0.0075, color);
                     }

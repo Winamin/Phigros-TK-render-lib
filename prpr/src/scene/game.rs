@@ -347,6 +347,8 @@ impl GameScene {
                 1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
             }
         };
+        self.res.start_anim = p;
+        
         let c = Color::new(1., 1., 1., self.res.alpha);
         let res = &mut self.res;
         let eps = 2e-2 / res.aspect_ratio;
