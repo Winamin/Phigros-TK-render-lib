@@ -397,7 +397,7 @@ impl GameScene {
             ui.text(format!("{:07}", self.judge.score()))
                 .pos(aspect_ratio - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
                 .anchor(1., 0.)
-                .size(0.70867)
+                .size(text_size)
                 .color(Color { a: color.a * c.a, ..color })
                 .draw();
         });
@@ -453,12 +453,12 @@ impl GameScene {
         let lf = -aspect_ratio + margin;
         let bt = -top - eps * 3.64;
         self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
-            let mut text_size = 0.5;
-            let mut text = ui.text(&res.info.name).size(text_size);
-            let max_width = 0.9;
-            let text_width = text.measure().w;
-            if text_width > max_width {
-                text_size *= max_width / text_width
+            let mut text_size = 0.505 * scale_ratio;
+                let mut text = ui.text(&res.info.name).size(text_size);
+                let max_width = 0.9 * aspect_ratio;
+                let text_width = text.measure().w;
+                if text_width > max_width {
+                    text_size *= max_width / text_width
             }
             drop(text);
             ui.text(&res.info.name)
@@ -478,24 +478,23 @@ impl GameScene {
         });
         {
             let watermark = res.config.watermark.clone();
-            if res.config.chart_ratio >= 0.95 {
+            ui.text(&watermark)
+                .pos(0., -top * 0.98 + (1. - p) * 0.4)
+                .anchor(0.5, 1.)
+                .size(0.25 * scale_ratio)
+                .color(Color::new(1., 1., 1., 0.5 * c.a))
+                .draw();
+            if res.config.chart_ratio <= 0.95 {
                 ui.text(&watermark)
-                    .pos(0., -top * 0.98 + (1. - p) * 0.4)
-                    .anchor(0.5, 1.)
-                    .size(0.25 * scale_ratio)
-                    .color(Color::new(1., 1., 1., 0.5 * c.a))
-                    .draw();
-            } else {
-                ui.text(&watermark)
-                    .pos(0., (-top * 0.98 + (1. - p) * 0.4) / res.config.chart_ratio)
-                    .anchor(0.5, 1.)
-                    .size(0.25 * scale_ratio / res.config.chart_ratio)
-                    .color(Color::new(1., 1., 1., 0.5 * c.a))
-                    .draw();
+                .pos(0., (-top * 0.98 + (1. - p) * 0.4) / res.config.chart_ratio)
+                .anchor(0.5, 1.)
+                .size(0.25 * scale_ratio / res.config.chart_ratio)
+                .color(Color::new(1., 1., 1., 0.5 * c.a))
+                .draw();
             }
         };
-        let hw = 0.0015;
-        let height = eps * 1.1;
+        let hw = 0.003;
+        let height = eps * 1.0;
         let dest = (aspect_ratio * 2. * res.time / res.track_length).max(0.).min(aspect_ratio * 2.);
         self.chart.with_element(ui, res, UIElement::Bar, Some((-aspect_ratio, top + height / 2.)), Some((-aspect_ratio, top + height / 2.)), |ui, color| {
             //let ct = Vector::new(0., top + height / 2.);
