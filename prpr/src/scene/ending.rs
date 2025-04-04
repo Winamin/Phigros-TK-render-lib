@@ -290,7 +290,7 @@ impl Scene for EndingScene {
         draw_parallelogram(main, None, c2, true);
         {
             let spd = if (self.speed - 1.).abs() <= 1e-4 {
-                format!(" ")//String::new()
+                format!(" ")
             } else {
                 format!(" {:.2}x", self.speed)
             };
@@ -310,13 +310,19 @@ impl Scene for EndingScene {
                 }
             };
             let pa = ran(t, 0.2, 0.6).powi(5);
-            let r = draw_text_aligned(ui, &text, main.x + dx - 0.01, main.bottom() - 0.040, (0., 1.), 0.29, Color::new(1., 1., 1., pa));
-            let r = draw_text_aligned(ui, &format!("{:07}", res.score), r.x - 0.012, r.y - 0.019, (0., 1.), 1.05, Color::new(1., 1., 1., pa));
+
+            let new_best_pos = (main.x + dx, main.bottom() - 0.040);
+            draw_text_aligned(ui, &text, new_best_pos.0, new_best_pos.1, (0., 1.), 0.29, Color::new(1., 1., 1., pa));
+
+            let score_text = format!("{:07}", res.score);
+            let score_pos = (new_best_pos.0 - 0.012, new_best_pos.1 - 0.019);
+            draw_text_aligned(ui, &score_text, score_pos.0, score_pos.1, (0., 1.), 1.05, Color::new(1., 1., 1., pa));
+
             let icon = icon_index(res.score, res.num_of_notes == res.max_combo);
             let p = ran(t, 1.2, 1.6).powi(5);
             let p2 = ran(t, 1.65, 1.9).powi(3);
             let s = main.h * 0.72;
-            let ct = (main.right() + 0.015 - main.h * slope - s / 2., r.bottom() + 0.033 - s / 2.);
+            let ct = (main.right() + 0.015 - main.h * slope - s / 2., new_best_pos.1 + 0.033 - s / 2.);
             let s = s + s * (1. - p2) * 0.3;
             draw_texture_ex(
                 *self.icons[icon],
