@@ -200,8 +200,8 @@ impl JudgeLine {
                                 return;
                         }
                         let full_len = res.info.line_length;
-                        let exp_factor = if res.time <= 2.8 {
-                            1.0 - (1.0 - res.time / 2.8).powi(3)
+                        let exp_factor = if res.time <= 3.8 {
+                            1.0 - (1.0 - res.time / 3.8).powi(3)
                         } else {
                             1.0
                         };

@@ -311,7 +311,7 @@ impl Scene for EndingScene {
             };
             let pa = ran(t, 0.2, 0.6).powi(5);
 
-            let new_best_pos = (main.x + dx, main.bottom() - 0.040);
+            let new_best_pos = (main.x + dx + 0.01, main.bottom() - 0.040);
             draw_text_aligned(ui, &text, new_best_pos.0, new_best_pos.1, (0., 1.), 0.29, Color::new(1., 1., 1., pa));
 
             let score_text = format!("{:07}", res.score);
