@@ -199,8 +199,11 @@ impl JudgeLine {
                         } else if color.a == 0.0 {
                                 return;
                         }
-                        let len = res.info.line_length;
-                        draw_line(-len, 0., len, 0., 0.0075, color);
+                        let full_len = res.info.line_length;
+                        let expansion_duration = 0.48;
+                        let exp_factor = (res.time / expansion_duration).min(1.0);
+                        let current_len = full_len * exp_factor;
+                        draw_line(-current_len, 0., current_len, 0., 0.0075, color);
                     }
                     JudgeLineKind::Texture(texture, _) => {
                         if res.time <= 0. && matches!(color, Some(WHITE)) {

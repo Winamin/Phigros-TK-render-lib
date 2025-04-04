@@ -499,7 +499,7 @@ impl GameScene {
             let t = time - res.track_length - WAIT_TIME;
             let progress = (t / (AFTER_TIME + 0.3)).min(1.0);
             bar_alpha = 1.0 - progress.powi(2);
-            bar_y = top - progress * height * 2.0;
+            bar_y = top - progress * height * 2.5;
         }
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
             ui.fill_rect(
