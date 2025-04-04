@@ -310,7 +310,7 @@ impl Scene for EndingScene {
                 }
             };
             let pa = ran(t, 0.2, 0.6).powi(5);
-            let r = draw_text_aligned(ui, &text, main.x + dx + 0.01, main.bottom() - 0.040, (0., 1.), 0.29, Color::new(1., 1., 1., pa));
+            let r = draw_text_aligned(ui, &text, main.x + dx - 1.0, main.bottom() - 0.040, (0., 1.), 0.29, Color::new(1., 1., 1., pa));
             let r = draw_text_aligned(ui, &format!("{:07}", res.score), r.x - 0.012, r.y - 0.019, (0., 1.), 1.05, Color::new(1., 1., 1., pa));
             let icon = icon_index(res.score, res.num_of_notes == res.max_combo);
             let p = ran(t, 1.2, 1.6).powi(5);
