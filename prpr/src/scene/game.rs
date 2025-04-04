@@ -1195,9 +1195,22 @@ impl Scene for GameScene {
             self.overlay_ui(ui, tm)?;
         }
 
+        if self.mode == GameMode::TweakOffset {
+            //push_camera_state();
+            self.gl.quad_gl.viewport(None);
+            set_camera(&Camera2D {
+                zoom: vec2(1., asp),
+                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
+                ..Default::default()
+            });
+            self.tweak_offset(ui, Self::interactive(&self.res, &self.state), tm);
+            //pop_camera_state();
+        }
+
         if msaa || !self.res.no_effect {
             if let Some(target) = &self.res.chart_target {
                 self.gl.flush();
+                self.gl.quad_gl.viewport(None);
                 set_camera(&Camera2D {
                     zoom: vec2(1., asp),
                     render_target: self.res.camera.render_target,
