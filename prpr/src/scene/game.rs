@@ -349,11 +349,12 @@ impl GameScene {
         };
         let c = Color::new(1., 1., 1., self.res.alpha);
         let res = &mut self.res;
-        let eps = 2e-2 / res.aspect_ratio;
-        let top = -1. / res.aspect_ratio;
-        let pause_w = 0.011;
-        let pause_h = pause_w * 3.4;
-        let pause_center = Point::new(pause_w * 4.4 - 1., top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
+        let scale_ratio = 1.777777777777777;
+        let top = -1.;
+        let eps = 2e-2;
+        let pause_w = 0.011 * scale_ratio;
+        let pause_h = pause_w * 3.5;
+        let pause_center = Point::new(-aspect_ratio + 0.040 * scale_ratio, top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
         if res.config.interactive
             && !tm.paused()
             && self.pause_rewind.is_none()
@@ -377,14 +378,14 @@ impl GameScene {
             }
         }
         if tm.now() as f32 - self.pause_first_time <= PAUSE_CLICK_INTERVAL {
-            ui.fill_circle(pause_center.x, pause_center.y, 0.05, Color::new(1., 1., 1., 0.5));
+            ui.fill_circle(pause_center.x, pause_center.y, 0.05 * scale_ratio, Color::new(1., 1., 1., 0.5));
         }
         let score = format!("{:07}", self.judge.score());
         let margin = 0.046;
         let score_top = top + eps * 2.2 - (1. - p) * 0.4;
         let ct = ui.text(&score).size(0.8).center();
         self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
-            let mut text_size = 0.70867;
+            let mut text_size = 0.71 * scale_ratio;
             let mut text = ui.text(&score).size(text_size);
             let max_width = 0.55;
             let text_width = text.measure().w;
@@ -403,7 +404,7 @@ impl GameScene {
             ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
                 .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
                 .anchor(1., 0.)
-                .size(0.4)
+                .size(0.4 * scale_ratio)
                 .color(semi_white(0.7))
                 .draw();
         }
@@ -419,7 +420,7 @@ impl GameScene {
         let combo_top = top + eps * 1.346 - (1. - p) * 0.4;
         if self.judge.combo() >= 3 {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
-                let mut text_size = 1.;
+                let mut text_size = 0.98 * scale_ratio;
                 let max_width = 0.55;
                 let mut text = ui.text(&res.config.combo)
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
@@ -443,7 +444,7 @@ impl GameScene {
                 ui.text(&res.config.combo)
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
-                    .size(0.325)
+                    .size(0.34 * scale_ratio)
                     .color(Color { a: color.a * c.a, ..color })
                     .draw();
             });
@@ -470,7 +471,7 @@ impl GameScene {
             ui.text(&res.info.level)
                 .pos(-lf, bt + (1. - p) * 0.4)
                 .anchor(1., 1.)
-                .size(0.5)
+                .size(0.505 * scale_ratio)
                 .color(Color { a: color.a * c.a, ..color })
                 .draw();
         });
