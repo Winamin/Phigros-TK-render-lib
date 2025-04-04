@@ -165,7 +165,7 @@ impl Scene for LoadingScene {
         }
         let vo = -top / 10.;
         let voi = -top / 8.5;
-        let r = draw_illustration(*self.illustration, 0.380, voi, 1., 1., WHITE, false);
+        let r = draw_illustration(*self.illustration, 0.380, voi, 1.03, 1.0, WHITE, false);
         let h = r.h / 3.55;
         let main: Rect = Rect::new(-0.87, vo - h / 2. - top / 10., 0.768, h);
         draw_parallelogram(main, None, Color::new(0., 0., 0., 0.6), false);

@@ -248,7 +248,7 @@ pub fn draw_image(tex: Texture2D, rect: Rect, scale_type: ScaleType) {
     );
 }
 
-pub const PARALLELOGRAM_SLOPE: f32 = 0.145 / (7. / 13.);
+pub const PARALLELOGRAM_SLOPE: f32 = 15.0 * std::f32::consts::PI / 180.0;
 
 pub fn draw_parallelogram(rect: Rect, texture: Option<(Texture2D, Rect)>, color: Color, shadow: bool) {
     draw_parallelogram_ex(rect, texture, color, color, shadow);
