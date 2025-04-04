@@ -1177,7 +1177,12 @@ impl Scene for GameScene {
             }
         };
 
-        self.draw_judge_lines(ui, &mut self.res, &mut self.chart.bpm_list, p);
+        self.draw_judge_lines(
+            ui,
+            &mut self.res,
+            &mut *self.chart.bpm_list.borrow_mut(),
+            p
+        );
         self.chart.render(ui, &mut self.res);
         self.ui(ui, tm)?;
 
