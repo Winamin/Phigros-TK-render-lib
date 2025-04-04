@@ -202,7 +202,7 @@ impl JudgeLine {
                             0.5 + 0.5 * (1.0 - ((1.0 - t_norm) / (1.0 - threshold)).powi(3))
                         };
                         let current_len = full_len * exp_factor;
-                        draw_line(-current_len, 0., current_len, 0., 0.0075, color);
+                        draw_line(-current_len, 0., current_len, 0., 0.0075, color.unwrap_or(WHITE));
                     }
                     JudgeLineKind::Texture(texture, _) => {
                         if res.time <= 0. && matches!(color, Some(WHITE)) {
