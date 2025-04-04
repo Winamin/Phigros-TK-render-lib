@@ -349,27 +349,19 @@ impl GameScene {
         };
         let c = Color::new(1., 1., 1., self.res.alpha);
         let res = &mut self.res;
-<<<<<<< HEAD
-        let aspect_ratio = res.aspect_ratio;
-        let top = -1.;
-        let eps = 2e-2;
-        let pause_w = 0.011;
-        let pause_h = pause_w * 3.5;
-        let pause_center = Point::new(-aspect_ratio + 0.040, top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
-=======
+        let scale_ratio = 1.777777777777777;
         let eps = 2e-2 / res.aspect_ratio;
         let top = -1. / res.aspect_ratio;
-        let pause_w = 0.011;
+        let pause_w = 0.011 * scale_ratio;
         let pause_h = pause_w * 3.4;
-        let pause_center = Point::new(pause_w * 4.4 - 1., top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
->>>>>>> parent of f2c61e8 (refactor: ui)
+        let pause_center = Point::new((pause_w * 4.4 - 1.) * scale_ratio, (top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.) * scale_ratio);
         if res.config.interactive
             && !tm.paused()
             && self.pause_rewind.is_none()
             && Judge::get_touches().iter().any(|touch| {
                 touch.phase == TouchPhase::Started && {
                     let p = touch.position;
-                    let p = Point::new(p.x * aspect_ratio, p.y * aspect_ratio);
+                    let p = Point::new(p.x, p.y);
                     (pause_center - p).norm() < 0.05
                 }
             })
@@ -386,28 +378,23 @@ impl GameScene {
             }
         }
         if tm.now() as f32 - self.pause_first_time <= PAUSE_CLICK_INTERVAL {
-            ui.fill_circle(pause_center.x, pause_center.y, 0.05, Color::new(1., 1., 1., 0.5));
+            ui.fill_circle(pause_center.x, pause_center.y, 0.05 * scale_ratio, Color::new(1., 1., 1., 0.5));
         }
         let score = format!("{:07}", self.judge.score());
-        let margin = 0.0425 * aspect_ratio;
+        let margin = 0.046;
         let score_top = top + eps * 2.2 - (1. - p) * 0.4;
-<<<<<<< HEAD
-        let ct = ui.text(&score).size(0.8 * aspect_ratio).center();
-        self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + aspect_ratio - margin, ct.y + score_top)), Some((aspect_ratio - margin + 0.001, top + eps * 2.8125)), |ui, color| {
-=======
         let ct = ui.text(&score).size(0.8).center();
         self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
->>>>>>> parent of f2c61e8 (refactor: ui)
-            let mut text_size = 0.70867;
+            let mut text_size = 0.71 * scale_ratio;
             let mut text = ui.text(&score).size(text_size);
-            let max_width = 0.55 * aspect_ratio;
+            let max_width = 0.55;
             let text_width = text.measure().w;
             if text_width > max_width {
                 text_size *= max_width / text_width
             }
             drop(text);
             ui.text(format!("{:07}", self.judge.score()))
-                .pos(aspect_ratio - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07 + 0.05)
+                .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
                 .anchor(1., 0.)
                 .size(0.70867)
                 .color(Color { a: color.a * c.a, ..color })
@@ -417,7 +404,7 @@ impl GameScene {
             ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
                 .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
                 .anchor(1., 0.)
-                .size(0.4)
+                .size(0.4 * scale_ratio)
                 .color(semi_white(0.7))
                 .draw();
         }
@@ -433,12 +420,8 @@ impl GameScene {
         let combo_top = top + eps * 1.346 - (1. - p) * 0.4;
         if self.judge.combo() >= 3 {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
-                let mut text_size = 1.;
-<<<<<<< HEAD
-                let max_width = 0.55 * aspect_ratio;
-=======
+                let mut text_size = 0.98 * scale_ratio;
                 let max_width = 0.55;
->>>>>>> parent of f2c61e8 (refactor: ui)
                 let mut text = ui.text(&res.config.combo)
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
@@ -461,15 +444,15 @@ impl GameScene {
                 ui.text(&res.config.combo)
                     .pos(0., btm + 0.007777)
                     .anchor(0.5, 0.)
-                    .size(0.325)
+                    .size(0.34 * scale_ratio)
                     .color(Color { a: color.a * c.a, ..color })
                     .draw();
             });
         }
-        let lf = -aspect_ratio + margin;
+        let lf = -1. + margin;
         let bt = -top - eps * 3.64;
         self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
-            let mut text_size = 0.5;
+            let mut text_size = 0.505 * scale_ratio;
             let mut text = ui.text(&res.info.name).size(text_size);
             let max_width = 0.9;
             let text_width = text.measure().w;
@@ -488,39 +471,38 @@ impl GameScene {
             ui.text(&res.info.level)
                 .pos(-lf, bt + (1. - p) * 0.4)
                 .anchor(1., 1.)
-                .size(0.5)
+                .size(0.505 * scale_ratio)
                 .color(Color { a: color.a * c.a, ..color })
                 .draw();
         });
         {
             let watermark = res.config.watermark.clone();
-            if res.config.chart_ratio >= 0.95 {
+            ui.text(&watermark)
+                .pos(0., -top * 0.98 + (1. - p) * 0.4)
+                .anchor(0.5, 1.)
+                .size(0.25 * scale_ratio)
+                .color(Color::new(1., 1., 1., 0.5 * c.a))
+                .draw();
+            if res.config.chart_ratio <= 0.95 {
                 ui.text(&watermark)
-                    .pos(0., -top * 0.98 + (1. - p) * 0.4)
-                    .anchor(0.5, 1.)
-                    .size(0.25)
-                    .color(Color::new(1., 1., 1., 0.5 * c.a))
-                    .draw();
-            } else {
-                ui.text(&watermark)
-                    .pos(0., (-top * 0.98 + (1. - p) * 0.4) / res.config.chart_ratio)
-                    .anchor(0.5, 1.)
-                    .size(0.25 / res.config.chart_ratio)
-                    .color(Color::new(1., 1., 1., 0.5 * c.a))
-                    .draw();
+                .pos(0., (-top * 0.98 + (1. - p) * 0.4) / res.config.chart_ratio)
+                .anchor(0.5, 1.)
+                .size(0.25 * scale_ratio / res.config.chart_ratio)
+                .color(Color::new(1., 1., 1., 0.5 * c.a))
+                .draw();
             }
         };
         let hw = 0.0015;
         let height = eps * 1.1;
-        let dest = (aspect_ratio * 2. * res.time / res.track_length).max(0.).min(aspect_ratio * 2.);
-        self.chart.with_element(ui, res, UIElement::Bar, Some((-aspect_ratio, top + height / 2.)), Some((-aspect_ratio, top + height / 2.)), |ui, color| {
+        let dest = (2. * res.time / res.track_length).min(2.0);
+        self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
             //let ct = Vector::new(0., top + height / 2.);
                 ui.fill_rect(
-                    Rect::new(-aspect_ratio, top, dest, height),
+                    Rect::new(-1., top, dest, height),
                     //Color{ a: color.a * c.a * 0.6, ..color},
                     Color::new(0.565, 0.565, 0.565, color.a * c.a),
                 );
-                ui.fill_rect(Rect::new(-aspect_ratio + dest - hw, top, hw * 2., height), Color::new(1., 1., 1., color.a * c.a));
+                ui.fill_rect(Rect::new(-1. + dest - hw, top, hw * 2., height), Color::new(1., 1., 1., color.a * c.a));
         });
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
         let ct = Vector::new(0., top + height / 2.);
