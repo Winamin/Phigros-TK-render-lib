@@ -349,21 +349,12 @@ impl GameScene {
         };
         let c = Color::new(1., 1., 1., self.res.alpha);
         let res = &mut self.res;
-<<<<<<< HEAD
         let aspect_ratio = res.aspect_ratio;
-        let scale_ratio = 1.777777777777777;
         let top = -1.;
         let eps = 2e-2;
         let pause_w = 0.011 * scale_ratio;
         let pause_h = pause_w * 3.5;
         let pause_center = Point::new(-aspect_ratio + 0.040 * scale_ratio, top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
-=======
-        let eps = 2e-2 / res.aspect_ratio;
-        let top = -1. / res.aspect_ratio;
-        let pause_w = 0.011;
-        let pause_h = pause_w * 3.4;
-        let pause_center = Point::new(pause_w * 4.4 - 1., top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
->>>>>>> parent of f2c61e8 (refactor: ui)
         if res.config.interactive
             && !tm.paused()
             && self.pause_rewind.is_none()
@@ -392,15 +383,9 @@ impl GameScene {
         let score = format!("{:07}", self.judge.score());
         let margin = 0.0425 * aspect_ratio;
         let score_top = top + eps * 2.2 - (1. - p) * 0.4;
-<<<<<<< HEAD
         let ct = ui.text(&score).size(0.8 * aspect_ratio).center();
         self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + aspect_ratio - margin, ct.y + score_top)), Some((aspect_ratio - margin + 0.001, top + eps * 2.8125)), |ui, color| {
-            let mut text_size = 0.71 * scale_ratio;
-=======
-        let ct = ui.text(&score).size(0.8).center();
-        self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
             let mut text_size = 0.70867;
->>>>>>> parent of f2c61e8 (refactor: ui)
             let mut text = ui.text(&score).size(text_size);
             let max_width = 0.55 * aspect_ratio;
             let text_width = text.measure().w;
@@ -409,15 +394,15 @@ impl GameScene {
             }
             drop(text);
             ui.text(format!("{:07}", self.judge.score()))
-                .pos(aspect_ratio - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
+                .pos(aspect_ratio - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07 + 0.05)
                 .anchor(1., 0.)
-                .size(text_size)
+                .size(0.70867)
                 .color(Color { a: color.a * c.a, ..color })
                 .draw();
         });
         if res.config.show_acc {
             ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
-                .pos(aspect_ratio - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07 + 0.05)
+                .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
                 .anchor(1., 0.)
                 .size(0.4)
                 .color(semi_white(0.7))
@@ -435,13 +420,8 @@ impl GameScene {
         let combo_top = top + eps * 1.346 - (1. - p) * 0.4;
         if self.judge.combo() >= 3 {
             let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
-<<<<<<< HEAD
-                let mut text_size = 0.98 * scale_ratio;
-                let max_width = 0.55 * aspect_ratio;
-=======
                 let mut text_size = 1.;
-                let max_width = 0.55;
->>>>>>> parent of f2c61e8 (refactor: ui)
+                let max_width = 0.55 * aspect_ratio;
                 let mut text = ui.text(&res.config.combo)
                     .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
                     .anchor(0.5, 0.)
@@ -472,12 +452,12 @@ impl GameScene {
         let lf = -aspect_ratio + margin;
         let bt = -top - eps * 3.64;
         self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
-            let mut text_size = 0.505 * scale_ratio;
-                let mut text = ui.text(&res.info.name).size(text_size);
-                let max_width = 0.9 * aspect_ratio;
-                let text_width = text.measure().w;
-                if text_width > max_width {
-                    text_size *= max_width / text_width
+            let mut text_size = 0.5;
+            let mut text = ui.text(&res.info.name).size(text_size);
+            let max_width = 0.9;
+            let text_width = text.measure().w;
+            if text_width > max_width {
+                text_size *= max_width / text_width
             }
             drop(text);
             ui.text(&res.info.name)
@@ -497,23 +477,24 @@ impl GameScene {
         });
         {
             let watermark = res.config.watermark.clone();
-            ui.text(&watermark)
-                .pos(0., -top * 0.98 + (1. - p) * 0.4)
-                .anchor(0.5, 1.)
-                .size(0.25 * scale_ratio)
-                .color(Color::new(1., 1., 1., 0.5 * c.a))
-                .draw();
-            if res.config.chart_ratio <= 0.95 {
+            if res.config.chart_ratio >= 0.95 {
                 ui.text(&watermark)
-                .pos(0., (-top * 0.98 + (1. - p) * 0.4) / res.config.chart_ratio)
-                .anchor(0.5, 1.)
-                .size(0.25 * scale_ratio / res.config.chart_ratio)
-                .color(Color::new(1., 1., 1., 0.5 * c.a))
-                .draw();
+                    .pos(0., -top * 0.98 + (1. - p) * 0.4)
+                    .anchor(0.5, 1.)
+                    .size(0.25)
+                    .color(Color::new(1., 1., 1., 0.5 * c.a))
+                    .draw();
+            } else {
+                ui.text(&watermark)
+                    .pos(0., (-top * 0.98 + (1. - p) * 0.4) / res.config.chart_ratio)
+                    .anchor(0.5, 1.)
+                    .size(0.25 / res.config.chart_ratio)
+                    .color(Color::new(1., 1., 1., 0.5 * c.a))
+                    .draw();
             }
         };
-        let hw = 0.003;
-        let height = eps * 1.0;
+        let hw = 0.0015;
+        let height = eps * 1.1;
         let dest = (aspect_ratio * 2. * res.time / res.track_length).max(0.).min(aspect_ratio * 2.);
         self.chart.with_element(ui, res, UIElement::Bar, Some((-aspect_ratio, top + height / 2.)), Some((-aspect_ratio, top + height / 2.)), |ui, color| {
             //let ct = Vector::new(0., top + height / 2.);
@@ -567,11 +548,10 @@ impl GameScene {
     fn overlay_ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
         let c = semi_white(self.res.alpha);
         let res = &mut self.res;
-        for pos in &self.touch_points {
-            ui.fill_circle(pos.0, pos.1, 0.04, Color { a: 0.4, ..BLUE });
-        }
         if tm.paused() {
-            let o = -0.3;
+            let h = 1. / res.aspect_ratio;
+            draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., 0.6));
+            let o = if self.mode == GameMode::Exercise { -0.3 } else { 0. };
             let s = 0.06;
             let w = 0.05;
             let no_retry = self.mode == GameMode::NoRetry;
@@ -645,13 +625,14 @@ impl GameScene {
                         reset!(self, res, tm);
                     }
                     Some(1) => {
-                        if tm.now() > self.exercise_range.end as f64 { //self.mode == GameMode::Exercise && 
+                        if self.mode == GameMode::Exercise && tm.now() > self.exercise_range.end as f64 {
                             tm.seek_to(self.exercise_range.start as f64);
                             self.music.seek_to(self.exercise_range.start)?;
                             pos = self.exercise_range.start;
                         }
-                        res.time -= 1.;
-                        let dst = pos - 1.;
+                        self.music.play()?;
+                        res.time -= 3.;
+                        let dst = pos - 3.;
                         if dst < 0. {
                             self.music.pause()?;
                             self.state = State::BeforeMusic;
@@ -661,39 +642,36 @@ impl GameScene {
                         let now = tm.now();
                         tm.speed = res.config.speed as _;
                         tm.resume();
-                        tm.seek_to(now - 1.);
-                        self.music.seek_to(now as f32 - 1.);
+                        tm.seek_to(now - 3.);
                         self.pause_rewind = Some(tm.now() - 0.2);
                     }
                     _ => {}
                 }
             }
-            { //if self.mode == GameMode::Exercise
+            if self.mode == GameMode::Exercise {
                 let asp = self.touch_scale();
                 for touch in ui.ensure_touches() {
                     touch.position *= asp;
                 }
-                if self.mode == GameMode::Exercise {
-                    ui.scope(|ui| {
-                        ui.dx(0.3);
-                        ui.dy(-0.3);
-                        ui.slider(tl!("speed"), 0.5..2.0, 0.05, &mut self.res.config.speed, Some(0.5));
-                    });
-                }
+                ui.scope(|ui| {
+                    ui.dx(0.3);
+                    ui.dy(-0.3);
+                    ui.slider(tl!("speed"), 0.5..2.0, 0.05, &mut self.res.config.speed, Some(0.5));
+                });
                 ui.dy(0.06);
                 let hw = 0.7;
                 let h = 0.06;
                 let eh = 0.12;
                 let rad = 0.03;
                 let sp = self.offset().min(0.);
-                ui.fill_rect(Rect::new(-hw, -h, hw * 2., h * 2.), Color::new(0.4, 0.4, 0.4, 1.));
+                ui.fill_rect(Rect::new(-hw, -h, hw * 2., h * 2.), GRAY);
                 let st = -hw + (self.exercise_range.start - sp) / (self.res.track_length - sp) * hw * 2.;
                 let en = -hw + (self.exercise_range.end - sp) / (self.res.track_length - sp) * hw * 2.;
                 let t = tm.now() as f32;
                 let cur = -hw + (t - sp) / (self.res.track_length - sp) * hw * 2.;
-                ui.fill_rect(Rect::new(st, -h, en - st, h * 2.), Color::new(0.6, 0.6, 0.6, 1.));
-                ui.fill_rect(Rect::new(st, -eh, 0., eh + h).feather(0.005), Color::new(0.66, 0.78, 0.98, 1.));
-                ui.fill_circle(st, -eh, rad, Color::new(0.66, 0.78, 0.98, 1.));
+                ui.fill_rect(Rect::new(st, -h, en - st, h * 2.), WHITE);
+                ui.fill_rect(Rect::new(st, -eh, 0., eh + h).feather(0.005), BLUE);
+                ui.fill_circle(st, -eh, rad, BLUE);
                 if self.exercise_press.is_none() {
                     let r = ui.rect_to_global(Rect::new(st, -eh, 0., 0.).feather(rad));
                     self.exercise_press = Judge::get_touches()
@@ -701,8 +679,8 @@ impl GameScene {
                         .find(|it| it.phase == TouchPhase::Started && r.contains(it.position))
                         .map(|it| (-1, it.id));
                 }
-                ui.fill_rect(Rect::new(en, -h, 0., eh + h).feather(0.005), Color::new(1., 0.34, 0.54, 1.));
-                ui.fill_circle(en, eh, rad, Color::new(1., 0.34, 0.54, 1.));
+                ui.fill_rect(Rect::new(en, -h, 0., eh + h).feather(0.005), RED);
+                ui.fill_circle(en, eh, rad, RED);
                 if self.exercise_press.is_none() {
                     let r = ui.rect_to_global(Rect::new(en, eh, 0., 0.).feather(rad));
                     self.exercise_press = Judge::get_touches()
@@ -710,8 +688,8 @@ impl GameScene {
                         .find(|it| it.phase == TouchPhase::Started && r.contains(it.position))
                         .map(|it| (1, it.id));
                 }
-                ui.fill_rect(Rect::new(cur, -h, 0., h * 2.).feather(0.005), Color::new(0.9, 0.9, 0.9, 1.));
-                ui.fill_circle(cur, 0., rad, Color::new(0.95, 0.95, 0.95, 1.));
+                ui.fill_rect(Rect::new(cur, -h, 0., h * 2.).feather(0.005), GREEN);
+                ui.fill_circle(cur, 0., rad, GREEN);
                 if self.exercise_press.is_none() {
                     let r = ui.rect_to_global(Rect::new(cur, 0., 0., 0.).feather(rad));
                     self.exercise_press = Judge::get_touches()
@@ -782,15 +760,23 @@ impl GameScene {
         }
         if let Some(time) = self.pause_rewind {
             let dt = tm.now() - time;
-            let t = 1 - dt.floor() as i32;
+            let t = 3 - dt.floor() as i32;
             if t <= 0 {
                 self.pause_rewind = None;
             } else {
-                let a = (1. - dt as f32 / 1.) * 1.;
+                let a = (1. - dt as f32 / 3.) * 1.;
                 let h = 1. / self.res.aspect_ratio;
                 draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., a));
                 ui.text(t.to_string()).anchor(0.5, 0.5).size(1.).color(c).draw();
             }
+        }
+        if self.res.config.touch_debug {
+            for touch in Judge::get_touches() {
+                ui.fill_circle(touch.position.x, touch.position.y, 0.04, Color { a: 0.4, ..RED });
+            }
+        }
+        for pos in &self.touch_points {
+            ui.fill_circle(pos.0, pos.1, 0.04, Color { a: 0.4, ..BLUE });
         }
         Ok(())
     }
