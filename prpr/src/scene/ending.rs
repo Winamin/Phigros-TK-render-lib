@@ -281,7 +281,7 @@ impl Scene for EndingScene {
         //}
         gl.pop_model_matrix();
 
-        let dx = 0.07;
+        let dx = 0.065;
         let c = Color::new(0., 0., 0., 1.0);
         let c2 = Color::new(0., 0., 0., 0.5);
 
