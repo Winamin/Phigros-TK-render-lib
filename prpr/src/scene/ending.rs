@@ -281,7 +281,7 @@ impl Scene for EndingScene {
         //}
         gl.pop_model_matrix();
 
-        let dx = 0.03;
+        let dx = 0.07;
         let c = Color::new(0., 0., 0., 1.0);
         let c2 = Color::new(0., 0., 0., 0.5);
 
@@ -310,8 +310,9 @@ impl Scene for EndingScene {
                 }
             };
             let pa = ran(t, 0.2, 0.6).powi(5);
-            let r = draw_text_aligned(ui, &text, main.x + dx + 0.01, main.bottom() - 0.040, (0., 1.), 0.29, Color::new(1., 1., 1., pa));
-            let r = draw_text_aligned(ui, &format!("{:07}", res.score), r.x - 0.012, r.y - 0.019, (0., 1.), 1.05, Color::new(1., 1., 1., pa));
+            // NEW BEST + SCORE
+            let r = draw_text_aligned(ui, &text, main.x + dx + 0.01 - 0.03, main.bottom() - 0.040, (0., 1.), 0.29, Color::new(1., 1., 1., pa));
+            let r = draw_text_aligned(ui, &format!("{:07}", res.score), r.x - 0.012 + 0.03, r.y - 0.019, (0., 1.), 1.05, Color::new(1., 1., 1., pa));
             let icon = icon_index(res.score, res.num_of_notes == res.max_combo);
             let p = ran(t, 1.2, 1.6).powi(5);
             let p2 = ran(t, 1.65, 1.9).powi(3);
