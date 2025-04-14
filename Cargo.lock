@@ -1969,30 +1969,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "macroquad"
-version = "0.3.25"
-source = "git+https://github.com/Mivik/prpr-macroquad#19119d6e3ec231502f6d64ff077114ffe1fcb04a"
-dependencies = [
- "bumpalo",
- "fontdue",
- "glam",
- "image",
- "macroquad_macro 0.1.7 (git+https://github.com/Mivik/prpr-macroquad)",
- "miniquad",
- "quad-rand",
-]
-
-[[package]]
-name = "macroquad_macro"
-version = "0.1.7"
-source = "git+https://github.com/Winamin/prpr-macroquad#17c0ec8d38b9d226d8f2de5b01258c4713f0b0b1"
-
-[[package]]
-name = "macroquad_macro"
-version = "0.1.7"
-source = "git+https://github.com/Mivik/prpr-macroquad#19119d6e3ec231502f6d64ff077114ffe1fcb04a"
-
-[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
