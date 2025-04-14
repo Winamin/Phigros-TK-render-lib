@@ -1957,7 +1957,7 @@ dependencies = [
 [[package]]
 name = "macroquad"
 version = "0.3.25"
-source = "git+https://github.com/Winamin/prpr-macroquad#19119d6e3ec231502f6d64ff077114ffe1fcb04a"
+source = "git+https://github.com/Winamin/prpr-macroquad#28a5a71028c136f28fb9c93c42f10d501b599304"
 dependencies = [
  "bumpalo",
  "fontdue",
@@ -1969,8 +1969,6 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< HEAD
-=======
 name = "macroquad"
 version = "0.3.25"
 source = "git+https://github.com/Mivik/prpr-macroquad#19119d6e3ec231502f6d64ff077114ffe1fcb04a"
@@ -1987,7 +1985,7 @@ dependencies = [
 [[package]]
 name = "macroquad_macro"
 version = "0.1.7"
-source = "git+https://github.com/Winamin/prpr-macroquad#bbe11a075287acb065153a8964756d4b68584d74"
+source = "git+https://github.com/Winamin/prpr-macroquad#28a5a71028c136f28fb9c93c42f10d501b599304"
 
 [[package]]
 name = "macroquad_macro"
@@ -1995,7 +1993,6 @@ version = "0.1.7"
 source = "git+https://github.com/Mivik/prpr-macroquad#19119d6e3ec231502f6d64ff077114ffe1fcb04a"
 
 [[package]]
->>>>>>> parent of a18820a (*)
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
