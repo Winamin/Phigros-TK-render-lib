@@ -1957,7 +1957,7 @@ dependencies = [
 [[package]]
 name = "macroquad"
 version = "0.3.25"
-source = "git+https://github.com/Winamin/prpr-macroquad#28a5a71028c136f28fb9c93c42f10d501b599304"
+source = "git+https://github.com/Winamin/prpr-macroquad#6a4b893cb931084266b7c5b324848c74e50dab91"
 dependencies = [
  "bumpalo",
  "fontdue",
@@ -1985,7 +1985,7 @@ dependencies = [
 [[package]]
 name = "macroquad_macro"
 version = "0.1.7"
-source = "git+https://github.com/Winamin/prpr-macroquad#28a5a71028c136f28fb9c93c42f10d501b599304"
+source = "git+https://github.com/Winamin/prpr-macroquad#6a4b893cb931084266b7c5b324848c74e50dab91"
 
 [[package]]
 name = "macroquad_macro"
