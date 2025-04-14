@@ -1957,7 +1957,7 @@ dependencies = [
 [[package]]
 name = "macroquad"
 version = "0.3.25"
-source = "git+https://github.com/Winamin/prpr-macroquad#17c0ec8d38b9d226d8f2de5b01258c4713f0b0b1"
+source = "git+https://github.com/Winamin/prpr-macroquad#19119d6e3ec231502f6d64ff077114ffe1fcb04a"
 dependencies = [
  "bumpalo",
  "fontdue",
@@ -1969,6 +1969,33 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
+=======
+name = "macroquad"
+version = "0.3.25"
+source = "git+https://github.com/Mivik/prpr-macroquad#19119d6e3ec231502f6d64ff077114ffe1fcb04a"
+dependencies = [
+ "bumpalo",
+ "fontdue",
+ "glam",
+ "image",
+ "macroquad_macro 0.1.7 (git+https://github.com/Mivik/prpr-macroquad)",
+ "miniquad",
+ "quad-rand",
+]
+
+[[package]]
+name = "macroquad_macro"
+version = "0.1.7"
+source = "git+https://github.com/Winamin/prpr-macroquad#bbe11a075287acb065153a8964756d4b68584d74"
+
+[[package]]
+name = "macroquad_macro"
+version = "0.1.7"
+source = "git+https://github.com/Mivik/prpr-macroquad#19119d6e3ec231502f6d64ff077114ffe1fcb04a"
+
+[[package]]
+>>>>>>> parent of a18820a (*)
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2046,7 +2073,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "miniquad"
 version = "0.3.15"
-source = "git+https://github.com/Winamin/prpr-miniquad#e8deff64a4e1211c6fd650bbb690165ba110f791"
+source = "git+https://github.com/Mivik/prpr-miniquad#e8deff64a4e1211c6fd650bbb690165ba110f791"
 dependencies = [
  "libc",
  "ndk-context",
