@@ -46,6 +46,7 @@ item-watermark = Watermark Text
 item-flid_x = Mirror Mode
 item-show_progress_text = Progress bar (scale display)
 item-show_time_text = Progress bar time display
+item-background = Remove background rendering
 
 load-cali-failed = Failed to load audio
 
