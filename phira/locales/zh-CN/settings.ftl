@@ -47,6 +47,7 @@ item-watermark = 水印
 item-flid_x = 镜像模式
 item-show_progress_text = 进度条（比例显示）
 item-show_time_text = 进度条时间显示
+item-background = 去除背景渲染
 
 load-cali-failed = 加载音频失败
 
