@@ -39,6 +39,7 @@ pub struct LoadingScene {
     finish_time: f32,
     target: Option<RenderTarget>,
     charter: String,
+    config: Config,
 }
 
 impl LoadingScene {
