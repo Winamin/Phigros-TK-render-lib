@@ -156,6 +156,8 @@ impl Scene for LoadingScene {
             ..Default::default()
         });
 
+        draw_background(*self.background);
+
         if self.config.background {
             let main_width = 0.768;
             let main_height = main_width * (self.illustration.height() as f32 / self.illustration.width() as f32);
