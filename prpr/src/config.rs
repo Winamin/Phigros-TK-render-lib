@@ -68,6 +68,7 @@ pub struct Config {
     pub show_progress_text: bool,
     pub show_time_text: bool,
     pub watermark: String,
+    pub background: bool,
     //test
     pub touch_debug: bool,
     pub volume_music: f32,
@@ -116,6 +117,7 @@ impl Default for Config {
             volume_sfx: 1.,
             volume_bgm: 1.,
             watermark: "".to_string(),
+            background: false,
 
             autoplay: None,
             show_progress_text: false,

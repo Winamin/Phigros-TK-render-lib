@@ -39,6 +39,7 @@ pub struct LoadingScene {
     finish_time: f32,
     target: Option<RenderTarget>,
     charter: String,
+    config: Config,
 }
 
 impl LoadingScene {
@@ -96,7 +97,7 @@ impl LoadingScene {
         if info.tip.is_none() {
             info.tip = Some(crate::config::TIPS.choose(&mut thread_rng()).unwrap().to_owned());
         }
-        let future = Box::pin(GameScene::new(mode, info.clone(), config, fs, player, background.clone(), illustration.clone(), upload_fn, update_fn));
+        let future = Box::pin(GameScene::new(mode, info.clone(), config.clone(), fs, player, background.clone(), illustration.clone(), upload_fn, update_fn));
         let charter = Regex::new(r"\[!:[0-9]+:([^:]*)\]").unwrap().replace_all(&info.charter, "$1").to_string();
 
         Ok(Self {
@@ -107,6 +108,7 @@ impl LoadingScene {
             next_scene: None,
             finish_time: f32::INFINITY,
             target: None,
+            config,
             charter,
         })
     }
@@ -153,6 +155,27 @@ impl Scene for LoadingScene {
             render_target: self.target,
             ..Default::default()
         });
+
+        if self.config.background {
+            let main_width = 0.768;
+            let main_height = main_width * (self.illustration.height() as f32 / self.illustration.width() as f32);
+            let main = Rect::new(-main_width / 2.0, -main_height / 2.0, main_width, main_height);
+
+            draw_background(*self.background);
+            draw_parallelogram(main, None, Color::new(0.0, 0.0, 0.0, 0.0), false);
+            
+            let r = draw_illustration(
+                *self.illustration,
+                main.x + main.w / 2.0,
+                main.y + main.h / 2.0,
+                1.03,
+                1.0,
+                WHITE,
+                false
+            );
+            return Ok(());
+        }
+
         draw_background(*self.background);
         let dx = if now > self.finish_time {
             let p = ((now - self.finish_time) / TRANSITION_TIME).min(1.);
@@ -182,7 +205,6 @@ impl Scene for LoadingScene {
         ui.text(&self.info.name)
             .pos(p.0, p.1)
             .anchor(0., 0.5)
-            //.max_width(main.w * 0.6)
             .size(text_size)
             .draw();
         
@@ -194,24 +216,17 @@ impl Scene for LoadingScene {
         ct.x += sub.w * 0.01;
         ct.y += sub.h * 0.05;
         draw_parallelogram(sub, None, WHITE, true);
-        //draw_text_aligned(ui, &(self.info.difficulty as u32).to_string(), ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.88, BLACK);
         let first_str = Regex::new(r"[0-9?]+").unwrap();
         let last_str = Regex::new(r"[0-9?.]+").unwrap();
         draw_text_aligned_fix(ui, self.info.level
             .split_whitespace()
             .rev()
             .nth(0)
-            //.and_then(|word| word.get(3..))
-            .and_then(|word| { first_str.find(word).map(|m| &word[m.start()..]) })
-            .and_then(|word| { last_str.find(word).map(|m| &word[..m.end()]) })
-            //.unwrap_or_default()
-            .unwrap_or(
-                //self.info.level.split_whitespace().rev().nth(0).and_then(|word| word.find('.').map(|pos| &word[(pos + 1)..])).unwrap_or("?")
-                "?"
-            )
+            .and_then(|word| first_str.find(word).map(|m| &word[m.start()..]))
+            .and_then(|word| last_str.find(word).map(|m| &word[..m.end()]))
+            .unwrap_or("?")
             , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK, main.w * 0.18
         );
-        //难度
         draw_text_aligned_fix(ui, self.info.level
             .split_whitespace()
             .next()
