@@ -68,7 +68,7 @@ impl Default for ChartInfo {
             preview_start: 0.,
             preview_end: None,
             aspect_ratio: 16. / 9.,
-            background_dim: 0.6,
+            background_dim: 0.1,
             line_length: 6.,
             offset: 0.,
             tip: None,
