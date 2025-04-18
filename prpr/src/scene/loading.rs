@@ -156,13 +156,12 @@ impl Scene for LoadingScene {
             ..Default::default()
         });
 
-        draw_background(*self.background);
-
         if self.config.background {
             let main_width = 0.768;
             let main_height = main_width * (self.illustration.height() as f32 / self.illustration.width() as f32);
             let main = Rect::new(-main_width / 2.0, -main_height / 2.0, main_width, main_height);
 
+            draw_background(*self.background);
             draw_parallelogram(main, None, Color::new(0.0, 0.0, 0.0, 0.0), false);
             
             let r = draw_illustration(
