@@ -61,22 +61,6 @@ pub struct RenderConfig<'a> {
     pub incline_sin: f32,
 }
 
-struct ResourceCache {
-    fx_perfect: Color,
-    fx_good: Color,
-    hold_texture: Texture2D,
-}
-
-impl ResourceCache {
-    fn new(res: &Resource) -> Self {
-        Self {
-            fx_perfect: res.res_pack.info.fx_perfect(),
-            fx_good: res.res_pack.info.fx_good(),
-            hold_texture: *res.res_pack.note_style.hold,
-        }
-    }
-}
-
 fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color: Color, mut params: DrawTextureParams, clip: bool) {
     let Vec2 { x: w, y: h } = params.dest_size.unwrap();
     if h < 0. {

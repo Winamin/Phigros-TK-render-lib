@@ -145,6 +145,7 @@ impl Scene for EndingScene {
         tm.reset();
         tm.seek_to(-0.4);
         self.target = target;
+
         Ok(())
     }
 

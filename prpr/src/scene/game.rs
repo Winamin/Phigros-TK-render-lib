@@ -40,6 +40,8 @@ use std::{
 };
 use tracing::{debug, warn};
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::core::NoteKind;
+use std::collections::HashMap;
 
 const PAUSE_CLICK_INTERVAL: f32 = 0.7;
 
@@ -113,6 +115,100 @@ enum State {
     Ending,
 }
 
+// 定义音符类型枚举
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum NoteType {
+    Click,
+    Drag,
+    Flick,
+    Hold,
+}
+
+// 判定计量器，保存统计数据及动画信息
+#[derive(Clone)]
+struct JudgementCounter {
+    note_type: NoteType,
+    count: u32,
+    last_update: f64,     // 上次判定时间
+    current_x: f32,       // 水平动画偏移，用于隐藏时横向移动
+    current_y: f32,       // 当前竖直坐标，用于显示排布动画
+    current_alpha: f32,   // 当前透明度
+    multiplier: u32,      // 连续判定倍数，默认 1
+    interval: f32,        // 与上次判定的时间间隔（秒）
+}
+
+impl JudgementCounter {
+    fn new(note_type: NoteType, chart_ratio: f32, initial_y: f32) -> Self {
+        Self {
+            note_type,
+            count: 0,
+            last_update: 0.0,
+            current_x: 1.2, // 初始横向偏移
+            current_y: initial_y,         // 初始垂直位置
+            current_alpha: 0.0,
+            multiplier: 1,
+            interval: 0.0,
+        }
+    }
+    // 原有的 target_x 和 target_alpha 不变
+    fn target_x(&self, current_time: f64) -> f32 {
+        if current_time - self.last_update <= 1.0 {
+            0.0
+        } else {
+            -0.2
+        }
+    }
+    fn target_alpha(&self, current_time: f64) -> f32 {
+        if current_time - self.last_update <= 1.0 {
+            0.8
+        } else {
+            0.0
+        }
+    }
+    fn update_position(&mut self, current_time: f64, dt: f32) {
+        let target = self.target_x(current_time);
+        self.current_x += (target - self.current_x) * dt * 5.0;
+    }
+    fn update_alpha(&mut self, current_time: f64, dt: f32) {
+        let target = self.target_alpha(current_time);
+        self.current_alpha += (target - self.current_alpha) * dt * 5.0;
+    }
+    // 新增：更新竖直位置，目前线性插值固定动画时长为 0.08s
+    fn update_vertical(&mut self, target_y: f32, dt: f32) {
+        let duration = 0.05;
+        // 这里采用简单的线性插值，dt/duration 表示本帧占比
+        self.current_y += (target_y - self.current_y) * (dt / duration).min(1.0);
+    }
+    // 统一更新
+    fn update(&mut self, current_time: f64, dt: f32, target_y: f32) {
+        self.update_position(current_time, dt);
+        self.update_alpha(current_time, dt);
+        self.update_vertical(target_y, dt);
+    }
+    fn display_text(&self) -> String {
+        let type_str = match self.note_type {
+            NoteType::Click => "Tap",
+            NoteType::Drag  => "Drag",
+            NoteType::Flick => "Flick",
+            NoteType::Hold  => "Hold",
+        };
+        if self.multiplier > 1 {
+            format!("X{} {}:{} [{:.2}s]", self.multiplier, type_str, self.count, self.interval)
+        } else {
+            format!("{}:{} [{:.2}s]", type_str, self.count, self.interval)
+        }
+    }
+    fn reset(&mut self, chart_ratio: f32, initial_y: f32) {
+        self.count = 0;
+        self.multiplier = 1;
+        self.interval = 0.0;
+        self.last_update = 0.0;
+        self.current_alpha = 0.0;
+        self.current_x = 1.2;
+        self.current_y = initial_y;
+    }
+}
+
 pub struct GameScene {
     should_exit: bool,
     next_scene: Option<NextScene>,
@@ -146,6 +242,9 @@ pub struct GameScene {
     update_fn: Option<UpdateFn>,
 
     pub touch_points: Vec<(f32, f32)>,
+
+    judgement_counters: Vec<JudgementCounter>,
+    judgement_reset_done: bool,
 }
 
 macro_rules! reset {
@@ -159,6 +258,9 @@ macro_rules! reset {
         $tm.speed = $res.config.speed as _;
         $tm.reset();
         $self.last_update_time = $tm.now();
+        for counter in $self.judgement_counters.iter_mut() {
+            counter.reset($res.config.chart_ratio, 0.0);
+        }
         $self.state = State::Starting;
     }};
 }
@@ -233,6 +335,44 @@ impl GameScene {
         Ok((chart, bytes, format))
     }
 
+    fn draw_judgement_counters(&self, ui: &mut Ui, tm: &TimeManager, _base_x: f32, base_y: f32) {
+        if !self.res.config.chart_debug {
+            return;
+        }
+        let chart_ratio = self.res.config.chart_ratio;
+        // 使用铺面摄影机，并保证摄影机的缩放采用 chart_ratio，这里假设铺面坐标系为 [-chart_ratio, chart_ratio]
+        let scaled_camera = Camera2D {
+            zoom: vec2(chart_ratio, -chart_ratio),
+            offset: vec2(0.0, 0.0),
+            ..Default::default()
+        };
+        set_camera(&scaled_camera);  // 切换到铺面缩放的摄影机
+    
+        // 固定在左边
+        let margin = 0.05;
+        let fixed_x = -chart_ratio + margin;
+        // 当 chart_ratio 越小，文本间距越大
+        let base_spacing = 0.2;
+        let spacing = base_spacing / chart_ratio;
+        let gap = 0.05;
+        let target_base_y = base_y - gap;
+    
+        // 按 last_update 排序（最新的在上）
+        let mut counters = self.judgement_counters.clone();
+        counters.sort_by(|a, b| a.last_update.partial_cmp(&b.last_update).unwrap());
+    
+        for (i, counter) in counters.iter().enumerate() {
+            // 计算垂直位置，spacing 值越大，文本垂直间距也就越大
+            let target_y = target_base_y - (i as f32 * spacing);
+            ui.text(&counter.display_text())
+                .pos(fixed_x, target_y)
+                .anchor(0.0, 0.5)
+                .size(0.25)
+                .color(Color::new(1.0, 1.0, 1.0, counter.current_alpha))
+                .draw();
+        }
+    }
+
     pub async fn new(
         mode: GameMode,
         info: ChartInfo,
@@ -279,6 +419,14 @@ impl GameScene {
         let judge = Judge::new(&chart);
 
         let music = Self::new_music(&mut res)?;
+
+        let chart_ratio = res.config.chart_ratio;
+        let judgement_counters = vec![
+            JudgementCounter::new(NoteType::Click, chart_ratio, 0.0),
+            JudgementCounter::new(NoteType::Drag, chart_ratio, 0.0),
+            JudgementCounter::new(NoteType::Flick, chart_ratio, 0.0),
+            JudgementCounter::new(NoteType::Hold, chart_ratio, 0.0),
+        ];
         Ok(Self {
             should_exit: false,
             next_scene: None,
@@ -312,6 +460,10 @@ impl GameScene {
             update_fn,
 
             touch_points: Vec::new(),
+
+            judgement_counters,
+
+            judgement_reset_done: false,
         })
     }
 
@@ -516,8 +668,8 @@ impl GameScene {
             );
             ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color { a: color.a * c.a * bar_alpha, ..color });
             let progress = res.time / res.track_length;
-            let bar_width = progress * 2.0;
-            let progress_percentage = (progress * 100.).min(100.);
+            let corrected_progress = if progress >= 0.9999 { 1.0 } else { progress };
+            let progress_percentage = (corrected_progress * 100.).min(100.);
             let truncated_percentage = ((progress_percentage * 10000.0).floor() / 10000.0).min(100.0);
             let progress_text = format!("{:.4}%", truncated_percentage);
             let parts: Vec<&str> = progress_text.split('.').collect();
@@ -534,13 +686,14 @@ impl GameScene {
             }
             if res.config.show_time_text {
                 ui.text(time_text)
-                    .pos(-1. + bar_width - 0.01, top + height / 2.)
+                    .pos(-1. + dest - 0.01, top + height / 2.)
                     .anchor(1., 0.5)
                     .size(0.17867)
                     .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
                     .draw();
-            }
-        });
+                }
+            });
+        self.draw_judgement_counters(ui, tm, score_top, 2.3);
         Ok(())
     }
 
@@ -779,13 +932,79 @@ impl GameScene {
         }
         Ok(())
     }
-
+    
     fn interactive(res: &Resource, state: &State) -> bool {
         res.config.interactive && matches!(state, State::Playing)
     }
 
     fn offset(&self) -> f32 {
         self.chart.offset + self.res.config.offset + self.info_offset
+    }
+        
+    fn process_judgements(&mut self, tm: &TimeManager) {
+        if !self.res.config.chart_debug {
+            return;
+        }
+        let combo_threshold = 0.05;
+        let mut judgements = self.judge.judgements.borrow_mut();
+        judgements.sort_by(|(t1, _, _, _), (t2, _, _, _)| t1.partial_cmp(t2).unwrap());
+    
+        let note_types = [
+            NoteType::Click,
+            NoteType::Drag,
+            NoteType::Flick,
+            NoteType::Hold,
+        ];
+        for note_type in note_types {
+            if !self.judgement_counters.iter().any(|c| c.note_type == note_type) {
+                self.judgement_counters.push(JudgementCounter::new(
+                    note_type,
+                    self.res.config.chart_ratio,
+                    0.0,
+                ));
+            }
+        }
+    
+        for &(t, line_id, note_id, _) in judgements.iter() {
+            if let Some(line) = self.chart.lines.get(line_id as usize) {
+                if let Some(note) = line.notes.get(note_id as usize) {
+                    let note_type = match note.kind {
+                        NoteKind::Click => NoteType::Click,
+                        NoteKind::Drag => NoteType::Drag,
+                        NoteKind::Flick => NoteType::Flick,
+                        NoteKind::Hold { .. } => NoteType::Hold,
+                        _ => continue,
+                    };
+    
+                    if let Some(counter) = self.judgement_counters
+                        .iter_mut()
+                        .find(|c| c.note_type == note_type)
+                    {
+                        let current_time = t as f64;
+    
+
+                    let is_same_time = (current_time - counter.last_update).abs() <= f64::EPSILON * 2.0;
+    
+                    let effective_interval = if is_same_time {
+                        0.0
+                        } else {
+                        current_time - counter.last_update
+                    };
+
+                    if effective_interval <= combo_threshold as f64 {
+                                counter.multiplier += 1;
+                            } else {
+                                counter.multiplier = 1;
+                    }
+
+                                counter.last_update = current_time;
+                        counter.count += 1;
+                    counter.interval = effective_interval as f32;
+                    }
+                }
+            }
+        }
+        judgements.clear();
     }
 
     fn tweak_offset(&mut self, ui: &mut Ui, ita: bool, tm: &mut TimeManager) {
@@ -944,12 +1163,27 @@ impl Scene for GameScene {
                 time
             }
             State::Ending => {
+                // 确保只在第一次进入 Ending 状态时重置
+                if !self.judgement_reset_done {
+                    // 遍历所有 JudgementCounter 并重置
+                    for counter in self.judgement_counters.iter_mut() {
+                        counter.reset(self.res.config.chart_ratio, 0.0);
+                    }
+                    self.judgement_reset_done = true; // 标记为已重置
+                }
+
+                // 计算 Ending 状态的时间
                 let t = time - self.res.track_length - WAIT_TIME;
+
+                // 如果 Ending 状态持续时间超过 AFTER_TIME + 0.3，则进入下一步逻辑
                 if t >= AFTER_TIME + 0.3 {
                     let mut record_data = None;
                     #[cfg(feature = "closed")]
                     if let Some(upload_fn) = &self.upload_fn {
-                        if !self.res.config.offline_mode && !self.res.config.autoplay() && self.res.config.speed >= 1.0 - 1e-3 {
+                        if !self.res.config.offline_mode
+                            && !self.res.config.autoplay()
+                            && self.res.config.speed >= 1.0 - 1e-3
+                        {
                             if let Some(player) = &self.player {
                                 if let Some(chart) = &self.res.info.id {
                                     record_data = Some(encode_record(self, player.id, *chart));
@@ -1000,6 +1234,30 @@ impl Scene for GameScene {
             self.judge.update(&mut self.res, &mut self.chart, &mut self.bad_notes);
             self.gl.quad_gl.viewport(None);
         }
+
+        self.process_judgements(tm);
+
+        let dt = 0.016_f32;
+        {
+            // 先排序，获得目标位置
+            let chart_ratio = self.res.config.chart_ratio;
+            let base_spacing = 0.2;
+            let spacing = base_spacing * chart_ratio;
+            let gap = 0.05 * chart_ratio;
+            let target_base_y = gap;
+            
+            let mut counters = self.judgement_counters.clone();
+            counters.sort_by(|a, b| a.last_update.partial_cmp(&b.last_update).unwrap());
+            // 遍历排序后的索引，为每个计数器计算目标垂直位置
+            for (i, target_counter) in counters.iter().enumerate() {
+                let target_y = target_base_y - (i as f32 * spacing);
+                // 找到原始集合中对应的计数器并更新：
+                if let Some(counter) = self.judgement_counters.iter_mut().find(|c| c.note_type == target_counter.note_type) {
+                    counter.update(tm.now(), dt, target_y);
+                }
+            }
+        }
+
         if let Some(update) = &mut self.update_fn {
             update(self.res.time, &mut self.res, &mut self.judge);
         }
