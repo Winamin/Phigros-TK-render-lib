@@ -340,36 +340,27 @@ impl GameScene {
             return;
         }
         let chart_ratio = self.res.config.chart_ratio;
-        // 使用铺面摄影机，并保证摄影机的缩放采用 chart_ratio，这里假设铺面坐标系为 [-chart_ratio, chart_ratio]
-        let scaled_camera = Camera2D {
-            zoom: vec2(chart_ratio, -chart_ratio),
-            offset: vec2(0.0, 0.0),
-            ..Default::default()
-        };
-        set_camera(&scaled_camera);  // 切换到铺面缩放的摄影机
-    
-        // 固定在左边
-        let margin = 0.05;
-        let fixed_x = -chart_ratio + margin;
-        // 当 chart_ratio 越小，文本间距越大
+        let margin = -0.9 / chart_ratio;
+        let fixed_x = margin;
         let base_spacing = 0.2;
-        let spacing = base_spacing / chart_ratio;
-        let gap = 0.05;
-        let target_base_y = base_y - gap;
+        // 限制最小间距，避免重叠
+        let spacing = (base_spacing / chart_ratio).max(0.13);
+        let gap = -1.0;
+        let extra_offset = 0.8;
+        let target_base_y = base_y - gap + extra_offset;
     
-        // 按 last_update 排序（最新的在上）
         let mut counters = self.judgement_counters.clone();
         counters.sort_by(|a, b| a.last_update.partial_cmp(&b.last_update).unwrap());
     
         for (i, counter) in counters.iter().enumerate() {
-            // 计算垂直位置，spacing 值越大，文本垂直间距也就越大
             let target_y = target_base_y - (i as f32 * spacing);
+            let pos_y = counter.current_y;
             ui.text(&counter.display_text())
-                .pos(fixed_x, target_y)
-                .anchor(0.0, 0.5)
-                .size(0.25)
+                .pos(fixed_x, pos_y + 0.13)
+                .anchor(0.5, 0.5)
+                .size((0.25 / chart_ratio).min(0.50)) // 可选：字号也限制最大
                 .color(Color::new(1.0, 1.0, 1.0, counter.current_alpha))
-                .draw();
+            .draw();
         }
     }
 
@@ -1241,7 +1232,7 @@ impl Scene for GameScene {
         {
             // 先排序，获得目标位置
             let chart_ratio = self.res.config.chart_ratio;
-            let base_spacing = 0.2;
+            let base_spacing = 0.1;
             let spacing = base_spacing * chart_ratio;
             let gap = 0.05 * chart_ratio;
             let target_base_y = gap;
