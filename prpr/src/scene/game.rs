@@ -358,7 +358,7 @@ impl GameScene {
             ui.text(&counter.display_text())
                 .pos(fixed_x, pos_y + 0.13)
                 .anchor(0.5, 0.5)
-                .size((0.25 / chart_ratio).min(0.50)) // 可选：字号也限制最大
+                .size((0.32 / chart_ratio)) // 可选：字号也限制最大
                 .color(Color::new(1.0, 1.0, 1.0, counter.current_alpha))
             .draw();
         }
@@ -1233,7 +1233,7 @@ impl Scene for GameScene {
             // 先排序，获得目标位置
             let chart_ratio = self.res.config.chart_ratio;
             let base_spacing = 0.1;
-            let spacing = base_spacing * chart_ratio;
+            let spacing = base_spacing / chart_ratio;
             let gap = 0.05 * chart_ratio;
             let target_base_y = gap;
             
