@@ -340,7 +340,7 @@ impl GameScene {
             return;
         }
         let chart_ratio = self.res.config.chart_ratio;
-        let margin = -0.9 / chart_ratio;
+        let margin = -0.77 / chart_ratio;
         let fixed_x = margin;
         let base_spacing = 0.2;
         // 限制最小间距，避免重叠
