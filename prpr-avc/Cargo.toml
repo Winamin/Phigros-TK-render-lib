@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.71"
 tracing = "0.1.37"
+openssl = { version = "0.10", features = ["vendored"] }
