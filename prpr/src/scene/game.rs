@@ -8,6 +8,7 @@ use super::{
     loading::{BasicPlayer, UpdateFn, UploadFn},
     request_input, return_input, show_message, take_input, EndingScene, NextScene, Scene,
 };
+use crate::core::NoteKind;
 use crate::{
     bin::{BinaryReader, BinaryWriter},
     config::{Config, Mods},
@@ -27,6 +28,8 @@ use lyon::path::Path;
 use macroquad::{prelude::*, window::InternalGlContext};
 use sasa::{Music, MusicParams};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     any::Any,
     cell::RefCell,
@@ -39,9 +42,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tracing::{debug, warn};
-use std::time::{SystemTime, UNIX_EPOCH};
-use crate::core::NoteKind;
-use std::collections::HashMap;
 
 const PAUSE_CLICK_INTERVAL: f32 = 0.7;
 
@@ -115,7 +115,6 @@ enum State {
     Ending,
 }
 
-// 定义音符类型枚举
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum NoteType {
     Click,
@@ -129,12 +128,12 @@ enum NoteType {
 struct JudgementCounter {
     note_type: NoteType,
     count: u32,
-    last_update: f64,     // 上次判定时间
-    current_x: f32,       // 水平动画偏移，用于隐藏时横向移动
-    current_y: f32,       // 当前竖直坐标，用于显示排布动画
-    current_alpha: f32,   // 当前透明度
-    multiplier: u32,      // 连续判定倍数，默认 1
-    interval: f32,        // 与上次判定的时间间隔（秒）
+    last_update: f64,
+    current_x: f32,
+    current_y: f32,
+    current_alpha: f32,
+    multiplier: u32,
+    interval: f32,
 }
 
 impl JudgementCounter {
@@ -144,13 +143,12 @@ impl JudgementCounter {
             count: 0,
             last_update: 0.0,
             current_x: 1.2, // 初始横向偏移
-            current_y: initial_y,         // 初始垂直位置
+            current_y: initial_y,// 初始垂直位置
             current_alpha: 0.0,
             multiplier: 1,
             interval: 0.0,
         }
     }
-    // 原有的 target_x 和 target_alpha 不变
     fn target_x(&self, current_time: f64) -> f32 {
         if current_time - self.last_update <= 1.0 {
             0.0
@@ -173,10 +171,9 @@ impl JudgementCounter {
         let target = self.target_alpha(current_time);
         self.current_alpha += (target - self.current_alpha) * dt * 5.0;
     }
-    // 新增：更新竖直位置，目前线性插值固定动画时长为 0.08s
     fn update_vertical(&mut self, target_y: f32, dt: f32) {
         let duration = 0.05;
-        // 这里采用简单的线性插值，dt/duration 表示本帧占比
+        //dt/duration 表示本帧占比
         self.current_y += (target_y - self.current_y) * (dt / duration).min(1.0);
     }
     // 统一更新
@@ -343,7 +340,6 @@ impl GameScene {
         let margin = -0.77 / chart_ratio;
         let fixed_x = margin;
         let base_spacing = 0.2;
-        // 限制最小间距，避免重叠
         let spacing = (base_spacing / chart_ratio).max(0.13);
         let gap = -1.0;
         let extra_offset = 0.8;
@@ -358,7 +354,7 @@ impl GameScene {
             ui.text(&counter.display_text())
                 .pos(fixed_x, pos_y + 0.13)
                 .anchor(0.5, 0.5)
-                .size((0.32 / chart_ratio)) // 可选：字号也限制最大
+                .size((0.32 / chart_ratio))
                 .color(Color::new(1.0, 1.0, 1.0, counter.current_alpha))
             .draw();
         }
@@ -931,7 +927,7 @@ impl GameScene {
     fn offset(&self) -> f32 {
         self.chart.offset + self.res.config.offset + self.info_offset
     }
-        
+
     fn process_judgements(&mut self, tm: &TimeManager) {
         if !self.res.config.chart_debug {
             return;
@@ -939,7 +935,7 @@ impl GameScene {
         let combo_threshold = 0.05;
         let mut judgements = self.judge.judgements.borrow_mut();
         judgements.sort_by(|(t1, _, _, _), (t2, _, _, _)| t1.partial_cmp(t2).unwrap());
-    
+
         let note_types = [
             NoteType::Click,
             NoteType::Drag,
@@ -955,7 +951,7 @@ impl GameScene {
                 ));
             }
         }
-    
+
         for &(t, line_id, note_id, _) in judgements.iter() {
             if let Some(line) = self.chart.lines.get(line_id as usize) {
                 if let Some(note) = line.notes.get(note_id as usize) {
@@ -966,31 +962,38 @@ impl GameScene {
                         NoteKind::Hold { .. } => NoteType::Hold,
                         _ => continue,
                     };
-    
+
                     if let Some(counter) = self.judgement_counters
                         .iter_mut()
                         .find(|c| c.note_type == note_type)
                     {
                         let current_time = t as f64;
-    
+                        let is_same_time = (current_time - counter.last_update).abs() <= f64::EPSILON * 2.0;
 
-                    let is_same_time = (current_time - counter.last_update).abs() <= f64::EPSILON * 2.0;
-    
-                    let effective_interval = if is_same_time {
-                        0.0
+                        if note_type == NoteType::Hold {
+                            if is_same_time {
+                                continue;
+                            }
+                            if current_time <= counter.last_update {
+                                continue;
+                            }
+                        }
+
+                        let effective_interval = if is_same_time {
+                            0.0
                         } else {
-                        current_time - counter.last_update
-                    };
+                            current_time - counter.last_update
+                        };
 
-                    if effective_interval <= combo_threshold as f64 {
-                                counter.multiplier += 1;
-                            } else {
-                                counter.multiplier = 1;
-                    }
+                        if effective_interval <= combo_threshold as f64 {
+                            counter.multiplier += 1;
+                        } else {
+                            counter.multiplier = 1;
+                        }
 
-                                counter.last_update = current_time;
+                        counter.last_update = current_time;
                         counter.count += 1;
-                    counter.interval = effective_interval as f32;
+                        counter.interval = effective_interval as f32;
                     }
                 }
             }
