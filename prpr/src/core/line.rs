@@ -190,102 +190,106 @@ impl JudgeLine {
         let mut color = self.color.now_opt();
         res.with_model(self.now_transform(res, lines), |res| {
             res.with_model(self.object.now_scale(), |res| {
-                res.apply_model(|res| match &self.kind {
-                    JudgeLineKind::Normal => {
-                        let mut color = color.unwrap_or(res.judge_line_color);
-                        color.a *= alpha.max(0.0);
-                        if res.config.chart_debug {
-                            color.a = 0.10 + 0.90 * color.a;
-                        } else if color.a == 0.0 {
-                                return;
+                res.apply_model(|res| {
+                    match &self.kind {
+                        JudgeLineKind::Normal => {
+                            if res.config.ui_line {
+                                let mut color = color.unwrap_or(res.judge_line_color);
+                                color.a *= alpha.max(0.0);
+                                if res.config.chart_debug {
+                                    color.a = 0.10 + 0.90 * color.a;
+                                } else if color.a == 0.0 {
+                                    return;
+                                }
+                                let full_len = res.info.line_length;
+                                let duration = 4.03;
+                                let t_norm = (res.time / duration).min(1.0);
+                                let threshold = 0.2;
+                                let exp_factor = if t_norm < threshold {
+                                    0.5 * (t_norm / threshold).powi(2)
+                                } else {
+                                    0.5 + 0.5 * (1.0 - ((1.0 - t_norm) / (1.0 - threshold)).powi(2))
+                                };
+                                let current_len = full_len * exp_factor;
+                                draw_line(-current_len, 0., current_len, 0., 0.0075, color);
+                            }
                         }
-                        let full_len = res.info.line_length;
-                        let duration = 4.03;
-                        let t_norm = (res.time / duration).min(1.0);
-                        let threshold = 0.2;
-                        let exp_factor = if t_norm < threshold {
-                            0.5 * (t_norm / threshold).powi(2)
-                        } else {
-                            0.5 + 0.5 * (1.0 - ((1.0 - t_norm) / (1.0 - threshold)).powi(2))
-                        };
-                        let current_len = full_len * exp_factor;
-                        draw_line(-current_len, 0., current_len, 0., 0.0075, color);
-                    }
-                    JudgeLineKind::Texture(texture, _) => {
-                        if res.time <= 0. && matches!(color, Some(WHITE)) {
-                            color = Some(BLACK);
-                        }
-                        let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0);
-                        if res.config.chart_debug {
+                        JudgeLineKind::Texture(texture, _) => {
+                            if res.time <= 0. && matches!(color, Some(WHITE)) {
+                                color = Some(BLACK);
+                            }
+                            let mut color = color.unwrap_or(WHITE);
+                            color.a = alpha.max(0.0);
+                            if res.config.chart_debug {
                                 color.a = 0.10 + 0.90 * color.a;
                             } else if color.a == 0.0 {
                                 return;
-                         }
-                        let hf = vec2(texture.width(), texture.height()); // Sync RPE
-                        //let hf = vec2(texture.width() / res.aspect_ratio, texture.height() / res.aspect_ratio);
-                        draw_texture_ex(
-                            **texture,
-                            -hf.x / 2.,
-                            -hf.y / 2.,
-                            color,
-                            DrawTextureParams {
-                                dest_size: Some(hf),
-                                flip_y: true,
-                                ..Default::default()
-                            },
-                        );
-                    }
-                    JudgeLineKind::Text(anim) => {
-                        let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0);
-                        if res.config.chart_debug {
-                                color.a = 0.10 + 0.90 * color.a;
-                            } else if color.a == 0.0 {
-                                return;
-                        }
-                        let now = anim.now();
-                        res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |_| {
-                            draw_text_aligned(ui, &now, 0., 0., (0.5, 0.5), 1., color);
-                        });
-                    }
-                    JudgeLineKind::Paint(anim, state) => {
-                        let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0) * 2.55;
-                        let mut gl = unsafe { get_internal_gl() };
-                        let mut guard = state.borrow_mut();
-                        let vp = get_viewport();
-                        let pass = *guard.0.get_or_insert_with(|| {
-                            let ctx = &mut gl.quad_context;
-                            let tex = Texture::new_render_texture(
-                                ctx,
-                                TextureParams {
-                                    width: vp.2 as _,
-                                    height: vp.3 as _,
-                                    format: miniquad::TextureFormat::RGBA8,
-                                    filter: FilterMode::Linear,
-                                    wrap: TextureWrap::Clamp,
+                            }
+                            let hf = vec2(texture.width(), texture.height()); // Sync RPE
+                            //let hf = vec2(texture.width() / res.aspect_ratio, texture.height() / res.aspect_ratio);
+                            draw_texture_ex(
+                                **texture,
+                                -hf.x / 2.,
+                                -hf.y / 2.,
+                                color,
+                                DrawTextureParams {
+                                    dest_size: Some(hf),
+                                    flip_y: true,
+                                    ..Default::default()
                                 },
                             );
-                            RenderPass::new(ctx, tex, None)
-                        });
-                        gl.flush();
-                        let old_pass = gl.quad_gl.get_active_render_pass();
-                        gl.quad_gl.render_pass(Some(pass));
-                        gl.quad_gl.viewport(None);
-                        let size = anim.now();
-                        if size <= 0. {
-                            if guard.1 {
-                                clear_background(Color::default());
-                                guard.1 = false;
-                            }
-                        } else {
-                            ui.fill_circle(0., 0., size / vp.2 as f32 * 2., color);
-                            guard.1 = true;
                         }
-                        gl.flush();
-                        gl.quad_gl.render_pass(old_pass);
-                        gl.quad_gl.viewport(Some(vp));
+                        JudgeLineKind::Text(anim) => {
+                            let mut color = color.unwrap_or(WHITE);
+                            color.a = alpha.max(0.0);
+                            if res.config.chart_debug {
+                                color.a = 0.10 + 0.90 * color.a;
+                            } else if color.a == 0.0 {
+                                return;
+                            }
+                            let now = anim.now();
+                            res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |_| {
+                                draw_text_aligned(ui, &now, 0., 0., (0.5, 0.5), 1., color);
+                            });
+                        }
+                        JudgeLineKind::Paint(anim, state) => {
+                            let mut color = color.unwrap_or(WHITE);
+                            color.a = alpha.max(0.0) * 2.55;
+                            let mut gl = unsafe { get_internal_gl() };
+                            let mut guard = state.borrow_mut();
+                            let vp = get_viewport();
+                            let pass = *guard.0.get_or_insert_with(|| {
+                                let ctx = &mut gl.quad_context;
+                                let tex = Texture::new_render_texture(
+                                    ctx,
+                                    TextureParams {
+                                        width: vp.2 as _,
+                                        height: vp.3 as _,
+                                        format: miniquad::TextureFormat::RGBA8,
+                                        filter: FilterMode::Linear,
+                                        wrap: TextureWrap::Clamp,
+                                    },
+                                );
+                                RenderPass::new(ctx, tex, None)
+                            });
+                            gl.flush();
+                            let old_pass = gl.quad_gl.get_active_render_pass();
+                            gl.quad_gl.render_pass(Some(pass));
+                            gl.quad_gl.viewport(None);
+                            let size = anim.now();
+                            if size <= 0. {
+                                if guard.1 {
+                                    clear_background(Color::default());
+                                    guard.1 = false;
+                                }
+                            } else {
+                                ui.fill_circle(0., 0., size / vp.2 as f32 * 2., color);
+                                guard.1 = true;
+                            }
+                            gl.flush();
+                            gl.quad_gl.render_pass(old_pass);
+                            gl.quad_gl.viewport(Some(vp));
+                        }
                     }
                 })
             });

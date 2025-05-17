@@ -77,6 +77,14 @@ pub struct Config {
 
     // for compatibility
     pub autoplay: Option<bool>,
+
+    pub ui_score: bool,
+    pub ui_combo: bool,
+    pub ui_name: bool,
+    pub ui_level: bool,
+    pub ui_line: bool,
+    pub ui_pb: bool,
+    pub ui_pause: bool,
 }
 
 impl Default for Config {
@@ -122,6 +130,14 @@ impl Default for Config {
             autoplay: None,
             show_progress_text: false,
             show_time_text: false,
+
+            ui_score: true,
+            ui_combo: true,
+            ui_name: true,
+            ui_level: true,
+            ui_line: true,
+            ui_pb: true,
+            ui_pause: true,
         }
     }
 }

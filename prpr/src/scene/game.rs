@@ -493,26 +493,28 @@ impl GameScene {
         let pause_w = 0.011;
         let pause_h = pause_w * 3.4;
         let pause_center = Point::new(pause_w * 4.4 - 1., top + eps * 3.6454 - (1. - p) * 0.4 + pause_h / 2.);
-        if res.config.interactive
-            && !tm.paused()
-            && self.pause_rewind.is_none()
-            && Judge::get_touches().iter().any(|touch| {
+        if res.config.ui_pause {
+            if res.config.interactive
+                && !tm.paused()
+                && self.pause_rewind.is_none()
+                && Judge::get_touches().iter().any(|touch| {
                 touch.phase == TouchPhase::Started && {
                     let p = touch.position;
                     let p = Point::new(p.x, p.y);
                     (pause_center - p).norm() < 0.05
                 }
             })
-        {
-            let t = tm.now() as f32;
-            if t - self.pause_first_time > PAUSE_CLICK_INTERVAL && res.config.double_click_to_pause {
-                self.pause_first_time = t;
-            } else {
-                self.pause_first_time = f32::NEG_INFINITY;
-                if !self.music.paused() {
-                    self.music.pause()?;
+            {
+                let t = tm.now() as f32;
+                if t - self.pause_first_time > PAUSE_CLICK_INTERVAL && res.config.double_click_to_pause {
+                    self.pause_first_time = t;
+                } else {
+                    self.pause_first_time = f32::NEG_INFINITY;
+                    if !self.music.paused() {
+                        self.music.pause()?;
+                    }
+                    tm.pause();
                 }
-                tm.pause();
             }
         }
         if tm.now() as f32 - self.pause_first_time <= PAUSE_CLICK_INTERVAL {
@@ -522,22 +524,24 @@ impl GameScene {
         let margin = 0.046;
         let score_top = top + eps * 2.2 - (1. - p) * 0.4;
         let ct = ui.text(&score).size(0.8).center();
-        self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
-            let mut text_size = 0.70867;
-            let mut text = ui.text(&score).size(text_size);
-            let max_width = 0.55;
-            let text_width = text.measure().w;
-            if text_width > max_width {
-                text_size *= max_width / text_width
-            }
-            drop(text);
-            ui.text(format!("{:07}", self.judge.score()))
-                .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
-                .anchor(1., 0.)
-                .size(0.70867)
-                .color(Color { a: color.a * c.a, ..color })
-                .draw();
-        });
+        if res.config.ui_score {
+            self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, top + eps * 2.8125)), |ui, color| {
+                let mut text_size = 0.70867;
+                let mut text = ui.text(&score).size(text_size);
+                let max_width = 0.55;
+                let text_width = text.measure().w;
+                if text_width > max_width {
+                    text_size *= max_width / text_width
+                }
+                drop(text);
+                    ui.text(format!("{:07}", self.judge.score()))
+                        .pos(1. - margin + 0.001, top + eps * 2.8125 - (1. - p) * 0.4)
+                        .anchor(1., 0.)
+                        .size(0.70867)
+                        .color(Color { a: color.a * c.a, ..color })
+                        .draw();
+            });
+        }
         if res.config.show_acc {
             ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
                 .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
@@ -546,71 +550,79 @@ impl GameScene {
                 .color(semi_white(0.7))
                 .draw();
         }
-        self.chart.with_element(ui, res, UIElement::Pause, Some((pause_center.x, pause_center.y)), Some((pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2)), |ui, color| {
-            let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
-            let c = Color { a: color.a * c.a, ..color };
-            ui.fill_rect(r, c);
-            r.x += pause_w * 2.;
-            ui.fill_rect(r, c);
-        });
+        if res.config.ui_pause {
+            self.chart.with_element(ui, res, UIElement::Pause, Some((pause_center.x, pause_center.y)), Some((pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2)), |ui, color| {
+                let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
+                let c = Color { a: color.a * c.a, ..color };
+                ui.fill_rect(r, c);
+                r.x += pause_w * 2.;
+                ui.fill_rect(r, c);
+            });
+        }
         let unit_h = ui.text("0").measure().h;
         let combo_top = top + eps * 1.346 - (1. - p) * 0.4;
-        if self.judge.combo() >= 3 {
-            let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
-                let mut text_size = 1.;
-                let max_width = 0.55;
-                let mut text = ui.text(&res.config.combo)
-                    .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
-                    .anchor(0.5, 0.)
-                    .color(Color::new(0., 0., 0., 0.));
+        if res.config.ui_combo {
+            if self.judge.combo() >= 3 {
+                let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
+                    let mut text_size = 1.;
+                    let max_width = 0.55;
+                    let mut text = ui.text(&res.config.combo)
+                        .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
+                        .anchor(0.5, 0.)
+                        .color(Color::new(0., 0., 0., 0.));
+                    let text_width = text.measure().w;
+                    let text_btm = text.draw().bottom();
+                    if text_width > max_width {
+                        text_size *= max_width / text_width
+                    }
+                    ui.text(self.judge.combo().to_string())
+                        .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
+                        .anchor(0.5, 0.)
+                        .color(Color { a: color.a * c.a, ..color })
+                        .size(text_size)
+                        .draw();
+                    text_btm
+                });
+                self.chart.with_element(ui, res, UIElement::Combo, Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), |ui, color| {
+                    ui.text(&res.config.combo)
+                        .pos(0., btm + 0.007777)
+                        .anchor(0.5, 0.)
+                        .size(0.325)
+                        .color(Color { a: color.a * c.a, ..color })
+                        .draw();
+                });
+            }
+        }
+        let lf = -1. + margin;
+        let bt = -top - eps * 3.64;
+        if res.config.ui_name {
+            self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
+                let mut text_size = 0.5;
+                let mut text = ui.text(&res.info.name).size(text_size);
+                let max_width = 0.9;
                 let text_width = text.measure().w;
-                let text_btm = text.draw().bottom();
                 if text_width > max_width {
                     text_size *= max_width / text_width
                 }
-                ui.text(self.judge.combo().to_string())
-                    .pos(0., top + eps * 1.346 - (1. - p) * 0.4)
-                    .anchor(0.5, 0.)
-                    .color(Color { a: color.a * c.a, ..color })
+                drop(text);
+                ui.text(&res.info.name)
+                    .pos(lf, bt + (1. - p) * 0.4)
+                    .anchor(0., 1.)
                     .size(text_size)
-                    .draw();
-                text_btm
-            });
-            self.chart.with_element(ui, res, UIElement::Combo, Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), |ui, color| {
-                ui.text(&res.config.combo)
-                    .pos(0., btm + 0.007777)
-                    .anchor(0.5, 0.)
-                    .size(0.325)
                     .color(Color { a: color.a * c.a, ..color })
                     .draw();
             });
         }
-        let lf = -1. + margin;
-        let bt = -top - eps * 3.64;
-        self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
-            let mut text_size = 0.5;
-            let mut text = ui.text(&res.info.name).size(text_size);
-            let max_width = 0.9;
-            let text_width = text.measure().w;
-            if text_width > max_width {
-                text_size *= max_width / text_width
-            }
-            drop(text);
-            ui.text(&res.info.name)
-                .pos(lf, bt + (1. - p) * 0.4)
-                .anchor(0., 1.)
-                .size(text_size)
-                .color(Color { a: color.a * c.a, ..color })
-                .draw();
-        });
-        self.chart.with_element(ui, res, UIElement::Level, Some((-lf - ct.x, bt - ct.y)), Some((1. - margin * 0.7, -top - eps * 2.)), |ui, color| {
-            ui.text(&res.info.level)
-                .pos(-lf, bt + (1. - p) * 0.4)
-                .anchor(1., 1.)
-                .size(0.5)
-                .color(Color { a: color.a * c.a, ..color })
-                .draw();
-        });
+        if res.config.ui_level {
+            self.chart.with_element(ui, res, UIElement::Level, Some((-lf - ct.x, bt - ct.y)), Some((1. - margin * 0.7, -top - eps * 2.)), |ui, color| {
+                ui.text(&res.info.level)
+                    .pos(-lf, bt + (1. - p) * 0.4)
+                    .anchor(1., 1.)
+                    .size(0.5)
+                    .color(Color { a: color.a * c.a, ..color })
+                    .draw();
+            });
+        }
         {
             let watermark = res.config.watermark.clone();
             if res.config.chart_ratio >= 0.95 {
@@ -640,20 +652,24 @@ impl GameScene {
             bar_alpha = 1.0 - progress.powi(2);
             bar_y = top - progress * height * 2.5;
         }
+        if res.config.ui_pb {
+            self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
+                ui.fill_rect(
+                    Rect::new(-1., bar_y, dest, height),
+                    Color::new(0.565, 0.565, 0.565, color.a * c.a * bar_alpha),
+                );
+                ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color::new(1., 1., 1., color.a * c.a * bar_alpha));
+            });
+            self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
+                let ct = Vector::new(0., top + height / 2.);
+                ui.fill_rect(
+                    Rect::new(-1., bar_y, dest, height),
+                    Color::new(0.45, 0.45, 0.45, bar_alpha),
+                );
+                ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color { a: color.a * c.a * bar_alpha, ..color });
+            });
+        }
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
-            ui.fill_rect(
-                Rect::new(-1., bar_y, dest, height),
-                Color::new(0.565, 0.565, 0.565, color.a * c.a * bar_alpha),
-            );
-            ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color::new(1., 1., 1., color.a * c.a * bar_alpha));
-        });
-        self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
-            let ct = Vector::new(0., top + height / 2.);
-            ui.fill_rect(
-                Rect::new(-1., bar_y, dest, height),
-                Color::new(0.45, 0.45, 0.45, bar_alpha),
-            );
-            ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color { a: color.a * c.a * bar_alpha, ..color });
             let progress = res.time / res.track_length;
             let corrected_progress = if progress >= 0.9999 { 1.0 } else { progress };
             let progress_percentage = (corrected_progress * 100.).min(100.);
@@ -678,8 +694,8 @@ impl GameScene {
                     .size(0.17867)
                     .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
                     .draw();
-                }
-            });
+            }
+        });
         self.draw_judgement_counters(ui, tm, score_top, 2.3);
         Ok(())
     }
@@ -724,67 +740,69 @@ impl GameScene {
                     ..Default::default()
                 },
             );
-            if res.config.interactive {
-                let mut clicked = None;
-                for touch in Judge::get_touches() {
-                    if touch.phase != TouchPhase::Started {
-                        continue;
-                    }
-                    let p = touch.position;
-                    let p = Point::new(p.x, p.y);
-                    for i in -1..=1 {
-                        let ct = Point::new((s * 2. + w) * i as f32, o);
-                        let d = p - ct;
-                        if d.x.abs() <= s && d.y.abs() <= s {
-                            clicked = Some(i);
-                            break;
+            if res.config.ui_pause {
+                if res.config.interactive {
+                    let mut clicked = None;
+                    for touch in Judge::get_touches() {
+                        if touch.phase != TouchPhase::Started {
+                            continue;
+                        }
+                        let p = touch.position;
+                        let p = Point::new(p.x, p.y);
+                        for i in -1..=1 {
+                            let ct = Point::new((s * 2. + w) * i as f32, o);
+                            let d = p - ct;
+                            if d.x.abs() <= s && d.y.abs() <= s {
+                                clicked = Some(i);
+                                break;
+                            }
                         }
                     }
-                }
-                if no_retry && clicked == Some(0) {
-                    clicked = None;
-                }
-                let mut pos = self.music.position();
-                if clicked.map_or(false, |it| it != -1) && (tm.speed - res.config.speed as f64).abs() > 0.01 {
-                    debug!("recreating music");
-                    self.music = res.audio.create_music(
-                        res.music.clone(),
-                        MusicParams {
-                            amplifier: res.config.volume_music as _,
-                            playback_rate: res.config.speed as _,
-                            ..Default::default()
-                        },
-                    )?;
-                }
-                match clicked {
-                    Some(-1) => {
-                        self.should_exit = true;
+                    if no_retry && clicked == Some(0) {
+                        clicked = None;
                     }
-                    Some(0) => {
-                        reset!(self, res, tm);
+                    let mut pos = self.music.position();
+                    if clicked.map_or(false, |it| it != -1) && (tm.speed - res.config.speed as f64).abs() > 0.01 {
+                        debug!("recreating music");
+                        self.music = res.audio.create_music(
+                            res.music.clone(),
+                            MusicParams {
+                                amplifier: res.config.volume_music as _,
+                                playback_rate: res.config.speed as _,
+                                ..Default::default()
+                            },
+                        )?;
                     }
-                    Some(1) => {
-                        if self.mode == GameMode::Exercise && tm.now() > self.exercise_range.end as f64 {
-                            tm.seek_to(self.exercise_range.start as f64);
-                            self.music.seek_to(self.exercise_range.start)?;
-                            pos = self.exercise_range.start;
+                    match clicked {
+                        Some(-1) => {
+                            self.should_exit = true;
                         }
-                        self.music.play()?;
-                        res.time -= 3.;
-                        let dst = pos - 3.;
-                        if dst < 0. {
-                            self.music.pause()?;
-                            self.state = State::BeforeMusic;
-                        } else {
-                            self.music.seek_to(dst)?;
+                        Some(0) => {
+                            reset!(self, res, tm);
                         }
-                        let now = tm.now();
-                        tm.speed = res.config.speed as _;
-                        tm.resume();
-                        tm.seek_to(now - 3.);
-                        self.pause_rewind = Some(tm.now() - 0.2);
+                        Some(1) => {
+                            if self.mode == GameMode::Exercise && tm.now() > self.exercise_range.end as f64 {
+                                tm.seek_to(self.exercise_range.start as f64);
+                                self.music.seek_to(self.exercise_range.start)?;
+                                pos = self.exercise_range.start;
+                            }
+                            self.music.play()?;
+                            res.time -= 3.;
+                            let dst = pos - 3.;
+                            if dst < 0. {
+                                self.music.pause()?;
+                                self.state = State::BeforeMusic;
+                            } else {
+                                self.music.seek_to(dst)?;
+                            }
+                            let now = tm.now();
+                            tm.speed = res.config.speed as _;
+                            tm.resume();
+                            tm.seek_to(now - 3.);
+                            self.pause_rewind = Some(tm.now() - 0.2);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             if self.mode == GameMode::Exercise {

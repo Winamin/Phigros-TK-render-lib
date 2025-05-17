@@ -48,6 +48,13 @@ item-flid_x = 镜像模式
 item-show_progress_text = 进度条（比例显示）
 item-show_time_text = 进度条时间显示
 item-background = 去除背景渲染
+item-ui_pb = 进度条
+item-ui_score = 总分数
+item-ui_combo = 连击数
+item-ui_name = 名字
+item-ui_line = 判定线
+item-ui_level = 等级
+item-ui_pause = 暂停
 
 load-cali-failed = 加载音频失败
 

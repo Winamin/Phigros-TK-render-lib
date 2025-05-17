@@ -8,3 +8,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.71"
 tracing = "0.1.37"
+
+[build-dependencies]
+pkg-config = "0.3.27"
