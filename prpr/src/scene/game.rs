@@ -950,7 +950,7 @@ impl GameScene {
         if !self.res.config.chart_debug {
             return;
         }
-        let combo_threshold = 0.05;
+        let combo_threshold = 0.02;
         let mut judgements = self.judge.judgements.borrow_mut();
         judgements.sort_by(|(t1, _, _, _), (t2, _, _, _)| t1.partial_cmp(t2).unwrap());
 
@@ -970,8 +970,6 @@ impl GameScene {
             }
         }
 
-        let mut processed_hold_notes = std::collections::HashSet::new();
-
         for &(t, line_id, note_id, _) in judgements.iter() {
             if let Some(line) = self.chart.lines.get(line_id as usize) {
                 if let Some(note) = line.notes.get(note_id as usize) {
@@ -983,19 +981,21 @@ impl GameScene {
                         _ => continue,
                     };
 
-                    if note_type == NoteType::Hold {
-                        if processed_hold_notes.contains(&note_id) {
-                            continue;
-                        }
-                        processed_hold_notes.insert(note_id);
-                    }
-
                     if let Some(counter) = self.judgement_counters
                         .iter_mut()
                         .find(|c| c.note_type == note_type)
                     {
                         let current_time = t as f64;
                         let is_same_time = (current_time - counter.last_update).abs() <= f64::EPSILON * 2.0;
+
+                        if note_type == NoteType::Hold {
+                            if is_same_time {
+                                continue;
+                            }
+                            if current_time <= counter.last_update {
+                                continue;
+                            }
+                        }
 
                         let effective_interval = if is_same_time {
                             0.0
@@ -1010,7 +1010,7 @@ impl GameScene {
                         }
 
                         counter.last_update = current_time;
-                        counter.count += 1; // 所有类型统一计数1次
+                        counter.count += 1;
                         counter.interval = effective_interval as f32;
                     }
                 }
