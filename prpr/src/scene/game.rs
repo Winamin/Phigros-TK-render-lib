@@ -42,6 +42,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tracing::{debug, warn};
+use crate::judge::JudgeStatus;
 
 const PAUSE_CLICK_INTERVAL: f32 = 0.7;
 
@@ -977,7 +978,15 @@ impl GameScene {
                         NoteKind::Click => NoteType::Click,
                         NoteKind::Drag => NoteType::Drag,
                         NoteKind::Flick => NoteType::Flick,
-                        NoteKind::Hold { .. } => NoteType::Hold,
+                        NoteKind::Hold { .. } => {
+                            // 仅当是Hold尾部时处理
+                            if let JudgeStatus::Hold(_, _, _, _, up_time) = note.judge {
+                                if (t as f32) < up_time {
+                                    continue; // 跳过头部事件
+                                }
+                            }
+                            NoteType::Hold
+                        }
                         _ => continue,
                     };
 
@@ -988,13 +997,8 @@ impl GameScene {
                         let current_time = t as f64;
                         let is_same_time = (current_time - counter.last_update).abs() <= f64::EPSILON * 2.0;
 
-                        if note_type == NoteType::Hold {
-                            if is_same_time {
-                                continue;
-                            }
-                            if current_time <= counter.last_update {
-                                continue;
-                            }
+                        if note_type == NoteType::Hold && is_same_time {
+                            continue; // 跳过重复时间点 [ 爱修不修 ]
                         }
 
                         let effective_interval = if is_same_time {
