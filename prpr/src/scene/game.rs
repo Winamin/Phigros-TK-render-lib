@@ -159,7 +159,7 @@ impl JudgementCounter {
     }
     fn target_alpha(&self, current_time: f64) -> f32 {
         if current_time - self.last_update <= 1.0 {
-            0.8
+            0.92
         } else {
             0.0
         }
@@ -191,7 +191,8 @@ impl JudgementCounter {
             NoteType::Hold  => "Hold",
         };
         if self.multiplier > 1 {
-            format!("X{} {}:{} [{:.2}s]", self.multiplier, type_str, self.count, self.interval)
+            //format!("X{} {}:{} [{:.2}s]", self.multiplier, type_str, self.count, self.interval)
+            format!("X{} {}:{}", self.multiplier, type_str, self.count)
         } else {
             format!("{}:{} [{:.2}s]", type_str, self.count, self.interval)
         }
@@ -680,9 +681,10 @@ impl GameScene {
             let current_time_text = fmt_time(res.time);
             let total_time_text = fmt_time(res.track_length);
             let time_text = format!("{}", current_time_text);
+
             if res.config.show_progress_text {
                 ui.text(progress_text)
-                    .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07)
+                    .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07 + 0.01)
                     .anchor(1., 0.)
                     .size(0.4)
                     .color(semi_white(0.7))
@@ -690,7 +692,7 @@ impl GameScene {
             }
             if res.config.show_time_text {
                 ui.text(time_text)
-                    .pos(-1. + dest - 0.01, top + height / 2.)
+                    .pos(-1. + dest - 0.01, top + height / 2. - 0.0008)
                     .anchor(1., 0.5)
                     .size(0.17867)
                     .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
