@@ -353,7 +353,7 @@ impl GameScene {
             let target_y = target_base_y - (i as f32 * spacing);
             let pos_y = counter.current_y;
             ui.text(&counter.display_text())
-                .pos(fixed_x, pos_y + 0.13)
+                .pos(fixed_x - 0.078, pos_y - 0.18)
                 .anchor(0.5, 0.5)
                 .size((0.32 / chart_ratio))
                 .color(Color::new(1.0, 1.0, 1.0, counter.current_alpha))
