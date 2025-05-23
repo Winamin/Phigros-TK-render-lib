@@ -999,9 +999,9 @@ impl GameScene {
                         let current_time = t as f64;
                         let is_same_time = (current_time - counter.last_update).abs() <= f64::EPSILON * 2.0;
 
-                        if note_type == NoteType::Hold && is_same_time {
-                            continue; // 跳过重复时间点 [ 爱修不修 ]
-                        }
+                        //if note_type == NoteType::Hold && is_same_time {
+                        //    continue; // 跳过重复时间点 [ 爱修不修 ]
+                        //}
 
                         let effective_interval = if is_same_time {
                             0.0
