@@ -64,6 +64,7 @@ pub struct Config {
     pub sample_count: u32,
     pub show_acc: bool,
     pub speed: f32,
+    pub disable_loading: bool,
     // test
     pub show_progress_text: bool,
     pub show_time_text: bool,
@@ -126,6 +127,7 @@ impl Default for Config {
             volume_bgm: 1.,
             watermark: "".to_string(),
             background: false,
+            disable_loading: false,
 
             autoplay: None,
             show_progress_text: false,
