@@ -400,7 +400,7 @@ impl JudgeLine {
                     base_alpha * object_alpha * global_alpha * debug_adjust
                 };
 
-                let effective_alpha = line_alpha.max(0.3);
+                let effective_alpha = line_alpha.max(0.4);
 
                 let text_color = Color::new(1.0, 1.0, 1.0, effective_alpha);
                 let scale = self.object.scale.now();
