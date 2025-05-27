@@ -389,8 +389,52 @@ impl JudgeLine {
                 }
             });
             if res.config.chart_debug {
+                let pos = Self::fetch_pos(self, res, lines);
+                let rotation = self.object.rotation.now();
+                let line_alpha = {
+                    let base_alpha = self.color.now().a;
+                    let object_alpha = self.object.alpha.now_opt().unwrap_or(1.0);
+                    let global_alpha = res.alpha;
+                    let debug_adjust = if res.config.chart_debug { 0.10 + 0.90 } else { 1.0 };
+
+                    base_alpha * object_alpha * global_alpha * debug_adjust
+                };
+
+                let effective_alpha = line_alpha.max(0.3);
+
+                let text_color = Color::new(1.0, 1.0, 1.0, effective_alpha);
+                //let scale = self.object.scale.now();
+                let height = self.height.now();
+                let parent_info = self.parent.map(|p| {
+                    if p < lines.len() {
+                        p.to_string()
+                    } else {
+                        "Invalid".to_string()
+                    }
+                }).unwrap_or_else(|| "None".to_string());
+                let judged_count = self.notes.iter().filter(|n| matches!(n.judge, JudgeStatus::Judged)).count();
+                let total_notes = self.notes.len();
+
                 res.apply_model(|_| {
-                    ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).size(0.5).draw();
+                    let state_str = format!(
+                        "L{} P({:.1},{:.1}) R{:.0}° H{:.1} Pa{} N{}/{}",
+                        id,
+                        pos.x, pos.y,
+                        rotation,
+                        //scale,
+                        height,
+                        parent_info,
+                        judged_count,
+                        total_notes
+                    );
+
+                    ui.text(&state_str)
+                        .pos(0., -0.01)
+                        .anchor(0.5, 0.0)
+                        .size(0.27)
+                        .color(text_color)
+                        .draw();
+
                 });
             }
         });
