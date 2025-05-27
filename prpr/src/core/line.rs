@@ -429,7 +429,7 @@ impl JudgeLine {
                     );
 
                     ui.text(&state_str)
-                        .pos(0., -0.01)
+                        .pos(0., -0.04)
                         .anchor(0.5, 0.0)
                         .size(0.27)
                         .color(text_color)
