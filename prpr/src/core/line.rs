@@ -403,27 +403,19 @@ impl JudgeLine {
                 let effective_alpha = line_alpha.max(0.3);
 
                 let text_color = Color::new(1.0, 1.0, 1.0, effective_alpha);
-                //let scale = self.object.scale.now();
+                let scale = self.object.scale.now();
                 let height = self.height.now();
-                let parent_info = self.parent.map(|p| {
-                    if p < lines.len() {
-                        p.to_string()
-                    } else {
-                        "Invalid".to_string()
-                    }
-                }).unwrap_or_else(|| "None".to_string());
                 let judged_count = self.notes.iter().filter(|n| matches!(n.judge, JudgeStatus::Judged)).count();
                 let total_notes = self.notes.len();
 
                 res.apply_model(|_| {
                     let state_str = format!(
-                        "L{} P({:.1},{:.1}) R{:.0}° H{:.1} Pa{} N{}/{}",
+                        "L{} P({:.1},{:.1}) R{:.0}° S{:.2}x H{:.1} N{}/{}",
                         id,
                         pos.x, pos.y,
                         rotation,
-                        //scale,
+                        scale,
                         height,
-                        parent_info,
                         judged_count,
                         total_notes
                     );
