@@ -407,15 +407,40 @@ impl JudgeLine {
                 let judged_count = self.notes.iter().filter(|n| matches!(n.judge, JudgeStatus::Judged)).count();
                 let total_notes = self.notes.len();
 
+                let mut parent_info = String::new();
+                let mut current_parent = self.parent;
+                let mut valid_parents = Vec::new(); // 存储有效的父线索引
+
+                // 使用循环收集父线信息
+                while let Some(parent_index) = current_parent {
+                    // 检查索引是否有效
+                    if parent_index < lines.len() {
+                        valid_parents.push(parent_index);
+                        current_parent = lines[parent_index].parent;
+                    } else {
+                        break;
+                    }
+                }
+
+                if !valid_parents.is_empty() {
+                    parent_info = "Parents: ".to_string();
+                    parent_info += &valid_parents
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                }
+
                 res.apply_model(|_| {
                     ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).size(0.5).draw();
                     let state_str = format!(
-                        "P({:.3},{:.3}) R{:.1}° N{}/{}",
+                        "P({:.3},{:.3}) R{:.1}° N{}/{} {}",
                         pos.x, pos.y,
                         rotation,
                         //height,
                         judged_count,
-                        total_notes
+                        total_notes,
+                        parent_info
                     );
 
                     ui.text(&state_str)
@@ -424,7 +449,6 @@ impl JudgeLine {
                         .size(0.35)
                         .color(text_color)
                         .draw();
-
                 });
             }
         });
