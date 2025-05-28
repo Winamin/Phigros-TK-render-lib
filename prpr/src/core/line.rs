@@ -434,7 +434,7 @@ impl JudgeLine {
                 res.apply_model(|_| {
                     ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).size(0.5).draw();
                     let state_str = format!(
-                        "P({:.3},{:.3}) R{:.1}° N{}/{} {}",
+                        "P({:.3},{:.3})          R{:.1}°          N{}/{}              {}",
                         pos.x, pos.y,
                         rotation,
                         //height,
