@@ -391,18 +391,15 @@ impl JudgeLine {
             if res.config.chart_debug {
                 let pos = Self::fetch_pos(self, res, lines);
                 let rotation = self.object.rotation.now();
-                let line_alpha = {
-                    let base_alpha = self.color.now().a;
-                    let object_alpha = self.object.alpha.now_opt().unwrap_or(1.0);
-                    let global_alpha = res.alpha;
-                    let debug_adjust = if res.config.chart_debug { 0.10 + 0.90 } else { 1.0 };
-
-                    base_alpha * object_alpha * global_alpha * debug_adjust
+                let text_alpha = {
+                    let mut alpha_val = alpha;
+                    if res.config.chart_debug {
+                        alpha_val = 0.10 + 0.90 * alpha_val;
+                    }
+                    alpha_val.max(0.4)
                 };
 
-                let effective_alpha = line_alpha.max(0.4);
-
-                let text_color = Color::new(1.0, 1.0, 1.0, effective_alpha);
+                let text_color = Color::new(1.0, 1.0, 1.0, text_alpha);
                 //let height = self.height.now();
                 let judged_count = self.notes.iter().filter(|n| matches!(n.judge, JudgeStatus::Judged)).count();
                 let total_notes = self.notes.len();
@@ -430,11 +427,11 @@ impl JudgeLine {
                         .collect::<Vec<_>>()
                         .join(" -> ");
                 }
-
+                res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
                 res.apply_model(|_| {
-                    ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).size(0.5).draw();
+                    ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).color(text_color).size(0.5).draw();
                     let state_str = format!(
-                        "P({:.3},{:.3})          R{:.1}°          N{}/{}              {}",
+                        "P({:.3},{:.3})   R{:.1}°  N{}/{}   {}",
                         pos.x, pos.y,
                         rotation,
                         //height,
@@ -449,6 +446,7 @@ impl JudgeLine {
                         .size(0.35)
                         .color(text_color)
                         .draw();
+                });
                 });
             }
         });
