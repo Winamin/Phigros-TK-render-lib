@@ -1,6 +1,4 @@
-use super::{
-    chart::ChartSettings, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource
-};
+use super::{chart::ChartSettings, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource};
 use crate::{
     judge::JudgeStatus, 
     parse::RPE_HEIGHT,
@@ -8,7 +6,7 @@ use crate::{
 };
 
 use macroquad::prelude::*;
-use ::rand::{thread_rng, Rng};
+//use ::rand::{thread_rng, Rng};
 use nalgebra::Matrix3;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
@@ -61,42 +59,62 @@ pub struct RenderConfig<'a> {
     pub incline_sin: f32,
 }
 
+#[inline(always)]
 fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color: Color, mut params: DrawTextureParams, clip: bool) {
     let Vec2 { x: w, y: h } = params.dest_size.unwrap();
-    if h < 0. {
-        return;
+    if h < 0. { return; }
+
+    if clip && y + h <= 0. { return; }
+
+    let mut p = [
+        Point::new(x, y),
+        Point::new(x + w, y),
+        Point::new(x + w, y + h),
+        Point::new(x, y + h)
+    ];
+
+    if clip && y < 0. {
+        let visible_height = y + h;
+        if visible_height <= 0. { return; }
+
+        let r = (-y) / visible_height;
+        p[0].y = 0.;
+        p[1].y = 0.;
+
+        let mut source = params.source.unwrap_or(Rect::new(0., 0., 1., 1.));
+        source.y = source.y + source.h * r;
+        source.h = source.h * (1.0 - r);
+        params.source = Some(source);
     }
-    let mut p = [Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)];
-    if clip {
-        if y + h <= 0. {
-            return;
-        }
-        if y <= 0. {
-            let r = -y / (y + h);
-            p[0].y = 0.;
-            p[1].y = 0.;
-            let mut source = params.source.unwrap_or_else(|| Rect::new(0., 0., 1., 1.));
-            source.y += source.h * r;
-            params.source = Some(source);
-        }
-    }
+
     params.flip_y = true;
     draw_tex_pts(res, texture, order, p, color, params);
 }
 
+#[inline(always)]
 fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], color: Color, params: DrawTextureParams) {
-    let mut p = p.map(|it| res.world_to_screen(it));
-    if p[0].x.min(p[1].x.min(p[2].x.min(p[3].x))) > 1. / res.config.chart_ratio
-        || p[0].x.max(p[1].x.max(p[2].x.max(p[3].x))) < -1. / res.config.chart_ratio
-        || p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) > 1. / res.config.chart_ratio
-        || p[0].y.max(p[1].y.max(p[2].y.max(p[3].y))) < -1. / res.config.chart_ratio
+    let p_screen = p.map(|pt| res.world_to_screen(pt));
+
+    let (min_x, max_x) = p_screen.iter()
+        .fold((f32::MAX, f32::MIN), |(min, max), pt|
+            (min.min(pt.x), max.max(pt.x)));
+
+    let (min_y, max_y) = p_screen.iter()
+        .fold((f32::MAX, f32::MIN), |(min, max), pt|
+            (min.min(pt.y), max.max(pt.y)));
+
+    let chart_ratio_inv = 1.0 / res.config.chart_ratio;
+    if min_x > chart_ratio_inv ||
+        max_x < -chart_ratio_inv ||
+        min_y > chart_ratio_inv ||
+        max_y < -chart_ratio_inv
     {
         return;
     }
-    let Rect { x: sx, y: sy, w: sw, h: sh } = params.source.unwrap_or(Rect { x: 0., y: 0., w: 1., h: 1. });
 
+    let mut p = p_screen;
     if params.flip_x {
-        p.swap(0, 1);
+        p.swap(1, 0);
         p.swap(2, 3);
     }
     if params.flip_y {
@@ -104,27 +122,31 @@ fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], co
         p.swap(1, 2);
     }
 
-    #[rustfmt::skip]
+    let Rect { x: sx, y: sy, w: sw, h: sh } = params.source.unwrap_or(Rect::new(0., 0., 1., 1.));
+    let sx1 = sx + sw;
+    let sy1 = sy + sh;
+
     let vertices = [
-        Vertex::new(p[0].x, p[0].y, 0., sx     , sy     , color),
-        Vertex::new(p[1].x, p[1].y, 0., sx + sw, sy     , color),
-        Vertex::new(p[2].x, p[2].y, 0., sx + sw, sy + sh, color),
-        Vertex::new(p[3].x, p[3].y, 0., sx     , sy + sh, color),
+        Vertex::new(p[0].x, p[0].y, 0., sx,  sy,  color),
+        Vertex::new(p[1].x, p[1].y, 0., sx1, sy,  color),
+        Vertex::new(p[2].x, p[2].y, 0., sx1, sy1, color),
+        Vertex::new(p[3].x, p[3].y, 0., sx,  sy1, color),
     ];
-    res.note_buffer
-        .borrow_mut()
-        .push((order, texture.raw_miniquad_texture_handle().gl_internal_id()), vertices);
+
+    res.note_buffer.borrow_mut().push(
+        (order, texture.raw_miniquad_texture_handle().gl_internal_id()),
+        vertices
+    );
 }
 
 fn random_rotate() -> f32 {
-    let mut rng = thread_rng();
-    match rng.gen_range(0..4) {
-        0 => 0.,
-        1 => 90.,
-        2 => 180.,
-        3 => 270.,
-        _ => 0.,
-    }
+    static ANGLES: [f32; 4] = [0.0, 90.0, 180.0, 270.0];
+    let idx = unsafe {
+        let mut r: u32 = 0;
+        core::arch::x86_64::_rdrand32_step(&mut r);
+        r as usize % 4
+    };
+    ANGLES[idx]
 }
 
 fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Color) {
@@ -155,36 +177,32 @@ impl Note {
     }
 
     pub fn dead(&self) -> bool {
-        (!matches!(self.kind, NoteKind::Hold { .. }) || matches!(self.judge, JudgeStatus::Judged)) 
+        (!matches!(self.kind, NoteKind::Hold { .. }) || matches!(self.judge, JudgeStatus::Judged))
             && self.object.dead()
     }
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix3<f32>, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
         self.object.set_time(res.time);
-        let color = if let JudgeStatus::Hold(perfect, ref mut at, ..) = self.judge {
-            if res.time >= *at {
-                let beat = if self.format { 30. / bpm_list.now_bpm(index as f32) } else { 30. / bpm_list.now_bpm(self.time) };
-                *at = res.time + beat / res.config.speed;
-                Some(if perfect {
-                    res.res_pack.info.fx_perfect()
-                } else {
-                    res.res_pack.info.fx_good()
-                })
-            } else {
-                None
+        let color = match &mut self.judge {
+            JudgeStatus::Hold(perfect, ref mut at, ..) if res.time >= *at => {
+                let bpm_index = if self.format { index as f32 } else { self.time };
+                let now_bpm = bpm_list.now_bpm(bpm_index);
+                let beat_duration = 30.0 / (now_bpm * res.config.speed);
+                *at = res.time + beat_duration;
+                let colors = [res.res_pack.info.fx_good(), res.res_pack.info.fx_perfect()];
+                Some(colors[*perfect as usize])
             }
-        } else {
-            None
+            _ => None
         };
-
         if let Some(color) = color {
             self.init_ctrl_obj(ctrl_obj, line_height);
-            let rotation = if res.config.chart_debug { 
-                if self.above { 0. } else { 180. } 
-            } else { 
-                random_rotate() 
+            let rotation = if res.config.chart_debug {
+                if self.above { 0. } else { 180. }
+            } else {
+                random_rotate()
             };
-            res.with_model(*parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
+            let transform = *parent_tr * self.now_transform(res, ctrl_obj, 0., 0.);
+            res.with_model(transform, |res| {
                 res.emit_at_origin(parent_rot + rotation, color)
             });
         }
@@ -193,7 +211,7 @@ impl Note {
     fn init_ctrl_obj(&self, ctrl_obj: &mut CtrlObject, line_height: f32) {
         ctrl_obj.set_height((self.height - line_height + self.object.translation.1.now() / self.speed) * RPE_HEIGHT / 2.);
     }
-    
+
     pub fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Matrix3<f32> {
         let incline_val = 1. - incline_sin * (base * res.aspect_ratio + self.object.translation.1.now()) * RPE_HEIGHT / 2. / 360.;
         let mut tr = self.object.now_translation(res);
@@ -237,12 +255,14 @@ impl Note {
         let base = height - line_height;
         //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
 
-        // && ((res.time - FADEOUT_TIME >= self.time) || (self.fake && res.time >= self.time) || (self.time > res.time && base <= -1e-5))
-        if !config.draw_below
-            && ((res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) || (self.time > res.time && base <= -0.0075))
-            && self.speed != 0.
-        {
-            if res.config.chart_debug{
+        // 无分支渲染决策
+        let should_skip = !config.draw_below && (
+            (res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) ||
+                (self.time > res.time && base <= -0.0075)
+        ) && self.speed != 0.;
+
+        if should_skip {
+            if res.config.chart_debug {
                 color.a *= 0.2;
                 //println!("{}", base);
             } else {
@@ -255,15 +275,18 @@ impl Note {
         } else {
             &res.res_pack.note_style
         };
+
         let draw = |res: &mut Resource, tex: Texture2D| {
             let mut color = color;
             if !config.draw_below {
-                color.a *= (self.time - res.time).min(0.) / FADEOUT_TIME + 1.;
+                let fade_factor = (self.time - res.time).min(0.0) / FADEOUT_TIME + 1.0;
+                color.a *= fade_factor;
             }
             res.with_model(self.now_transform(res, ctrl_obj, base, config.incline_sin), |res| {
                 draw_center(res, tex, order, scale, color);
             });
         };
+
         match self.kind {
             NoteKind::Click => {
                 if self.fake && res.time >= self.time {return};
