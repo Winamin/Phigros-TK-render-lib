@@ -551,33 +551,46 @@ impl Resource {
             return false;
         }
         self.last_vp = vp;
+        let (x, y, width, height) = vp;
+        if width <= 0 || height <= 0 {
+            return false;
+        }
         if !self.no_effect || self.config.sample_count != 1 {
-            self.chart_target = Some(MSRenderTarget::new((vp.2 as u32, vp.3 as u32), self.config.sample_count));
+            self.chart_target = Some(MSRenderTarget::new(
+                (width as u32, height as u32),
+                self.config.sample_count
+            ));
         }
-        fn viewport(aspect_ratio: f32, (x, y, w, h): (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
-            let w = w as f32;
-            let h = h as f32;
-            let (rw, rh) = {
-                let ew = h * aspect_ratio;
-                if ew > w {
-                    let eh = w / aspect_ratio;
-                    (w, eh)
-                } else {
-                    (ew, h)
-                }
-            };
-            (x + ((w - rw) / 2.).round() as i32, y + ((h - rh) / 2.).round() as i32, rw as i32, rh as i32)
-        }
-        let aspect_ratio = self.config.aspect_ratio.unwrap_or(self.info.aspect_ratio);
-        if self.config.fix_aspect_ratio {
-            self.aspect_ratio = aspect_ratio;
-            self.camera.viewport = Some(viewport(aspect_ratio, vp));
+        let config_aspect = self.config.aspect_ratio.unwrap_or(self.info.aspect_ratio);
+        self.aspect_ratio = if self.config.fix_aspect_ratio {
+            config_aspect
         } else {
-            self.aspect_ratio = aspect_ratio.min(vp.2 as f32 / vp.3 as f32);
-            self.camera.zoom.y = -self.aspect_ratio;
-            self.camera.viewport = Some(viewport(self.aspect_ratio, vp));
+            config_aspect.min(width as f32 / height as f32)
         };
+        self.camera.viewport = Some(self.calculate_viewport(vp, self.aspect_ratio));
+        if !self.config.fix_aspect_ratio {
+            self.camera.zoom.y = -self.aspect_ratio;
+        }
+
         true
+    }
+    fn calculate_viewport(&self, (x, y, w, h): (i32, i32, i32, i32), aspect_ratio: f32) -> (i32, i32, i32, i32) {
+        let (w_f, h_f) = (w as f32, h as f32);
+        let target_width = h_f * aspect_ratio;
+
+        let (rw, rh) = if target_width > w_f {
+            let scaled_height = w_f / aspect_ratio;
+            (w_f, scaled_height)
+        } else {
+            (target_width, h_f)
+        };
+
+        (
+            x + ((w_f - rw) / 2.0).round() as i32,
+            y + ((h_f - rh) / 2.0).round() as i32,
+            rw as i32,
+            rh as i32
+        )
     }
 
     pub fn world_to_screen(&self, pt: Point) -> Point {
