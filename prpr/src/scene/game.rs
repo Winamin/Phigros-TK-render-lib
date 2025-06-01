@@ -244,6 +244,9 @@ pub struct GameScene {
 
     judgement_counters: Vec<JudgementCounter>,
     judgement_reset_done: bool,
+
+    pub target_chart_ratio: f32,  // 目标缩放比例
+    pub current_chart_ratio: f32, // 当前缩放比例
 }
 
 macro_rules! reset {
@@ -393,7 +396,7 @@ impl GameScene {
 
         let info_offset = info.offset;
         let mut res = Resource::new(
-            config,
+            config.clone(),
             info,
             fs,
             player.as_ref().and_then(|it| it.avatar.clone()),
@@ -416,6 +419,8 @@ impl GameScene {
             JudgementCounter::new(NoteType::Flick, chart_ratio, 0.0),
             JudgementCounter::new(NoteType::Hold, chart_ratio, 0.0),
         ];
+        let target_chart_ratio = config.chart_ratio;
+
         Ok(Self {
             should_exit: false,
             next_scene: None,
@@ -453,6 +458,9 @@ impl GameScene {
             judgement_counters,
 
             judgement_reset_done: false,
+
+            target_chart_ratio,
+            current_chart_ratio: 1.0,
         })
     }
 
@@ -1125,6 +1133,43 @@ impl Scene for GameScene {
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
         self.res.audio.recover_if_needed()?;
+        let time = tm.now() as f32;
+        let p = match self.state {
+            State::Starting => {
+                if time <= Self::BEFORE_TIME {
+                    1. - (1. - time / Self::BEFORE_TIME).powi(3)
+                } else {
+                    1.
+                }
+            }
+            State::BeforeMusic => 1.,
+            State::Playing => 1.,
+            State::Ending => {
+                let t = time - self.res.track_length - WAIT_TIME;
+                1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
+            }
+        };
+
+        // 更新当前缩放比例（如果启用了加载动画）
+        if !self.res.config.disable_loading {
+            match self.state {
+                State::Starting => {
+                    // 从 1.0 动画到目标值
+                    self.current_chart_ratio = 1.0 + (self.target_chart_ratio - 1.0) * p;
+                }
+                State::Ending => {
+                    // 从当前值动画回 1.0
+                    self.current_chart_ratio = self.target_chart_ratio + (1.0 - self.target_chart_ratio) * (1.0 - p);
+                }
+                _ => {
+                    // 其他状态使用目标值
+                    self.current_chart_ratio = self.target_chart_ratio;
+                }
+            }
+        } else {
+            // 禁用加载动画时直接使用目标值
+            self.current_chart_ratio = self.target_chart_ratio;
+        }
         if matches!(self.state, State::Playing) {
             tm.update(self.music.position() as f64);
         }
@@ -1258,7 +1303,7 @@ impl Scene for GameScene {
         let dt = 0.016_f32;
         {
             // 先排序，获得目标位置
-            let chart_ratio = self.res.config.chart_ratio;
+            let chart_ratio = self.current_chart_ratio;
             let base_spacing = 0.1;
             let spacing = base_spacing / chart_ratio;
             let gap = 0.05 * chart_ratio;
@@ -1382,7 +1427,7 @@ impl Scene for GameScene {
         
         let vp = res.camera.viewport.unwrap_or(ui.viewport);
         let asp2 = vp.2 as f32 / vp.3 as f32;
-        let vec2_asp = vec2(1. * &res.config.chart_ratio, -asp2 * &res.config.chart_ratio);
+        let vec2_asp = vec2(1. * self.current_chart_ratio, -asp2 * self.current_chart_ratio);
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
             set_camera(&res.camera);
         }
@@ -1409,14 +1454,22 @@ impl Scene for GameScene {
         } else {
             res.camera.viewport
         };
+        let chart_ratio = self.current_chart_ratio;
         let h = 1. / res.aspect_ratio;
-        if res.config.chart_ratio >= 1. {
+        if chart_ratio >= 1.0 {
             let dim_alpha = 0.7;
             let dim = Color::new(0.1, 0.1, 0.1, dim_alpha * res.alpha);
             let x_range = vp.0 as f32 / ui.viewport.2 as f32;
-            draw_rectangle(-1., -h,x_range * 2., h * 2., dim);
-            draw_rectangle(1., -h,-x_range * 2., h * 2., dim);
-            draw_rectangle(x_range * 2. - 1., -h, (1. - x_range * 2.) * 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+
+            draw_rectangle(-1., -h, x_range * 2., h * 2., dim);
+            draw_rectangle(1., -h, -x_range * 2., h * 2., dim);
+            draw_rectangle(
+                x_range * 2. - 1.,
+                -h,
+                (1. - x_range * 2.) * 2.,
+                h * 2.,
+                Color::new(0., 0., 0., res.alpha * res.info.background_dim)
+            );
         }
         
         set_camera( &Camera2D {
