@@ -48,6 +48,7 @@ item-flid_x = 镜像模式
 item-show_progress_text = 进度条（比例显示）
 item-show_time_text = 进度条时间显示
 item-background = 去除背景渲染
+item-target_audio = 重采样音频
 item-ui_pb = 进度条
 item-ui_score = 总分数
 item-ui_combo = 连击数

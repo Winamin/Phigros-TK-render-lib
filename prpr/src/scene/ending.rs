@@ -427,7 +427,7 @@ impl Scene for EndingScene {
             &if let Some(rks) = &self.player_rks {
                 format!("{rks:.2}")
             } else {
-                "16.00".to_owned()
+                "16.80".to_owned()
             }
             ,
             sub.center().x,

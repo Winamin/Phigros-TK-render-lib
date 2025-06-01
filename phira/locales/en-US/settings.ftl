@@ -47,6 +47,7 @@ item-flid_x = Mirror Mode
 item-show_progress_text = Progress bar (scale display)
 item-show_time_text = Progress bar time display
 item-background = Remove background rendering
+item-target_audio = Targer Audio
 item-ui_pb = Progress Bar
 item-ui_score = Total score
 item-ui_combo = Combos
