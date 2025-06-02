@@ -249,11 +249,17 @@ impl Note {
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
         let spd = self.speed * ctrl_obj.y.now_opt().unwrap_or(1.);
         let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
-
+        /*
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
-        //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
+        let base = (self.height - config.line_height) / res.aspect_ratio * spd;
+
+         */
+
+        let line_height = config.line_height / res.aspect_ratio;
+        let height = self.height / res.aspect_ratio;
+        let base = (height - line_height) * spd.signum();
 
         // 无分支渲染决策
         let should_skip = !config.draw_below && (
@@ -341,6 +347,7 @@ impl Note {
                     }
                     let tex = &style.hold;
                     let ratio = style.hold_ratio();
+                    let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
                     // body
                     // TODO (end_height - height) is not always total height
                     draw_tex(
