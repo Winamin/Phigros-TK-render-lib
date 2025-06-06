@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize};
 use std::cell::RefCell;
 use tracing::warn;
+use anyhow::bail;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,9 +130,9 @@ fn parse_float_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimFloat> {
         kfs.push(Keyframe::new(en, e.end, 2));
     }
     // 只在非空情况下移除最后一个关键帧
-    if !kfs.is_empty() {
-        kfs.pop();
-    }
+    //if !kfs.is_empty() {
+    //    kfs.pop();
+    //}
     Ok(AnimFloat::new(kfs))
 }
 
@@ -151,8 +152,8 @@ fn parse_move_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimVector> {
         kf1.push(Keyframe::new(en, e.end, 2));
         kf2.push(Keyframe::new(en, e.end2, 2));
     }
-    kf1.pop();
-    kf2.pop();
+    //kf1.pop();
+    //kf2.pop();
     for kf in &mut kf1 {
         kf.value = -1. + kf.value * 2.;
     }
@@ -167,7 +168,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
     if pgr.is_empty() {
         return Ok(Vec::new());
     }
-    pgr.sort_by_key(|it| it.time as usize); 
+    pgr.sort_by(|a, b| a.time.partial_cmp(&b.time).expect("Invalid note time"));
     pgr.into_iter()
         .map(|pgr| {
             let time = pgr.time * r;
@@ -214,6 +215,9 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
 }
 
 fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32) -> Result<JudgeLine> {
+    if pgr.bpm <= 0.0 {
+        bail!("Invalid BPM: {}", pgr.bpm);
+    }
     let r = 60. / pgr.bpm / 32.;
     let (mut speed, mut height) = parse_speed_events(r, pgr.speed_events, max_time).context("Failed to parse speed events")?;
     let notes_above = parse_notes(r, pgr.notes_above, &mut speed, &mut height, true).context("Failed to parse notes above")?;
