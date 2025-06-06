@@ -12,6 +12,17 @@ pub use rpe::{parse_rpe, RPE_HEIGHT, RPE_WIDTH};
 
 pub(crate) fn process_lines(v: &mut [crate::core::JudgeLine]) {
     use crate::ext::NotNanExt;
+
+    // 修复：验证所有父索引
+    let line_count = v.len();
+    for line in v.iter_mut() {
+        if let Some(parent_index) = line.parent {
+            if parent_index >= line_count {
+                line.parent = None; // 无效索引，移除父关系
+            }
+        }
+    }
+
     let mut times = Vec::new();
     // TODO optimize using k-merge sort
     let sorts = v

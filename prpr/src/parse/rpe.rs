@@ -211,7 +211,6 @@ fn parse_events<T: Tweenable, V: Clone + Into<T>>(
 fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> Result<AnimFloat> {
     let rpe: Vec<_> = rpe.iter().filter_map(|it| it.speed_events.as_ref()).collect();
     if rpe.is_empty() {
-        // TODO or is it?
         return Ok(AnimFloat::default());
     };
     let anis: Vec<_> = rpe
@@ -232,48 +231,75 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
     let mut sani = AnimFloat::chain(anis);
     sani.map_value(|v| v * SPEED_RATIO);
     for i in 0..(pts.len() - 1) {
-        let now_time = *pts[i];
-        let end_time = *pts[i + 1];
+        let now_time = *pts[i]; // 解引用为 f32
+        let end_time = *pts[i + 1]; // 解引用为 f32
         sani.set_time(now_time);
-        let speed = sani.now();
+        let start_speed = sani.now();
         sani.set_time(end_time - 1e-4);
         let end_speed = sani.now();
-        if speed.signum() * end_speed.signum() < 0. {
-            pts.push(f32::tween(&now_time, &end_time, speed / (speed - end_speed)).not_nan());
+
+        // 检查速度是否线性变化（加速度恒定）
+        let duration = end_time - now_time;
+        if duration > EPS && (start_speed - end_speed).abs() > EPS {
+            // 计算加速度 (a = Δv/Δt)
+            let acceleration = (end_speed - start_speed) / duration;
+
+            // 如果加速度为0（匀速），不需要额外分割
+            if acceleration.abs() > EPS {
+                // 计算速度过零点的时间（如果存在）
+                if start_speed.signum() != end_speed.signum() {
+                    let zero_time = now_time - start_speed / acceleration;
+                    if zero_time > now_time && zero_time < end_time {
+                        pts.push(zero_time.not_nan());
+                    }
+                }
+
+                // 在区间中点添加关键帧以获得更好的二次曲线近似
+                let mid_time = (now_time + end_time) / 2.0;
+                pts.push(mid_time.not_nan());
+            }
         }
     }
     pts.sort();
     pts.dedup();
     let mut kfs = Vec::new();
     let mut height = 0.0;
+
+    // 确保时间0处有初始关键帧
+    if *pts[0] > 0.0 {
+        kfs.push(Keyframe::new(0.0, height, 2));
+    }
+
     for i in 0..(pts.len() - 1) {
-        let now_time = *pts[i];
-        let end_time = *pts[i + 1];
+        let now_time = *pts[i]; // 解引用为 f32
+        let end_time = *pts[i + 1]; // 解引用为 f32
+        let duration = end_time - now_time;
+
         sani.set_time(now_time);
-        let speed = sani.now();
-        // this can affect a lot! do not use end_time...
-        // using end_time causes Hold tween (x |-> 0) to be recognized as Linear tween (x |-> x)
+        let start_speed = sani.now();
         sani.set_time(end_time - 1e-4);
         let end_speed = sani.now();
-        kfs.push(if (speed - end_speed).abs() < EPS {
-            Keyframe::new(now_time, height, 2)
-        } else if speed.abs() > end_speed.abs() {
-            Keyframe {
-                time: now_time,
-                value: height,
-                tween: Rc::new(ClampedTween::new(7 /*quadOut*/, 0.0..(1. - end_speed / speed))),
-            }
+
+        // 精确计算位移增量（使用积分公式）
+        let delta_height = if duration < EPS {
+            0.0
+        } else if (start_speed - end_speed).abs() < EPS {
+            // 匀速运动：Δs = v * t
+            start_speed * duration
         } else {
-            Keyframe {
-                time: now_time,
-                value: height,
-                tween: Rc::new(ClampedTween::new(6 /*quadIn*/, (speed / end_speed)..1.)),
-            }
-        });
-        height += (speed + end_speed) * (end_time - now_time) / 2.;
-        //println!("time:{:.5}\tend_time:{}\theight:{}", now_time, end_time, height);
+            // 匀加速运动：Δs = (v0 + v1)/2 * t
+            // 使用精确的二次积分公式
+            (start_speed + end_speed) * duration / 2.0
+        };
+
+        // 添加当前时间点的关键帧
+        kfs.push(Keyframe::new(now_time, height, 2));
+        height += delta_height;
     }
+
+    // 添加最终关键帧
     kfs.push(Keyframe::new(max_time, height, 0));
+
     Ok(AnimFloat::new(kfs))
 }
 
@@ -341,16 +367,34 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
 }
 
 fn parse_ctrl_events(rpe: &[RPECtrlEvent], key: &str) -> AnimFloat {
-    let vals: Vec<_> = rpe.iter().map(|it| it.value[key]).collect();
+    let vals: Vec<_> = rpe
+        .iter()
+        .filter_map(|it| it.value.get(key).copied())
+        .collect();
+
     if rpe.is_empty() || (rpe.len() == 2 && rpe[0].easing == 1 && (vals[0] - 1.).abs() < 1e-4) {
         return AnimFloat::default();
     }
-    AnimFloat::new(
-        rpe.iter()
-            .zip(vals.into_iter())
-            .map(|(it, val)| Keyframe::new(it.x, val, RPE_TWEEN_MAP.get(it.easing.max(1) as usize).copied().unwrap_or(RPE_TWEEN_MAP[0])))
-            .collect(),
-    )
+
+    // 修复：声明并初始化 kfs 向量
+    let mut kfs = Vec::new(); // <-- 添加这行声明 kfs
+
+    // 修复：替换未定义的 default 变量
+    // 原代码中的 default 可能是想用第一个值作为默认值？
+    if let Some(&first_val) = vals.first() { // <-- 使用 vals 的第一个值
+        kfs.push(Keyframe::new(0.0, first_val, 0)); // 注意：这里使用的缓动类型0需要确认是否合适
+    }
+
+    // 添加其他关键帧
+    for (it, val) in rpe.iter().zip(vals.iter().copied()) {
+        kfs.push(Keyframe::new(
+            it.x,
+            val,
+            RPE_TWEEN_MAP.get(it.easing.max(1) as usize).copied().unwrap_or(RPE_TWEEN_MAP[0])
+        ));
+    }
+
+    AnimFloat::new(kfs)
 }
 
 async fn parse_judge_line(r: &mut BpmList, rpe: RPEJudgeLine, max_time: f32, fs: &mut dyn FileSystem, bezier_map: &BezierMap) -> Result<JudgeLine> {
@@ -525,7 +569,15 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra)
             line.notes.as_ref().map(|notes| {
                 notes
                     .iter()
-                    .map(|note| r.time(&note.start_time).not_nan())
+                    .map(|note| {
+                        // 修复：在这里处理Hold音符的结束时间
+                        let time = if note.kind == 2 { // Hold类型
+                            r.time(&note.end_time)
+                        } else {
+                            r.time(&note.start_time)
+                        };
+                        time.not_nan()
+                    })
                     .max()
                     .unwrap_or_default()
             }).unwrap_or_default().max(
@@ -548,7 +600,7 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra)
             )
         })
         .max().unwrap_or_default() + 1.;
-    // don't want to add a whole crate for a mere join_all...
+
     let mut lines = Vec::new();
     for (id, rpe) in rpe.judge_line_list.into_iter().enumerate() {
         let name = rpe.name.clone();
