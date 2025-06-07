@@ -227,14 +227,14 @@ impl Note {
         }
 
         if config.appear_before.is_finite() {
-        //if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
+            //if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
             let beat = bpm_list.beat(self.time);
             let time = bpm_list.time_beats(beat - config.appear_before);
             if time > res.time {
                 return;
             }
         }
-        
+
         if config.invisible_time.is_finite() && self.time - config.invisible_time < res.time {
             return;
         }
@@ -249,17 +249,11 @@ impl Note {
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
         let spd = self.speed * ctrl_obj.y.now_opt().unwrap_or(1.);
         let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
-        /*
+
         let line_height = config.line_height / res.aspect_ratio * spd;
         let height = self.height / res.aspect_ratio * spd;
         let base = height - line_height;
-        let base = (self.height - config.line_height) / res.aspect_ratio * spd;
-
-         */
-
-        let line_height = config.line_height / res.aspect_ratio;
-        let height = self.height / res.aspect_ratio;
-        let base = (height - line_height) * spd.signum();
+        //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
 
         // 无分支渲染决策
         let should_skip = !config.draw_below && (
@@ -340,14 +334,13 @@ impl Note {
                             return;
                         }
                     }
-                    
+
 
                     if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !self.format) {
                         return;
                     }
                     let tex = &style.hold;
                     let ratio = style.hold_ratio();
-                    let end_spd = self.end_speed * ctrl_obj.y.now_opt().unwrap_or(1.);
                     // body
                     // TODO (end_height - height) is not always total height
                     draw_tex(

@@ -451,16 +451,16 @@ async fn parse_judge_line(r: &mut BpmList, rpe: RPEJudgeLine, max_time: f32, fs:
                                 &e.scale_x_events,
                                 factor
                                     * if rpe.texture == "line.png"
-                                        && rpe
-                                            .extended
-                                            .as_ref()
-                                            .map_or(true, |it| it.text_events.as_ref().map_or(true, |it| it.is_empty()))
-                                        && rpe.attach_ui.is_none()
-                                    {
-                                        0.5
-                                    } else {
-                                        1.
-                                    },
+                                    && rpe
+                                    .extended
+                                    .as_ref()
+                                    .map_or(true, |it| it.text_events.as_ref().map_or(true, |it| it.is_empty()))
+                                    && rpe.attach_ui.is_none()
+                                {
+                                    0.5
+                                } else {
+                                    1.
+                                },
                                 bezier_map,
                             )?,
                             parse(r, &e.scale_y_events, factor, bezier_map)?,
@@ -501,7 +501,7 @@ async fn parse_judge_line(r: &mut BpmList, rpe: RPEJudgeLine, max_time: f32, fs:
                         .await
                         .with_context(|| ptl!("illustration-load-failed", "path" => rpe.texture.clone()))?,
                 )?
-                .into(),
+                    .into(),
                 rpe.texture.clone(),
             )
         },
