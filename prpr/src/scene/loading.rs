@@ -134,11 +134,7 @@ impl Scene for LoadingScene {
                         self.load_task = None;
                         self.next_scene =
                             Some(game_scene.map_or_else(|e| NextScene::PopWithResult(Box::new(e)), |it| NextScene::Replace(Box::new(it))));
-                        self.finish_time = if self.config.disable_loading {
-                            tm.now() as f32
-                        } else {
-                            tm.now() as f32 + BEFORE_TIME
-                        };
+                        self.finish_time = tm.now() as f32 + BEFORE_TIME;
                         break;
                     }
                 }
@@ -167,7 +163,7 @@ impl Scene for LoadingScene {
 
             draw_background(*self.background);
             draw_parallelogram(main, None, Color::new(0.0, 0.0, 0.0, 0.0), false);
-            
+
             let r = draw_illustration(
                 *self.illustration,
                 main.x + main.w / 2.0,
@@ -211,7 +207,7 @@ impl Scene for LoadingScene {
             .anchor(0., 0.5)
             .size(text_size)
             .draw();
-        
+
         draw_text_aligned_fix(ui, &self.info.composer, main.x + main.w * 0.09, main.y + main.h * 0.74, (0., 0.5), 0.363, WHITE, 0.40);
 
         let ext = 0.04;
@@ -229,13 +225,13 @@ impl Scene for LoadingScene {
             .and_then(|word| first_str.find(word).map(|m| &word[m.start()..]))
             .and_then(|word| last_str.find(word).map(|m| &word[..m.end()]))
             .unwrap_or("?")
-            , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK, main.w * 0.18
+                              , ct.x, ct.y + sub.h * 0.05, (0.5, 1.), 0.90, BLACK, main.w * 0.18
         );
         draw_text_aligned_fix(ui, self.info.level
             .split_whitespace()
             .next()
             .unwrap_or("?")
-            , ct.x, ct.y + sub.h * 0.09, (0.5, 0.), 0.30, BLACK, main.w * 0.16
+                              , ct.x, ct.y + sub.h * 0.09, (0.5, 0.), 0.30, BLACK, main.w * 0.16
         );
 
         let t = draw_text_aligned(ui, "Chart", main.x + main.w / 6.1, main.y + main.h * 1.32, (0., 0.), 0.253, WHITE);
@@ -273,14 +269,7 @@ impl Scene for LoadingScene {
         if matches!(self.next_scene, Some(NextScene::PopWithResult(_))) {
             return self.next_scene.take().unwrap();
         }
-
-        let transition = if self.config.disable_loading {
-            0.0
-        } else {
-            TRANSITION_TIME + WAIT_TIME
-        };
-
-        if tm.now() as f32 > self.finish_time + transition {
+        if tm.now() as f32 > self.finish_time + TRANSITION_TIME + WAIT_TIME {
             if let Some(scene) = self.next_scene.take() {
                 return scene;
             }
@@ -288,3 +277,4 @@ impl Scene for LoadingScene {
         NextScene::None
     }
 }
+
