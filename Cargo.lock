@@ -4582,6 +4582,7 @@ dependencies = [
  "fastblur",
  "fluent",
  "fluent-syntax",
+ "futures-util",
  "glyph_brush",
  "hex",
  "hmac",
