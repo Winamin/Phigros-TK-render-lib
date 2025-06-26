@@ -661,9 +661,17 @@ impl Emitter {
         for (gpu, cpu) in self.gpu_particles.iter_mut().zip(&mut self.cpu_counterpart) {
             // TODO: this is not quite the way to apply acceleration, this is not
             // fps independent and just wrong
+            /*
             cpu.velocity += cpu.velocity * self.config.linear_accel * dt;
             cpu.angular_velocity += cpu.angular_velocity * self.config.angular_accel * dt;
             cpu.angular_velocity *= 1.0 - self.config.angular_damping;
+            */
+            //Link: Can use explicit euler integration
+            let linear_acceleration = self.config.linear_accel * cpu.velocity;
+            cpu.velocity += linear_acceleration * dt;
+            let angular_acceleration = self.config.angular_accel * cpu.angular_velocity;
+            cpu.angular_velocity += angular_acceleration * dt;
+            cpu.angular_velocity *= (1.0 - self.config.angular_damping).powf(dt);
 
             gpu.color = {
                 let t = cpu.lived / cpu.lifetime;
