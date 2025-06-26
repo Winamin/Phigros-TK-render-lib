@@ -322,9 +322,9 @@ impl Judge {
         })
     }
 
-    pub fn update(&mut self, res: &mut Resource, chart: &mut Chart, bad_notes: &mut Vec<BadNote>) {
+    pub fn update(&mut self, res: &mut Resource, chart: &mut Chart, bad_notes: &mut Vec<BadNote>, skip_sfx: bool) {
         if res.config.autoplay() {
-            self.auto_play_update(res, chart);
+            self.auto_play_update(res, chart, skip_sfx);
             return;
         }
         const X_DIFF_MAX: f32 = 0.21 / (16. / 9.) * 2.;
@@ -783,7 +783,7 @@ impl Judge {
         self.last_time = t / spd;
     }
 
-    fn auto_play_update(&mut self, res: &mut Resource, chart: &mut Chart) {
+    fn auto_play_update(&mut self, res: &mut Resource, chart: &mut Chart, skip_sfx: bool) {
         let t = res.time;
         //let spd = res.config.speed;
         let mut judgements = Vec::new();
@@ -834,17 +834,19 @@ impl Judge {
             };
             let line = &chart.lines[line_id];
             res.with_model(line.now_transform(res, &chart.lines) * note_transform, |res| {
-                if !matches!(note_kind, NoteKind::Hold { .. }){
+                if !matches!(note_kind, NoteKind::Hold { .. }) {
                     res.emit_at_origin(line.notes[id as usize].rotation(line), res.res_pack.info.fx_perfect())
                 }
             });
-            if let Some(sfx) = match note_kind {
-                NoteKind::Click => Some(&mut res.sfx_click),
-                NoteKind::Drag => Some(&mut res.sfx_drag),
-                NoteKind::Flick => Some(&mut res.sfx_flick),
-                _ => None,
-            } {
-                play_sfx(sfx, &res.config);
+            if !skip_sfx {
+                if let Some(sfx) = match note_kind {
+                    NoteKind::Click => Some(&mut res.sfx_click),
+                    NoteKind::Drag => Some(&mut res.sfx_drag),
+                    NoteKind::Flick => Some(&mut res.sfx_flick),
+                    _ => None,
+                } {
+                    play_sfx(sfx, &res.config);
+                }
             }
         }
     }

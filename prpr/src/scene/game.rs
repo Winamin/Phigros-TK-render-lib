@@ -241,6 +241,7 @@ pub struct GameScene {
     update_fn: Option<UpdateFn>,
 
     pub touch_points: Vec<(f32, f32)>,
+    pub is_fast_forwarding: bool,
 
     judgement_counters: Vec<JudgementCounter>,
     judgement_reset_done: bool,
@@ -454,6 +455,7 @@ impl GameScene {
             update_fn,
 
             touch_points: Vec::new(),
+            is_fast_forwarding: false,
 
             judgement_counters,
 
@@ -1294,7 +1296,7 @@ impl Scene for GameScene {
         self.res.time = time;
         if !tm.paused() && self.pause_rewind.is_none() && self.mode != GameMode::View {
             self.gl.quad_gl.viewport(self.res.camera.viewport);
-            self.judge.update(&mut self.res, &mut self.chart, &mut self.bad_notes);
+            self.judge.update(&mut self.res, &mut self.chart, &mut self.bad_notes, self.is_fast_forwarding);
             self.gl.quad_gl.viewport(None);
         }
 
@@ -1350,6 +1352,7 @@ impl Scene for GameScene {
                 tm.pause();
             }
         }
+        self.is_fast_forwarding = false;
         if Self::interactive(res, &self.state) {
             if is_key_pressed(KeyCode::Left) {
                 res.time -= 1.;
@@ -1358,6 +1361,7 @@ impl Scene for GameScene {
                 tm.seek_to(dst as f64);
             }
             if is_key_pressed(KeyCode::Right) {
+                self.is_fast_forwarding = true;
                 res.time += 5.;
                 let dst = (self.music.position() + 5.).min(res.track_length);
                 self.music.seek_to(dst)?;
