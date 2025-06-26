@@ -350,6 +350,8 @@ impl JudgeLine {
                     }
                     w if (1000..2000).contains(&w) => {
                         // TODO unsupported
+                        //Link: The implementation is to set the invisible time of the note, which is calculated as (w - 1000) / 10 seconds
+                        config.invisible_time = (w as f32 - 1000.) / 10.;
                     }
                     _ => {}
                 }
