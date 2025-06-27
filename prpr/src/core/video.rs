@@ -4,12 +4,8 @@ use anyhow::Result;
 use macroquad::prelude::*;
 use miniquad::{Texture, TextureFormat, TextureParams, TextureWrap};
 use prpr_avc::AVPixelFormat;
-use std::{cell::RefCell, io::Write};
+use std::io::Write;
 use tempfile::NamedTempFile;
-
-thread_local! {
-    static VIDEO_BUFFERS: RefCell<[Vec<u8>; 3]> = RefCell::default();
-}
 
 pub struct Video {
     video: prpr_avc::Video,
@@ -19,6 +15,10 @@ pub struct Video {
     tex_y: Texture2D,
     tex_u: Texture2D,
     tex_v: Texture2D,
+
+    buf_y: Vec<u8>,
+    buf_u: Vec<u8>,
+    buf_v: Vec<u8>,
 
     start_time: f32,
     scale_type: ScaleType,
@@ -53,6 +53,12 @@ impl Video {
         let w = format.width as u32;
         let h = format.height as u32;
 
+        let buf_size_y = (w * h) as usize;
+        let buf_size_uv = ((w / 2) * (h / 2)) as usize;
+        let buf_y = vec![0; buf_size_y];
+        let buf_u = vec![0; buf_size_uv];
+        let buf_v = vec![0; buf_size_uv];
+
         let material = load_material(
             shader::VERTEX,
             shader::FRAGMENT,
@@ -78,6 +84,10 @@ impl Video {
             tex_u,
             tex_v,
 
+            buf_y,
+            buf_u,
+            buf_v,
+
             start_time,
             scale_type,
             alpha,
@@ -95,32 +105,35 @@ impl Video {
         self.alpha.set_time(t);
         self.dim.set_time(t);
         let that_frame = ((t - self.start_time) as f64 / self.frame_delta) as usize;
+
         if self.next_frame <= that_frame {
-            VIDEO_BUFFERS.with(|it| {
-                let mut buf = it.borrow_mut();
-                while self.next_frame <= that_frame {
-                    buf[0].clear();
-                    buf[1].clear();
-                    buf[2].clear();
-                    if self
-                        .video
-                        .with_frame(|frame| {
-                            buf[0].extend_from_slice(frame.data(0));
-                            buf[1].extend_from_slice(frame.data_half(1));
-                            buf[2].extend_from_slice(frame.data_half(2));
-                        })
-                        .is_none()
-                    {
-                        self.ended = true;
-                        return;
-                    }
-                    self.next_frame += 1;
+            for _ in self.next_frame..that_frame {
+                if self.video.with_frame(|_| {}).is_none() {
+                    self.ended = true;
+                    return Ok(());
                 }
-                let ctx = unsafe { get_internal_gl() }.quad_context;
-                self.tex_y.raw_miniquad_texture_handle().update(ctx, &buf[0]);
-                self.tex_u.raw_miniquad_texture_handle().update(ctx, &buf[1]);
-                self.tex_v.raw_miniquad_texture_handle().update(ctx, &buf[2]);
-            });
+                self.next_frame += 1;
+            }
+
+            if self
+                .video
+                .with_frame(|frame| {
+                    self.buf_y.copy_from_slice(frame.data(0));
+                    self.buf_u.copy_from_slice(frame.data_half(1));
+                    self.buf_v.copy_from_slice(frame.data_half(2));
+                })
+                .is_none()
+            {
+                self.ended = true;
+                return Ok(());
+            }
+
+            let ctx = unsafe { get_internal_gl() }.quad_context;
+            self.tex_y.raw_miniquad_texture_handle().update(ctx, &self.buf_y);
+            self.tex_u.raw_miniquad_texture_handle().update(ctx, &self.buf_u);
+            self.tex_v.raw_miniquad_texture_handle().update(ctx, &self.buf_v);
+
+            self.next_frame += 1;
         }
         Ok(())
     }
@@ -129,12 +142,19 @@ impl Video {
         if res.time < self.start_time || self.ended {
             return;
         }
-        gl_use_material(self.material);
+
+        let alpha = self.alpha.now_opt().unwrap_or(1.0);
+        if alpha <= 0.0 {
+            return;
+        }
+        
         let top = 1. / res.aspect_ratio;
         let r = Rect::new(-1., -top, 2., top * 2.);
+
+        gl_use_material(self.material);
         let s = source_of_image(&self.tex_y, r, self.scale_type).unwrap_or_else(|| Rect::new(0., 0., 1., 1.));
         let dim = 1. - self.dim.now();
-        let color = Color::new(dim, dim, dim, self.alpha.now_opt().unwrap_or(1.));
+        let color = Color::new(dim, dim, dim, alpha);
         let vertices = [
             Vertex::new(r.x, r.y, 0., s.x, s.y, color),
             Vertex::new(r.right(), r.y, 0., s.right(), s.y, color),
