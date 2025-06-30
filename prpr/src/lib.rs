@@ -28,8 +28,8 @@ pub use scene::Main;
 pub fn build_conf() -> macroquad::window::Conf {
     macroquad::window::Conf {
         window_title: "Phi TK".to_string(),
-        window_width: 1920,
-        window_height: 1080,
+        window_width: 600,
+        window_height: 800,
         ..Default::default()
     }
 }

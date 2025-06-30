@@ -128,6 +128,7 @@ enum NoteType {
 #[derive(Clone)]
 struct JudgementCounter {
     note_type: NoteType,
+    color: Color,
     count: u32,
     last_update: f64,
     current_x: f32,
@@ -139,8 +140,13 @@ struct JudgementCounter {
 
 impl JudgementCounter {
     fn new(note_type: NoteType, chart_ratio: f32, initial_y: f32) -> Self {
+        let color = match note_type {
+            NoteType::Flick => RED,
+            _ => WHITE, // 其他类型使用白色
+        };
         Self {
             note_type,
+            color,
             count: 0,
             last_update: 0.0,
             current_x: 1.2, // 初始横向偏移
@@ -355,13 +361,15 @@ impl GameScene {
         counters.sort_by(|a, b| a.last_update.partial_cmp(&b.last_update).unwrap());
     
         for (i, counter) in counters.iter().enumerate() {
+            let mut color = counter.color;
+            color.a *= counter.current_alpha;
             let target_y = target_base_y - (i as f32 * spacing);
             let pos_y = counter.current_y;
             ui.text(&counter.display_text())
-                .pos(fixed_x - 0.078, pos_y - 0.18)
+                .pos(fixed_x + 0.11, pos_y - 0.09)
                 .anchor(0.5, 0.5)
-                .size((0.32 / chart_ratio))
-                .color(Color::new(1.0, 1.0, 1.0, counter.current_alpha))
+                .size((0.44 / chart_ratio))
+                .color(color)
             .draw();
         }
     }
