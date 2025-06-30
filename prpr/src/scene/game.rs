@@ -136,6 +136,9 @@ struct JudgementCounter {
     current_alpha: f32,
     multiplier: u32,
     interval: f32,
+    alpha_anim_start: f64,
+    alpha_anim_phase: u8, // 0: 无动画, 1: 降阶段, 2: 升阶段
+    alpha_anim_duration: f32,
 }
 
 impl JudgementCounter {
@@ -149,11 +152,14 @@ impl JudgementCounter {
             color,
             count: 0,
             last_update: 0.0,
-            current_x: 1.2, // 初始横向偏移
-            current_y: initial_y,// 初始垂直位置
-            current_alpha: 0.0,
+            current_x: 1.2,
+            current_y: initial_y,
+            current_alpha: 1.0,
             multiplier: 1,
             interval: 0.0,
+            alpha_anim_start: 0.0,
+            alpha_anim_duration: 1.0,
+            alpha_anim_phase: 0,
         }
     }
     fn target_x(&self, current_time: f64) -> f32 {
@@ -165,11 +171,48 @@ impl JudgementCounter {
     }
     fn target_alpha(&self, current_time: f64) -> f32 {
         if current_time - self.last_update <= 1.0 {
-            0.92
+            1.0
         } else {
-            0.0
+            0.1
         }
     }
+
+    fn trigger_alpha_anim(&mut self, current_time: f64) {
+        self.alpha_anim_start = current_time;
+        self.alpha_anim_duration = 0.06;
+        self.alpha_anim_phase = 1;
+    }
+
+    fn update_alpha_anim(&mut self, current_time: f64) {
+        if self.alpha_anim_phase == 0 {
+            return;
+        }
+
+        let elapsed = (current_time - self.alpha_anim_start) as f32;
+
+        match self.alpha_anim_phase {
+            1 => {
+                if elapsed < 0.04 {
+                    let progress = elapsed / 0.01;
+                    self.current_alpha = 1.0 - 0.2 * progress;
+                } else {
+                    self.alpha_anim_phase = 2;
+                    self.alpha_anim_start = current_time;
+                }
+            }
+            2 => {
+                if elapsed < 0.21 {
+                    let progress = elapsed / 0.05;
+                    self.current_alpha = 0.8 + 0.2 * progress;
+                } else {
+                    self.alpha_anim_phase = 0;
+                    self.alpha_anim_duration = 0.0;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn update_position(&mut self, current_time: f64, dt: f32) {
         let target = self.target_x(current_time);
         self.current_x += (target - self.current_x) * dt * 5.0;
@@ -208,9 +251,12 @@ impl JudgementCounter {
         self.multiplier = 1;
         self.interval = 0.0;
         self.last_update = 0.0;
-        self.current_alpha = 0.0;
+        self.current_alpha = 1.0;
         self.current_x = 1.2;
         self.current_y = initial_y;
+        self.alpha_anim_start = 0.0;
+        self.alpha_anim_duration = 0.0;
+        self.alpha_anim_phase = 0;
     }
 }
 
@@ -972,6 +1018,8 @@ impl GameScene {
             return;
         }
         let combo_threshold = 0.02;
+        let flash_threshold = 1.8; // 1.8秒内再次触发执行闪烁动画
+
         let mut judgements = self.judge.judgements.borrow_mut();
         judgements.sort_by(|(t1, _, _, _), (t2, _, _, _)| t1.partial_cmp(t2).unwrap());
 
@@ -999,10 +1047,9 @@ impl GameScene {
                         NoteKind::Drag => NoteType::Drag,
                         NoteKind::Flick => NoteType::Flick,
                         NoteKind::Hold { .. } => {
-                            // 仅当是Hold尾部时处理
                             if let JudgeStatus::Hold(_, _, _, _, up_time) = note.judge {
                                 if (t as f32) < up_time {
-                                    continue; // 跳过头部事件
+                                    continue;
                                 }
                             }
                             NoteType::Hold
@@ -1027,14 +1074,23 @@ impl GameScene {
                             current_time - counter.last_update
                         };
 
+                        let old_count = counter.count;
+                        let old_multiplier = counter.multiplier;
+
+                        counter.count += 1;
                         if effective_interval <= combo_threshold {
                             counter.multiplier += 1;
                         } else {
                             counter.multiplier = 1;
                         }
 
+                        if (old_count != counter.count || old_multiplier != counter.multiplier) {
+                            if effective_interval < flash_threshold {
+                                counter.trigger_alpha_anim(current_time);
+                            }
+                        }
+
                         counter.last_update = current_time;
-                        counter.count += 1;
                         counter.interval = effective_interval as f32;
                     }
                 }
@@ -1143,6 +1199,10 @@ impl Scene for GameScene {
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
         self.res.audio.recover_if_needed()?;
+        let current_time = tm.now();
+        for counter in self.judgement_counters.iter_mut() {
+            counter.update_alpha_anim(current_time);
+        }
         let time = tm.now() as f32;
         let p = match self.state {
             State::Starting => {
