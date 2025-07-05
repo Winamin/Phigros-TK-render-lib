@@ -40,6 +40,7 @@ item-chart-debug = Beatmap debug mode
 item-chart-debug-sub = Display line number and orientation
 item-touch-debug = Touch debug mode
 item-touch-debug-sub = Display touch points
+item-chart_ratio = chart ratio
 item-buffer_size = Adjust Buffer_size
 item-combo = customize COMBO text
 item-watermark = Watermark Text
