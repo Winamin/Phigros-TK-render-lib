@@ -307,9 +307,12 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
     rpe.into_iter()
         .map(|note| {
             let time = r.time(&note.start_time);
-            height.set_time(time);
-            let note_height = height.now();
             let y_offset = note.y_offset * 2. / RPE_HEIGHT * note.speed;
+
+            // Set time and get height after calculating y_offset
+            height.set_time(time);
+            let note_height = height.now() + y_offset;
+
             Ok(Note {
                 object: Object {
                     alpha: if note.visible_time >= time {
@@ -340,7 +343,7 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
                         height.set_time(end_time);
                         NoteKind::Hold {
                             end_time,
-                            end_height: height.now(),
+                            end_height: height.now() + y_offset,
                         }
                     }
                     3 => NoteKind::Flick,
@@ -353,7 +356,7 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
                 end_speed: note.speed,
                 start_height: {
                     height.set_time(r.time(&note.start_time));
-                    height.now()
+                    height.now() + y_offset
                 },
 
                 above: note.above == 1,
