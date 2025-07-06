@@ -271,29 +271,27 @@ impl JudgeLine {
                             }
                         }
                         JudgeLineKind::Texture(texture, _) => {
-                            let mut final_color = if res.time <= 0. && matches!(color, Some(WHITE)) {
-                                BLACK
-                            } else {
-                                color.unwrap_or(WHITE)
+                            let texture_ref = **texture;
+                            let (w, h) = (texture_ref.width(), texture_ref.height());
+                            let final_color = match color {
+                                Some(mut c) => {
+                                    c.a = alpha.max(0.0);
+                                    c
+                                }
+                                None => Color { r: 1.0, g: 1.0, b: 1.0, a: alpha.max(0.0) }
                             };
-                            final_color.a = alpha.max(0.0);
-                            if final_color.a == 0.0 && !res.config.chart_debug {
+                            if final_color.a == 0.0 {
                                 return;
                             }
-                            let texture_data = **texture;
-                            let (w, h) = (texture_data.width(), texture_data.height());
-                            let hf = vec2(w, h);
-                            if res.config.chart_debug {
-                                final_color.a = 0.10 + 0.90 * final_color.a;
-                            }
-                            const HALF: f32 = 0.5;
+                            let half_w = w as f32 * 0.5;
+                            let half_h = h as f32 * 0.5;
                             draw_texture_ex(
-                                texture_data,
-                                -w * HALF,
-                                -h * HALF,
+                                texture_ref,
+                                -half_w,
+                                -half_h,
                                 final_color,
                                 DrawTextureParams {
-                                    dest_size: Some(hf),
+                                    dest_size: Some(vec2(w as f32, h as f32)),
                                     flip_y: true,
                                     ..Default::default()
                                 },
