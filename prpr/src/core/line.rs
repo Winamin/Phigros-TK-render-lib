@@ -6,10 +6,10 @@ use crate::{
     ui::Ui,
 };
 use macroquad::prelude::*;
-use miniquad::{RenderPass, Texture, TextureParams, TextureWrap};
+use miniquad::{RenderPass, Texture, TextureParams, TextureWrap, FilterMode};
 use nalgebra::Rotation2;
 use serde::Deserialize;
-use std::cell::RefCell;
+use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,6 +114,55 @@ pub struct JudgeLine {
     pub cache: JudgeLineCache,
 }
 
+struct Painter {
+    pass: RenderPass,
+    viewport: (i32, i32, i32, i32),
+    cleared: bool,
+}
+
+impl Painter {
+    fn new() -> Self {
+        let mut gl = unsafe { get_internal_gl() };
+        let vp = get_viewport();
+        let tex = Texture::new_render_texture(
+            &mut gl.quad_context,
+            TextureParams {
+                width: vp.2 as _,
+                height: vp.3 as _,
+                format: miniquad::TextureFormat::RGBA8,
+                filter: FilterMode::Linear,
+                wrap: TextureWrap::Clamp,
+            },
+        );
+        let pass = RenderPass::new(&mut gl.quad_context, tex, None);
+        Painter { pass, viewport: vp, cleared: false }
+    }
+
+    fn paint(&mut self, ui: &mut Ui, size: f32, alpha: f32, mut color: Color) {
+        let gl = unsafe { get_internal_gl() };
+        let old_pass = gl.quad_gl.get_active_render_pass();
+        gl.quad_gl.render_pass(Some(self.pass));
+        gl.quad_gl.viewport(Some(self.viewport));
+
+        color.a = alpha.max(0.0) * 2.55;
+        if size <= 0.0 {
+            if self.cleared {
+                clear_background(Color::default());
+                self.cleared = false;
+            }
+        } else {
+            let radius = size / self.viewport.2 as f32 * 2.0;
+            ui.fill_circle(0., 0., radius, color);
+            self.cleared = true;
+        }
+
+        gl.quad_gl.render_pass(old_pass);
+        gl.quad_gl.viewport(Some(self.viewport));
+    }
+}
+
+
+
 impl JudgeLine {
     pub fn update(&mut self, res: &mut Resource, tr: Matrix, bpm_list: &mut BpmList, index: usize) {
         let rot = self.object.rotation.now();
@@ -185,9 +234,10 @@ impl JudgeLine {
             self.object.now_rotation().append_translation(&Self::fetch_pos(self, res, lines))
     }
 
-    pub fn render(&self, ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
+    pub fn render(&self, mut ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
-        let mut color = self.color.now_opt();
+        let color = self.color.now_opt();
+        let painter_state: Rc<RefCell<Option<Painter>>> = Rc::new(RefCell::new(None));
         res.with_model(self.now_transform(res, lines), |res| {
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| {
@@ -262,43 +312,13 @@ impl JudgeLine {
                                 draw_text_aligned(ui, &now, 0., 0., (0.5, 0.5), 1., color);
                             });
                         }
-                        JudgeLineKind::Paint(anim, state) => {
-                            let mut color = color.unwrap_or(WHITE);
-                            color.a = alpha.max(0.0) * 2.55;
-                            let mut gl = unsafe { get_internal_gl() };
-                            let mut guard = state.borrow_mut();
-                            let vp = get_viewport();
-                            let pass = *guard.0.get_or_insert_with(|| {
-                                let ctx = &mut gl.quad_context;
-                                let tex = Texture::new_render_texture(
-                                    ctx,
-                                    TextureParams {
-                                        width: vp.2 as _,
-                                        height: vp.3 as _,
-                                        format: miniquad::TextureFormat::RGBA8,
-                                        filter: FilterMode::Linear,
-                                        wrap: TextureWrap::Clamp,
-                                    },
-                                );
-                                RenderPass::new(ctx, tex, None)
-                            });
-                            gl.flush();
-                            let old_pass = gl.quad_gl.get_active_render_pass();
-                            gl.quad_gl.render_pass(Some(pass));
-                            gl.quad_gl.viewport(None);
-                            let size = anim.now();
-                            if size <= 0. {
-                                if guard.1 {
-                                    clear_background(Color::default());
-                                    guard.1 = false;
-                                }
-                            } else {
-                                ui.fill_circle(0., 0., size / vp.2 as f32 * 2., color);
-                                guard.1 = true;
-                            }
-                            gl.flush();
-                            gl.quad_gl.render_pass(old_pass);
-                            gl.quad_gl.viewport(Some(vp));
+                        JudgeLineKind::Paint(anim, _state) => {
+                            let size  = anim.now();
+                            let color = color.unwrap_or(WHITE);
+                            let alpha = alpha;
+                            let mut opt = painter_state.borrow_mut();
+                            let painter = opt.get_or_insert_with(|| Painter::new());
+                            painter.paint(&mut ui, size, alpha, color);
                         }
                     }
                 })
