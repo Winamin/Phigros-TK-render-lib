@@ -119,6 +119,16 @@ impl SafeTexture {
         self
     }
 
+    pub fn from_image(img: &DynamicImage) -> Self {
+        let rgba = img.to_rgba8();
+        let tex = Texture2D::from_rgba8(
+            img.width() as u16,
+            img.height() as u16,
+            &rgba,
+        );
+        SafeTexture(Arc::new(SafeTextureInner(tex)))
+    }
+
 }
 
 impl Clone for SafeTexture {
@@ -551,6 +561,7 @@ pub fn parse_time(s: &str) -> Option<f32> {
     }
     Some(res)
 }
+
 
 mod shader {
     pub const VERTEX: &str = r#"#version 100
