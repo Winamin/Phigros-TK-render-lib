@@ -273,14 +273,14 @@ impl JudgeLine {
                         JudgeLineKind::Texture(texture, _) => {
                             let texture_ref = **texture;
                             let (w, h) = (texture_ref.width(), texture_ref.height());
-                            let final_color = match color {
-                                Some(mut c) => {
-                                    c.a = alpha.max(0.0);
-                                    c
-                                }
-                                None => Color { r: 1.0, g: 1.0, b: 1.0, a: alpha.max(0.0) }
+                            let mut final_color = match color {
+                                Some(c) => c,
+                                None => Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
                             };
-                            if final_color.a == 0.0 {
+                            final_color.a = alpha.max(0.0);
+                            if res.config.chart_debug {
+                                final_color.a = 0.10 + 0.90 * final_color.a;
+                            } else if final_color.a == 0.0 {
                                 return;
                             }
                             let half_w = w as f32 * 0.5;
