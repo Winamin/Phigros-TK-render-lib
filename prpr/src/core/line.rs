@@ -272,26 +272,25 @@ impl JudgeLine {
                         }
                         JudgeLineKind::Texture(texture, _) => {
                             let texture_ref = **texture;
-                            let (w, h) = (texture_ref.width(), texture_ref.height());
-                            let mut final_color = match color {
-                                Some(c) => c,
-                                None => Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
-                            };
-                            final_color.a = alpha.max(0.0);
-                            if res.config.chart_debug {
-                                final_color.a = 0.10 + 0.90 * final_color.a;
-                            } else if final_color.a == 0.0 {
+                            let alpha = alpha.max(0.0);
+                            if alpha == 0.0 && !res.config.chart_debug {
                                 return;
                             }
-                            let half_w = w as f32 * 0.5;
-                            let half_h = h as f32 * 0.5;
+                            let mut final_color = color.unwrap_or(WHITE);
+                            final_color.a = if res.config.chart_debug {
+                                0.10 + 0.90 * alpha
+                            } else {
+                                alpha
+                            };
+                            let (w, h) = (texture_ref.width() as f32, texture_ref.height() as f32);
+                            let half_size = vec2(w * 0.5, h * 0.5);
                             draw_texture_ex(
                                 texture_ref,
-                                -half_w,
-                                -half_h,
+                                -half_size.x,
+                                -half_size.y,
                                 final_color,
                                 DrawTextureParams {
-                                    dest_size: Some(vec2(w as f32, h as f32)),
+                                    dest_size: Some(vec2(w, h)),
                                     flip_y: true,
                                     ..Default::default()
                                 },
