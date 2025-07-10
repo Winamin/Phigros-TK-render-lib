@@ -401,9 +401,15 @@ fn parse_ctrl_events(rpe: &[RPECtrlEvent], key: &str) -> AnimFloat {
     AnimFloat::new(kfs)
 }
 
-async fn parse_judge_line(r: &mut BpmList, rpe: RPEJudgeLine, max_time: f32, fs: &mut dyn FileSystem, bezier_map: &BezierMap) -> Result<JudgeLine> {
+async fn parse_judge_line(
+    r: &mut BpmList,
+    rpe: RPEJudgeLine,
+    max_time: f32,
+    fs: &mut dyn FileSystem,
+    bezier_map: &BezierMap,
+    texture_cache: &mut std::collections::HashMap<String, SafeTexture>,
+) -> Result<JudgeLine> {
     let event_layers: Vec<_> = rpe.event_layers.into_iter().flatten().collect();
-    let mut line_texture_map = std::collections::HashMap::<String, SafeTexture>::new();
 
     fn events_with_factor(
         r: &mut BpmList,
@@ -503,19 +509,19 @@ async fn parse_judge_line(r: &mut BpmList, rpe: RPEJudgeLine, max_time: f32, fs:
                 JudgeLineKind::Normal
             }
         } else {
-            if let Some(texture) = line_texture_map.get(&rpe.texture) {
-                JudgeLineKind::Texture(texture.clone(), rpe.texture.clone())
-            } else {
-                let img = image::load_from_memory(
-                    &fs.load_file(&rpe.texture)
+            match texture_cache.get(&rpe.texture) {
+                Some(texture) => JudgeLineKind::Texture(texture.clone(), rpe.texture.clone()),
+                None => {
+                    let img_data = fs
+                        .load_file(&rpe.texture)
                         .await
-                        .with_context(|| ptl!("illustration-load-failed", "path" => rpe.texture.clone()))?,
-                )?;
-                let texture = SafeTexture::from_image(&img)
-                    .with_mipmap();
+                        .with_context(|| ptl!("illustration-load-failed", "path" => rpe.texture.clone()))?;
+                    let img = image::load_from_memory(&img_data)?;
+                    let texture = SafeTexture::from_image(&img).with_mipmap();
+                    texture_cache.insert(rpe.texture.clone(), texture.clone());
 
-                line_texture_map.insert(rpe.texture.clone(), texture.clone());
-                JudgeLineKind::Texture(texture, rpe.texture.clone())
+                    JudgeLineKind::Texture(texture, rpe.texture.clone())
+                }
             }
         },
         color: if let Some(events) = rpe.extended.as_ref().and_then(|e| e.color_events.as_ref()) {
@@ -570,9 +576,11 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra)
     let rpe: RPEChart = serde_json::from_str(source).with_context(|| ptl!("json-parse-failed"))?;
     let bezier_map = get_bezier_map(&rpe);
     let mut r = BpmList::new(rpe.bpm_list.into_iter().map(|it| (it.start_time.beats(), it.bpm)).collect());
+    let mut texture_cache = std::collections::HashMap::new();
     fn vec<T>(v: &Option<Vec<T>>) -> impl Iterator<Item = &T> {
         v.iter().flat_map(|it| it.iter())
     }
+
     #[rustfmt::skip]
     let max_time = *rpe
         .judge_line_list
@@ -617,7 +625,7 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra)
     for (id, rpe) in rpe.judge_line_list.into_iter().enumerate() {
         let name = rpe.name.clone();
         lines.push(
-            parse_judge_line(&mut r, rpe, max_time, fs, &bezier_map)
+            parse_judge_line(&mut r, rpe, max_time, fs, &bezier_map, &mut texture_cache)
                 .await
                 .with_context(move || ptl!("judge-line-location-name", "jlid" => id, "name" => name))?,
         );
