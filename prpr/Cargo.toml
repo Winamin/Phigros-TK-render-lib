@@ -64,6 +64,7 @@ tracing-subscriber = { version = "0.3.17", optional = true }
 colored = { version = "2.0.0", optional = true }
 
 prpr-avc = { path = "../prpr-avc" }
+crossbeam = "0.8.4"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 rfd = "0.14"

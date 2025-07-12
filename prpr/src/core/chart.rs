@@ -56,17 +56,18 @@ impl Chart {
     }
 
     #[inline]
-    pub fn with_element<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, ct: Option<(f32, f32)>, pt: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
+    pub fn with_element<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, scale_point: Option<(f32, f32)>, rotation_point: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
         if let Some(id) = self.attach_ui[element as usize - 1] {
             let lines = &self.lines;
             let line = &lines[id];
             let obj = &line.object;
             let mut tr = JudgeLine::fetch_pos(line, res, lines);
-            tr.y = -tr.y;
+            tr.y *= -res.aspect_ratio;
+            tr.x *= res.aspect_ratio;
             let mut color = self.lines[id].color.now_opt().unwrap_or(WHITE);
             color.a *= obj.now_alpha().max(0.);
-            let scale = obj.now_scale_fix(ct.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
-            let ro = obj.new_rotation_wrt_point(-obj.rotation.now().to_radians(), pt.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
+            let scale = obj.now_scale_fix(scale_point.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
+            let ro = obj.new_rotation_wrt_point(-obj.rotation.now().to_radians(), rotation_point.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
             ui.with(Matrix::new_translation(&tr) * ro * scale, |ui| f(ui, color))
         } else {
             f(ui, WHITE)
@@ -132,9 +133,11 @@ impl Chart {
     }
 
     pub fn render(&self, ui: &mut Ui, res: &mut Resource) {
-        for video in &self.extra.videos {
-            video.render(res);
-        }
+        res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(if res.config.flip_x() { -1. } else { 1. }, 1.)), |res| {
+            for video in &self.extra.videos {
+                video.render(res);
+            }
+        });
         res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(if res.config.flip_x() { -1. } else { 1. }, -1.)), |res| {
             let mut guard = self.bpm_list.borrow_mut();
             for id in &self.order {

@@ -1,11 +1,12 @@
 #version 100
 precision mediump float;
 
-varying vec2 uv;
-uniform vec2 screenSize;
-uniform sampler2D screenTexture;
-uniform float time;
+varying vec2 uv; // 材质 UV，替换v_texCoord
+uniform vec2 screenSize; // 屏幕大小resolution
+uniform sampler2D screenTexture; // 屏幕材质，替换u_texture和CC_Texture0
+uniform float time; // 时间，以秒为单位，替换u_time
 
+// 控制变量：缩放倍率、中心偏移、旋转角度
 uniform float zoom; // %1.0%
 uniform vec2 offset; // %0.0, 0.0%
 uniform float rotation; // %0.0%

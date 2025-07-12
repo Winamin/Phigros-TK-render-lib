@@ -8,6 +8,7 @@ uniform float hueShift; // %0.0%
 uniform float saturationShift; // %0.0%
 uniform float valueShift; // %0.0%
 
+// RGB 转 HSV
 vec3 rgb2hsv(vec3 c)
 {
     float cMax = max(c.r, max(c.g, c.b));
@@ -33,6 +34,7 @@ vec3 rgb2hsv(vec3 c)
 }
 
 
+// HSV 转 RGB
 vec3 hsv2rgb(vec3 c)
 {
     float h = c.x * 6.0;
@@ -64,20 +66,25 @@ vec3 hsv2rgb(vec3 c)
 
 void main()
 {
+    // 获取当前像素颜色
     vec4 color = texture2D(screenTexture, uv);
-
+    
+    // 将 RGB 转为 HSV
     vec3 hsv = rgb2hsv(color.rgb);
-
+    
+    // 调整色相
     hsv.x += hueShift;
-    hsv.x = fract(hsv.x);
+    hsv.x = fract(hsv.x); // 保持色相在 [0, 1] 范围内
 	
 	hsv.y += saturationShift;
-	hsv.y = clamp(hsv.y, 0.0, 1.0);
+	hsv.y = clamp(hsv.y, 0.0, 1.0); // 限制在 [0, 1]
 
 	hsv.z += valueShift;
-	hsv.z = clamp(hsv.z, 0.0, 1.0);
-
+	hsv.z = clamp(hsv.z, 0.0, 1.0); // 限制在 [0, 1]
+    
+    // 将 HSV 转回 RGB
     vec3 rgb = hsv2rgb(hsv);
-
+    
+    // 输出最终颜色
     gl_FragColor = vec4(rgb, 1.0);
 }

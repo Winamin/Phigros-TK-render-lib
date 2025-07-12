@@ -446,7 +446,7 @@ impl GameScene {
             chart
                 .extra
                 .effects
-                .push(Effect::new(0.0..f32::INFINITY, include_str!("fxaa.glsl"), Vec::new(), false).unwrap());
+                .push(Effect::new(0.0..f32::INFINITY, include_str!("fxaa.glsl"), Vec::new(), false)?);
         }
 
         let info_offset = info.offset;
@@ -725,14 +725,6 @@ impl GameScene {
                     Color::new(0.565, 0.565, 0.565, color.a * c.a * bar_alpha),
                 );
                 ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color::new(1., 1., 1., color.a * c.a * bar_alpha));
-            });
-            self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
-                let ct = Vector::new(0., top + height / 2.);
-                ui.fill_rect(
-                    Rect::new(-1., bar_y, dest, height),
-                    Color::new(0.45, 0.45, 0.45, bar_alpha),
-                );
-                ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color { a: color.a * c.a * bar_alpha, ..color });
             });
         }
         self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
@@ -1048,7 +1040,7 @@ impl GameScene {
                         NoteKind::Flick => NoteType::Flick,
                         NoteKind::Hold { .. } => {
                             if let JudgeStatus::Hold(_, _, _, _, up_time) = note.judge {
-                                if (t as f32) < up_time {
+                                if (t) < up_time {
                                     continue;
                                 }
                             }
@@ -1195,6 +1187,24 @@ impl Scene for GameScene {
             tm.resume();
         }
         Ok(())
+    }
+
+    fn touch(&mut self, tm: &mut TimeManager, touch: &Touch) -> Result<bool> {
+        if self.mode == GameMode::Exercise && tm.paused() {
+            let touch = Touch {
+                position: touch.position * self.touch_scale(),
+                ..touch.clone()
+            };
+            if self.exercise_btns.0.touch(&touch) {
+                request_input("exercise_start", &fmt_time(self.exercise_range.start));
+                return Ok(true);
+            }
+            if self.exercise_btns.1.touch(&touch) {
+                request_input("exercise_end", &fmt_time(self.exercise_range.end));
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
@@ -1378,7 +1388,7 @@ impl Scene for GameScene {
             let spacing = base_spacing / chart_ratio;
             let gap = 0.05 * chart_ratio;
             let target_base_y = gap;
-            
+
             let mut counters = self.judgement_counters.clone();
             counters.sort_by(|a, b| a.last_update.partial_cmp(&b.last_update).unwrap());
             // 遍历排序后的索引，为每个计数器计算目标垂直位置
@@ -1475,24 +1485,6 @@ impl Scene for GameScene {
         Ok(())
     }
 
-    fn touch(&mut self, tm: &mut TimeManager, touch: &Touch) -> Result<bool> {
-        if self.mode == GameMode::Exercise && tm.paused() {
-            let touch = Touch {
-                position: touch.position * self.touch_scale(),
-                ..touch.clone()
-            };
-            if self.exercise_btns.0.touch(&touch) {
-                request_input("exercise_start", &fmt_time(self.exercise_range.start));
-                return Ok(true);
-            }
-            if self.exercise_btns.1.touch(&touch) {
-                request_input("exercise_end", &fmt_time(self.exercise_range.end));
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
         let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
@@ -1573,8 +1565,28 @@ impl Scene for GameScene {
         if res.config.particle {
             res.emitter.draw(dt);
         }
-        
-        self.ui(ui, tm)?;
+
+        if !res.no_effect {
+            set_camera(&Camera2D {
+                zoom: vec2(1., asp2),
+                viewport: chart_target_vp,
+                render_target: chart_onto,
+                ..Default::default()
+            });
+            for effect in &self.chart.extra.effects {
+                effect.render(res);
+            }
+        }
+
+        {
+            set_camera(&Camera2D {
+                zoom: vec2_asp,
+                viewport: chart_target_vp,
+                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
+                ..Default::default()
+            });
+            self.ui(ui, tm)?;
+        }
 
         if !self.res.no_effect && !self.effects.is_empty() {
             set_camera(&Camera2D {
@@ -1618,6 +1630,7 @@ impl Scene for GameScene {
                     viewport: Some(ui.viewport),
                     ..Default::default()
                 });
+
                 draw_texture_ex(
                     target.output().texture,
                     -1.,
@@ -1632,6 +1645,7 @@ impl Scene for GameScene {
         } else {
             self.gl.flush();
         }
+
         Ok(())
     }
 

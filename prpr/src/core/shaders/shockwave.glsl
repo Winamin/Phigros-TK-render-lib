@@ -1,6 +1,6 @@
 #version 100
 // Adapted from https://www.shadertoy.com/view/llj3Dz
-precision highp float;
+precision mediump float;
 
 varying lowp vec2 uv;
 uniform vec2 screenSize;
