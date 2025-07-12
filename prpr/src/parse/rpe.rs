@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use macroquad::prelude::{Color, WHITE};
 use serde::Deserialize;
 use image::{codecs::gif, AnimationDecoder, DynamicImage};
-use std::{cell::RefCell, collections::HashMap, rc::Rc, str::FromStr, time::Duration};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 use crate::ext::SafeTexture;
 
 pub const RPE_WIDTH: f32 = 1350.;
