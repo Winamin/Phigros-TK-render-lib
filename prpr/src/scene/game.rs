@@ -569,7 +569,9 @@ impl GameScene {
         );
 
         if is_narrow {
-            pause_center.y += -0.012;
+            let narrow_factor1 = (BASE_ASPECT_RATIO - res.aspect_ratio) / (BASE_ASPECT_RATIO - 1.0);
+            let adjustment = -0.012 * (narrow_factor1 / 2.4).max(0.0);
+            pause_center.y += adjustment;
         }
 
         //score
@@ -579,7 +581,9 @@ impl GameScene {
         let mut score_y_offset = 0.07; // default
 
         if is_narrow {
-            score_top += -0.012;
+            let narrow_factor2 = (BASE_ASPECT_RATIO - res.aspect_ratio) / (BASE_ASPECT_RATIO - 1.0);
+            let adjustment = -0.012 / (narrow_factor2 * 2.4).max(0.0);
+            score_top += adjustment;
             //score_y_offset = 0.05;
         }
 
@@ -587,7 +591,9 @@ impl GameScene {
         let mut adjusted_score_y = actual_score_y;
 
         if is_narrow {
-            adjusted_score_y += -0.012;
+            let narrow_factor3 = (BASE_ASPECT_RATIO - res.aspect_ratio) / (BASE_ASPECT_RATIO - 1.0);
+            let adjustment = -0.012 / (narrow_factor3 * 2.4).max(0.0);
+            score_top += adjustment;
         }
 
         // name & level
@@ -1465,7 +1471,9 @@ impl Scene for GameScene {
                 let target_y = target_base_y - (i as f32 * spacing);
                 // 找到原始集合中对应的计数器并更新：
                 if let Some(counter) = self.judgement_counters.iter_mut().find(|c| c.note_type == target_counter.note_type) {
-                    counter.update(tm.now(), dt, target_y);
+                    if counter.current_alpha > 0.01 {
+                        counter.update(tm.now(), dt, target_y);
+                    }
                 }
             }
         }
