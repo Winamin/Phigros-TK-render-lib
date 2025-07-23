@@ -7,7 +7,6 @@ use crate::{
 
 use macroquad::prelude::*;
 //use ::rand::{thread_rng, Rng};
-use nalgebra::Matrix3;
 
 const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
@@ -181,7 +180,7 @@ impl Note {
             && self.object.dead()
     }
 
-    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix3<f32>, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
+    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
         self.object.set_time(res.time);
         let color = match &mut self.judge {
             JudgeStatus::Hold(perfect, ref mut at, ..) if res.time >= *at => {
@@ -212,14 +211,17 @@ impl Note {
         ctrl_obj.set_height((self.height - line_height + self.object.translation.1.now() / self.speed) * RPE_HEIGHT / 2.);
     }
 
-    pub fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Matrix3<f32> {
-        let incline_val = 1. - incline_sin * (base * res.aspect_ratio + self.object.translation.1.now()) * RPE_HEIGHT / 2. / 360.;
+    pub fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Matrix {
+        let incline_val = 1.0 - incline_sin * (base * res.aspect_ratio + self.object.translation.1.now()) *
+            RPE_HEIGHT * (1.0 / 720.0);
+
         let mut tr = self.object.now_translation(res);
         tr.x *= incline_val * ctrl_obj.pos.now_opt().unwrap_or(1.);
         tr.y += base;
-        let mut scale = self.object.scale.now_with_def(1., 1.);
-        scale.x *= ctrl_obj.size.now_opt().unwrap_or(1.);
-        self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr)
+
+        self.object.now_rotation()
+            .append_nonuniform_scaling(&self.object.scale.now_with_def(1., 1.))
+            .append_translation(&tr)
     }
     pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
@@ -238,11 +240,11 @@ impl Note {
         if config.invisible_time.is_finite() && self.time - config.invisible_time < res.time {
             return;
         }
-        let scale = (if self.multiple_hint {
+        let scale = res.note_width * if self.multiple_hint {
             res.res_pack.note_style_mh.click.width() / res.res_pack.note_style.click.width()
         } else {
             1.0
-        }) * res.note_width;
+        };
         let ctrl_obj = &mut config.ctrl_obj;
         self.init_ctrl_obj(ctrl_obj, config.line_height);
         let mut color = self.object.now_color();
