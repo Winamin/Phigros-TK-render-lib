@@ -249,7 +249,7 @@ impl Scene for EndingScene {
         let p_main = (1. - ran(t, START0, END0)).powi(6);
         tran(gl, p_main);
         let r = draw_illustration(*self.illustration, -0.372, -0.002, 1.052, 1.22, WHITE, true);
-        let main = Rect::new(r.right() - 0.053, r.y, r.w * 0.782, r.h / 2.);
+        let _main = Rect::new(r.right() - 0.053, r.y, r.w * 0.782, r.h / 2.);
         let slope = PARALLELOGRAM_SLOPE;
         let ratio = 0.2;
         draw_parallelogram_ex(

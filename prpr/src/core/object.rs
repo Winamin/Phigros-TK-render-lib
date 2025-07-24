@@ -1,6 +1,6 @@
 use super::{AnimFloat, AnimVector, Color, Matrix, Resource, Vector};
 use macroquad::prelude::*;
-use nalgebra::{Point2, Point3, Rotation2, Vector2, Vector3};
+use nalgebra::Rotation2;
 
 #[derive(Default)]
 pub struct Object {

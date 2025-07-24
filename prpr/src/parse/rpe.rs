@@ -12,7 +12,7 @@ use crate::{
     judge::JudgeStatus,
 };
 use anyhow::{Context, Result};
-use macroquad::prelude::{Color, WHITE};
+use macroquad::prelude::Color;
 use serde::Deserialize;
 use image::{codecs::gif, AnimationDecoder, DynamicImage};
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};

@@ -8,9 +8,10 @@ use crate::{
 use macroquad::prelude::*;
 //use ::rand::{thread_rng, Rng};
 
-const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
+//const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
+const RPE_HEIGHT_SCALE: f32 = RPE_HEIGHT * (1.0 / 720.0);
 
 #[derive(Clone, Debug)]
 pub enum NoteKind {
@@ -211,18 +212,20 @@ impl Note {
         ctrl_obj.set_height((self.height - line_height + self.object.translation.1.now() / self.speed) * RPE_HEIGHT / 2.);
     }
 
+    #[inline(always)]
     pub fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Matrix {
-        let incline_val = 1.0 - incline_sin * (base * res.aspect_ratio + self.object.translation.1.now()) *
-            RPE_HEIGHT * (1.0 / 720.0);
-
+        let translation_y = self.object.translation.1.now();
+        let aspect_base = base * res.aspect_ratio;
+        let incline_val = 1.0 - incline_sin * (aspect_base + translation_y) * RPE_HEIGHT_SCALE;
+        let ctrl_pos = ctrl_obj.pos.now_opt().unwrap_or(1.0);
         let mut tr = self.object.now_translation(res);
-        tr.x *= incline_val * ctrl_obj.pos.now_opt().unwrap_or(1.);
+        tr.x *= incline_val * ctrl_pos;
         tr.y += base;
-
         self.object.now_rotation()
-            .append_nonuniform_scaling(&self.object.scale.now_with_def(1., 1.))
+            .append_nonuniform_scaling(&self.object.scale.now_with_def(1.0, 1.0))
             .append_translation(&tr)
     }
+
     pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
             return;
