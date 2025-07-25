@@ -423,7 +423,7 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    const MAX_PARTICLES: usize = 200000;
+    const MAX_PARTICLES: usize = 800000;
 
     pub fn new(config: EmitterConfig) -> Emitter {
         let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
