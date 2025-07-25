@@ -91,7 +91,20 @@ impl TimeManager {
 
     pub fn update(&mut self, music_time: f64) {
         if self.adjust_time && self.real_time() > self.wait && self.pause_time.is_none() {
-            self.start_time -= (music_time - self.now()) * self.force;
+            let diff = music_time - self.now();
+            let abs_diff = diff.abs();
+
+            // 偏差越大，调整力度越强,最大10倍
+            let dynamic_factor = (1.0 + 10.0 * abs_diff).min(10.0);
+            let mut step = diff * self.force * dynamic_factor;
+            let max_step = 0.02;
+            if step > max_step {
+                step = max_step;
+            } else if step < -max_step {
+                step = -max_step;
+            }
+
+            self.start_time -= step;
         }
     }
 
