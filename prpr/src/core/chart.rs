@@ -55,38 +55,84 @@ impl Chart {
         }
     }
 
-    #[inline]
-    pub fn with_element<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, scale_point: Option<(f32, f32)>, rotation_point: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
-        if let Some(id) = self.attach_ui[element as usize - 1] {
-            let lines = &self.lines;
-            let line = &lines[id];
-            let obj = &line.object;
-            let mut tr = JudgeLine::fetch_pos(line, res, lines);
-            tr.y *= -res.aspect_ratio;
-            tr.x *= res.aspect_ratio;
-            let mut color = self.lines[id].color.now_opt().unwrap_or(WHITE);
-            color.a *= obj.now_alpha().max(0.);
-            let scale = obj.now_scale_fix(scale_point.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
-            let ro = obj.new_rotation_wrt_point(-obj.rotation.now().to_radians(), rotation_point.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x, y)));
-            ui.with(Matrix::new_translation(&tr) * ro * scale, |ui| f(ui, color))
-        } else {
-            f(ui, WHITE)
+    #[inline(always)]
+    pub fn with_element<R>(
+        &self,
+        ui: &mut Ui,
+        res: &Resource,
+        element: UIElement,
+        scale_point: Option<(f32, f32)>,
+        rotation_point: Option<(f32, f32)>,
+        f: impl FnOnce(&mut Ui, Color) -> R,
+    ) -> R {
+        let element_index = (element as usize).wrapping_sub(1);
+        if element_index >= self.attach_ui.len() {
+            return f(ui, WHITE);
         }
+        let Some(id) = self.attach_ui[element_index] else {
+            return f(ui, WHITE);
+        };
+        let lines = &self.lines;
+        let line = &lines[id];
+        let obj = &line.object;
+        let aspect_ratio = res.aspect_ratio;
+        let inv_aspect_ratio = 1.0 / aspect_ratio;
+        let mut tr = JudgeLine::fetch_pos(line, res, lines);
+        tr.y *= -aspect_ratio;
+        tr.x *= inv_aspect_ratio;
+        let mut color = line.color.now_opt().unwrap_or(WHITE);
+        let alpha = obj.now_alpha().max(0.);
+        color.a *= alpha;
+        let scale_point_vec = scale_point.map_or_else(
+            Vector::default,
+            |(x, y)| Vector::new(x, y)
+        );
+        let scale = obj.now_scale_fix(scale_point_vec);
+        let rotation_point_vec = rotation_point.map_or_else(
+            Vector::default,
+            |(x, y)| Vector::new(x, y)
+        );
+        let rotation_angle = -obj.rotation.now().to_radians();
+        let ro = obj.new_rotation_wrt_point(rotation_angle, rotation_point_vec);
+        let transform = Matrix::new_translation(&tr) * ro * scale;
+
+        ui.with(transform, |ui| f(ui, color))
     }
 
-    pub fn with_element_noscale<R>(&self, ui: &mut Ui, res: &Resource, element: UIElement, ct: Option<(f32, f32)>, f: impl FnOnce(&mut Ui, Color) -> R) -> R {
-        if let Some(id) = self.attach_ui[element as usize - 1] {
-            let obj = &self.lines[id].object;
-            let mut tr = obj.now_translation(res);
-            tr.y = -tr.y;
-            let mut color = self.lines[id].color.now_opt().unwrap_or(WHITE);
-            color.a *= obj.now_alpha().max(0.);
-            let mut scale = obj.now_scale_fix(ct.map_or_else(|| Vector::default(), |(x, y)| Vector::new(x , y)));
-            scale.m11 = 1.0;
-            ui.with(obj.now_rotation().append_translation(&tr) * scale, |ui| f(ui, color))
-        } else {
-            f(ui, WHITE)
+    #[inline(always)]
+    pub fn with_element_noscale<R>(
+        &self,
+        ui: &mut Ui,
+        res: &Resource,
+        element: UIElement,
+        ct: Option<(f32, f32)>,
+        f: impl FnOnce(&mut Ui, Color) -> R,
+    ) -> R {
+        let element_index = (element as usize).wrapping_sub(1);
+        if element_index >= self.attach_ui.len() {
+            return f(ui, WHITE);
         }
+
+        let Some(id) = self.attach_ui[element_index] else {
+            return f(ui, WHITE);
+        };
+        let line = &self.lines[id];
+        let obj = &line.object;
+        let mut tr = obj.now_translation(res);
+        tr.y = -tr.y;
+        let mut color = line.color.now_opt().unwrap_or(WHITE);
+        let alpha = obj.now_alpha().max(0.);
+        color.a *= alpha;
+        let ct_vec = ct.map_or_else(
+            Vector::default,
+            |(x, y)| Vector::new(x, y)
+        );
+        let mut scale = obj.now_scale_fix(ct_vec);
+        scale.m11 = 1.0;
+        let rotation = obj.now_rotation();
+        let transform = rotation * Matrix::new_translation(&tr) * scale;
+
+        ui.with(transform, |ui| f(ui, color))
     }
 
     pub async fn load_textures(&mut self, fs: &mut dyn FileSystem) -> Result<()> {
