@@ -62,33 +62,33 @@ pub struct RenderConfig<'a> {
 #[inline(always)]
 fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color: Color, mut params: DrawTextureParams, clip: bool) {
     let Vec2 { x: w, y: h } = params.dest_size.unwrap();
-    if h < 0. { return; }
-
-    if clip && y + h <= 0. { return; }
-
-    let mut p = [
-        Point::new(x, y),
-        Point::new(x + w, y),
-        Point::new(x + w, y + h),
-        Point::new(x, y + h)
-    ];
-
+    if h <= 0. || (clip && y + h <= 0.) {
+        return;
+    }
+    let mut source = params.source.unwrap_or(Rect::new(0., 0., 1., 1.));
     if clip && y < 0. {
         let visible_height = y + h;
-        if visible_height <= 0. { return; }
-
-        let r = (-y) / visible_height;
-        p[0].y = 0.;
-        p[1].y = 0.;
-
-        let mut source = params.source.unwrap_or(Rect::new(0., 0., 1., 1.));
-        source.y = source.y + source.h * r;
-        source.h = source.h * (1.0 - r);
-        params.source = Some(source);
+        if visible_height <= 0. {
+            return;
+        }
+        let visible_ratio = (-y) / visible_height;
+        source.y += source.h * visible_ratio;
+        source.h *= 1. - visible_ratio;
     }
+    const INIT_POINTS: [Point; 4] = [
+        Point::new(0., 0.),
+        Point::new(1., 0.),
+        Point::new(1., 1.),
+        Point::new(0., 1.),
+    ];
+
+    let p = INIT_POINTS.map(|pt| Point::new(x + pt.x * w, y + pt.y * h));
 
     params.flip_y = true;
-    draw_tex_pts(res, texture, order, p, color, params);
+    draw_tex_pts(res, texture, order, p, color, DrawTextureParams {
+        source: Some(source),
+        ..params
+    });
 }
 
 #[inline(always)]
@@ -140,13 +140,12 @@ fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], co
 }
 
 fn random_rotate() -> f32 {
-    static ANGLES: [f32; 4] = [0.0, 90.0, 180.0, 270.0];
-    let idx = unsafe {
-        let mut r: u32 = 0;
-        core::arch::x86_64::_rdrand32_step(&mut r);
-        r as usize % 4
-    };
-    ANGLES[idx]
+    // good good good good good good
+    static mut SEED: u32 = 0x12345678;
+    unsafe {
+        SEED = SEED.wrapping_mul(1664525).wrapping_add(1013904223);
+        (SEED % 4) as f32 * 90.0
+    }
 }
 
 fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Color) {
