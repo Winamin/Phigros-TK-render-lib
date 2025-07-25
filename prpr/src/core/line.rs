@@ -353,16 +353,20 @@ impl JudgeLine {
                             );
                         }
                         JudgeLineKind::Text(anim) => {
-                            let mut color = color.unwrap_or(WHITE);
-                            color.a = alpha.max(0.0);
+                            let mut base_color = color.unwrap_or(WHITE);
+                            if base_color.r == 0.0 && base_color.g == 0.0 && base_color.b == 0.0 && base_color.a == 0.0 {
+                                base_color = WHITE;
+                            }
+                            let mut final_color = base_color;
+                            final_color.a = alpha.max(0.0);
                             if res.config.chart_debug {
-                                color.a = 0.10 + 0.90 * color.a;
-                            } else if color.a == 0.0 {
+                                final_color.a = 0.10 + 0.90 * final_color.a;
+                            } else if final_color.a == 0.0 {
                                 return;
                             }
                             let now = anim.now();
                             res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |_| {
-                                draw_text_aligned(ui, &now, 0., 0., (0.5, 0.5), 1., color);
+                                draw_text_aligned(ui, &now, 0., 0., (0.5, 0.5), 1., final_color);
                             });
                         }
                         JudgeLineKind::Paint(anim, _state) => {
