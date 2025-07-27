@@ -535,6 +535,27 @@ impl GameScene {
         (screen_width() / screen_height()) / self.res.aspect_ratio
     }
 
+    fn calculate_adjusted_text_size(ui: &mut Ui, text: &str, initial_size: f32, max_width: f32) -> f32 {
+        const BASE_ASPECT_RATIO: f32 = 16.0 / 9.0;
+        let mut text_size = initial_size;
+
+        if (ui.viewport.2 as f32 / ui.viewport.3 as f32 - BASE_ASPECT_RATIO).abs() > 0.01 {
+            let text_width = ui.text(text).size(text_size).measure().w;
+
+            if text_width > max_width {
+                text_size *= max_width / text_width;
+            } else {
+                let scale_up = max_width / text_width;
+                let max_scale = 1.2;
+                let scale = scale_up.min(max_scale);
+                text_size *= scale;
+            }
+        }
+
+        text_size
+    }
+
+
     fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
         let time = tm.now() as f32;
         let p = match self.state {
@@ -643,45 +664,59 @@ impl GameScene {
                                     Some((-ct.x + 1. - margin, ct.y + score_top)),
                                     Some((1. - margin + 0.001, adjusted_score_y)),
                                     |ui, color| {
-                                        let mut text_size = 0.70867;
-                                        let mut text = ui.text(&score).size(text_size);
+                                        let initial_size = 0.70867;
                                         let max_width = 0.55;
-                                        let text_width = text.measure().w;
-                                        if text_width > max_width {
-                                            text_size *= max_width / text_width
-                                        }
-                                        drop(text);
+                                        let text_size = Self::calculate_adjusted_text_size(ui, &score, initial_size, max_width);
+
                                         ui.text(format!("{:07}", self.judge.score()))
                                             .pos(1. - margin + 0.001, adjusted_score_y)
                                             .anchor(1., 0.)
                                             .size(text_size)
                                             .color(Color { a: color.a * c.a, ..color })
-               .draw();
-            });
+                                            .draw();
+                                    });
         }
 
         if res.config.show_acc {
-            let mut acc_size = 0.4;
-            // if is_narrow {
-            //     acc_size *= 1.04;
-            //  }
+            let initial_size = 0.4;
+            let max_width = 0.45;
+            let acc_text = format!("{:05.2}%", self.judge.real_time_accuracy() * 100.);
+            let acc_size = Self::calculate_adjusted_text_size(ui, &acc_text, initial_size, max_width);
 
-            ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
+            ui.text(&acc_text)
                 .pos(1. - margin, score_top + score_y_offset)
                 .anchor(1., 0.)
                 .size(acc_size)
                 .color(semi_white(0.7))
                 .draw();
         }
-
+        
         if res.config.ui_pause {
-            self.chart.with_element(ui, res, UIElement::Pause, Some((pause_center.x, pause_center.y)), Some((pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2)), |ui, color| {
-                let mut r = Rect::new(pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2, pause_w, pause_h);
-                let c = Color { a: color.a * c.a, ..color };
-                ui.fill_rect(r, c);
-                r.x += pause_w * 2.;
-                ui.fill_rect(r, c);
-            });
+            self.chart.with_element(ui, res, UIElement::Pause,
+                                    Some((pause_center.x, pause_center.y)),
+                                    Some((pause_center.x - pause_w * 1.2, pause_center.y - pause_h / 2.2)),
+                                    |ui, color| {
+                                        let base_size = 0.011;
+                                        let aspect_ratio = screen_aspect();
+                                        let pause_w = if aspect_ratio < 1.4 {
+                                            base_size * 1.1
+                                        } else if aspect_ratio > 2.0 {
+                                            base_size * 0.85
+                                        } else {
+                                            base_size
+                                        };
+
+                                        let pause_h = pause_w * 3.4;
+
+                                        let y_offset = if aspect_ratio < 1.4 { -0.008 } else { 0.0 };
+                                        let rect_left = pause_center.x - pause_w * 1.2;
+                                        let rect_top = pause_center.y - pause_h / 2.2 + y_offset;
+
+                                        let c = Color { a: color.a * c.a, ..color };
+                                        ui.fill_rect(Rect::new(rect_left, rect_top, pause_w, pause_h), c);
+                                        ui.fill_rect(Rect::new(rect_left + pause_w * 2.0, rect_top, pause_w, pause_h), c);
+                                    }
+            );
         }
 
         let unit_h = ui.text("0").measure().h;
@@ -689,8 +724,6 @@ impl GameScene {
             if self.judge.combo() >= 3 {
                 let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
                     let mut text_size = 1.;
-
-
                     let max_width = 0.55;
                     let mut text = ui.text(&res.config.combo)
                         .pos(0., combo_top)
@@ -724,15 +757,10 @@ impl GameScene {
 
         if res.config.ui_name {
             self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
-                let mut text_size = 0.5;
-
-                let mut text = ui.text(&res.info.name).size(text_size);
+                let initial_size = 0.5;
                 let max_width = 0.9;
-                let text_width = text.measure().w;
-                if text_width > max_width {
-                    text_size *= max_width / text_width
-                }
-                drop(text);
+                let text_size = Self::calculate_adjusted_text_size(ui, &res.info.name, initial_size, max_width);
+
                 ui.text(&res.info.name)
                     .pos(lf, bt + (1. - p) * 0.4)
                     .anchor(0., 1.)
@@ -744,7 +772,9 @@ impl GameScene {
 
         if res.config.ui_level {
             self.chart.with_element(ui, res, UIElement::Level, Some((-lf - ct.x, bt - ct.y)), Some((1. - margin * 0.7, -top - eps * 2.)), |ui, color| {
-                let mut level_text_size = 0.5;
+                let initial_size = 0.5;
+                let max_width = 0.3;
+                let level_text_size = Self::calculate_adjusted_text_size(ui, &res.info.level, initial_size, max_width);
 
                 ui.text(&res.info.level)
                     .pos(-lf, bt + (1. - p) * 0.4)
@@ -757,7 +787,9 @@ impl GameScene {
 
         {
             let watermark = res.config.watermark.clone();
-            let mut watermark_size = 0.25;
+            let initial_size = 0.25;
+            let max_width = 1.8;
+            let watermark_size = Self::calculate_adjusted_text_size(ui, &watermark, initial_size, max_width);
 
             if res.config.chart_ratio >= 0.95 {
                 ui.text(&watermark)
@@ -800,36 +832,32 @@ impl GameScene {
                     Color::new(0.565, 0.565, 0.565, color.a * c.a * bar_alpha),
                 );
                 ui.fill_rect(Rect::new(-1. + dest - hw, bar_y, hw * 2., height), Color::new(1., 1., 1., color.a * c.a * bar_alpha));
+
+                if res.config.show_time_text {
+                    let progress = res.time / res.track_length;
+                    let corrected_progress = if progress >= 0.9999 { 1.0 } else { progress };
+                    let progress_percentage = (corrected_progress * 100.).min(100.);
+                    let truncated_percentage = ((progress_percentage * 10000.0).floor() / 10000.0).min(100.0);
+                    let progress_text = format!("{:.4}%", truncated_percentage);
+                    let parts: Vec<&str> = progress_text.split('.').collect();
+                    let current_time_text = fmt_time(res.time);
+                    let total_time_text = fmt_time(res.track_length);
+                    let time_text = format!("{}", current_time_text);
+
+                    let initial_size = 0.17867;
+                    let max_width = 0.2;
+                    let time_text_size = Self::calculate_adjusted_text_size(ui, &time_text, initial_size, max_width);
+
+                    ui.text(time_text)
+                        .pos(-1. + dest - 0.01, top + height / 2. - 0.0008)
+                        .anchor(1., 0.5)
+                        .size(time_text_size)
+                        .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
+                        .draw();
+                }
             });
         }
-        self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
-            let progress = res.time / res.track_length;
-            let corrected_progress = if progress >= 0.9999 { 1.0 } else { progress };
-            let progress_percentage = (corrected_progress * 100.).min(100.);
-            let truncated_percentage = ((progress_percentage * 10000.0).floor() / 10000.0).min(100.0);
-            let progress_text = format!("{:.4}%", truncated_percentage);
-            let parts: Vec<&str> = progress_text.split('.').collect();
-            let current_time_text = fmt_time(res.time);
-            let total_time_text = fmt_time(res.track_length);
-            let time_text = format!("{}", current_time_text);
 
-            if res.config.show_progress_text {
-                ui.text(progress_text)
-                    .pos(1. - margin, top + eps * 2.2 - (1. - p) * 0.4 + 0.07 + 0.01)
-                    .anchor(1., 0.)
-                    .size(0.4)
-                    .color(semi_white(0.7))
-                    .draw();
-            }
-            if res.config.show_time_text {
-                ui.text(time_text)
-                    .pos(-1. + dest - 0.01, top + height / 2. - 0.0008)
-                    .anchor(1., 0.5)
-                    .size(0.17867)
-                    .color(Color::new(1.0, 1.0, 1.0, color.a * c.a))
-                    .draw();
-            }
-        });
         self.draw_judgement_counters(ui, tm, score_top, 2.3);
         Ok(())
     }
