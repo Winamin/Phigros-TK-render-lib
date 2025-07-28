@@ -17,6 +17,7 @@ use serde::Deserialize;
 use image::{codecs::gif, AnimationDecoder, DynamicImage};
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 use crate::ext::SafeTexture;
+use crate::core::note::Hand;
 
 pub const RPE_WIDTH: f32 = 1350.;
 pub const RPE_HEIGHT: f32 = 900.;
@@ -316,6 +317,7 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
             // Set time and get height after calculating y_offset
             height.set_time(time);
             let note_height = height.now() + y_offset;
+            let normalized_x = note.position_x / (RPE_WIDTH / 2.0) - 1.0;
 
             Ok(Note {
                 object: Object {
@@ -362,7 +364,11 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
                     height.set_time(r.time(&note.start_time));
                     height.now() + y_offset
                 },
-
+                hand: if normalized_x < 0.0 {
+                    Hand::Left
+                } else {
+                    Hand::Right
+                },
                 above: note.above == 1,
                 multiple_hint: false,
                 fake: note.is_fake != 0,

@@ -15,6 +15,7 @@ use std::{
     ops::Deref,
     rc::Rc,
 };
+use crate::core::note::Hand;
 
 pub trait BinaryData: Sized {
     fn read_binary<R: Read>(r: &mut BinaryReader<R>) -> Result<Self>;
@@ -321,6 +322,7 @@ impl BinaryData for Note {
             end_speed: if r.read()? { r.read::<f32>()? } else { 1. },
             start_height: r.read()?,
             above: r.read()?,
+            hand: Hand::Left,
             multiple_hint: false,
             fake: r.read()?,
             judge: JudgeStatus::NotJudged,
