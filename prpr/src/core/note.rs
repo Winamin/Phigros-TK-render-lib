@@ -232,6 +232,115 @@ impl Note {
             .append_translation(&tr)
     }
 
+    pub fn assign_hands(notes: &mut [Note], rotation: f32) {
+        const LANE_SPLIT: f32 = 0.0;
+        const MAX_COMFORT_RADIUS: f32 = 0.25;
+        const MAX_STRETCH_RADIUS: f32 = 0.35;
+        const SAME_FINGER_PENALTY: f32 = 0.3;
+        const HAND_BALANCE_FACTOR: f32 = 0.2;
+
+        let rad = rotation.to_radians();
+        let cos = rad.cos();
+        let sin = rad.sin();
+
+        #[derive(Copy, Clone)]
+        struct Finger {
+            hand: Hand,
+            last_x: f32,
+            last_y: f32,
+            last_t: f32,
+            fatigue: f32,
+        }
+
+        let mut fingers = [
+            Finger { hand: Hand::Left,  last_x: -0.33, last_y: 0.0, last_t: -1.0, fatigue: 0.0 },
+            Finger { hand: Hand::Left,  last_x: -0.11, last_y: 0.0, last_t: -1.0, fatigue: 0.0 },
+            Finger { hand: Hand::Right, last_x:  0.11, last_y: 0.0, last_t: -1.0, fatigue: 0.0 },
+            Finger { hand: Hand::Right, last_x:  0.33, last_y: 0.0, last_t: -1.0, fatigue: 0.0 },
+        ];
+
+        let mut idx_time: Vec<(usize, f32, f32, f32)> = notes.iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let x = n.object.translation.0.now();
+                let y = n.object.translation.1.now();
+                let rotated_x = x * cos - y * sin;
+                let rotated_y = x * sin + y * cos;
+                (i, n.time, rotated_x, rotated_y)
+            })
+            .collect();
+        idx_time.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        let mut hand_usage = [0usize; 2]; // [left, right]
+
+        for &(idx, t, x, y) in &idx_time {
+            let natural_hand = if x < LANE_SPLIT { Hand::Left } else { Hand::Right };
+            let balance_factor = if natural_hand == Hand::Left {
+                HAND_BALANCE_FACTOR * (hand_usage[1] as f32 - hand_usage[0] as f32)
+            } else {
+                HAND_BALANCE_FACTOR * (hand_usage[0] as f32 - hand_usage[1] as f32)
+            };
+            let mut best_finger = 0;
+            let mut best_cost = f32::MAX;
+
+            for (i, finger) in fingers.iter_mut().enumerate() {
+                let dx = x - finger.last_x;
+                let dy = y - finger.last_y;
+                let distance = (dx * dx + dy * dy).sqrt();
+                let dt = t - finger.last_t;
+                let time_cost = if dt > 0.0 && dt < 0.15 {
+                    SAME_FINGER_PENALTY * (0.15 - dt) / 0.15
+                } else {
+                    0.0
+                };
+                let mut cost = distance + time_cost + finger.fatigue;
+                if finger.hand != natural_hand {
+                    cost += 0.3;
+                }
+                cost += balance_factor;
+                if distance > MAX_COMFORT_RADIUS {
+                    cost += (distance - MAX_COMFORT_RADIUS) * 2.0;
+                }
+                if distance > MAX_STRETCH_RADIUS {
+                    continue;
+                }
+                if cost < best_cost {
+                    best_cost = cost;
+                    best_finger = i;
+                }
+            }
+            let finger = &mut fingers[best_finger];
+            notes[idx].hand = finger.hand;
+
+            finger.last_x = x;
+            finger.last_y = y;
+            finger.last_t = t;
+            finger.fatigue += 0.1;
+            hand_usage[finger.hand as usize] += 1;
+
+            notes[idx].multiple_hint = {
+                const TIME_MARGIN: f32 = 0.01;
+                const POS_MARGIN: f32 = 0.06;
+                let simultaneous = idx_time.iter().any(|&(other_idx, other_t, other_x, other_y)| {
+                    other_idx != idx &&
+                        (other_t - t).abs() < TIME_MARGIN &&
+                        ((other_x - x).abs() < POS_MARGIN || (other_y - y).abs() < POS_MARGIN)
+                });
+
+                let alternating = idx_time.iter().any(|&(other_idx, other_t, _, _)| {
+                    other_idx != idx &&
+                        (other_t - t).abs() < 0.05 &&
+                        notes[other_idx].hand != notes[idx].hand
+                });
+
+                simultaneous || alternating
+            };
+        }
+
+        for finger in &mut fingers {
+            finger.fatigue = (finger.fatigue - 0.05).max(0.0);
+        }
+    }
+
     pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
             return;
@@ -257,22 +366,48 @@ impl Note {
         let ctrl_obj = &mut config.ctrl_obj;
         self.init_ctrl_obj(ctrl_obj, config.line_height);
         let mut color = self.object.now_color();
+
+        // 应用手序拆解颜色
         if res.config.hand_split {
+            const HAND_COLOR_SATURATION: f32 = 0.6; // 降低饱和度
+            const BASE_LUMINANCE: f32 = 0.7; // 提高基础亮度
+
             match self.hand {
                 Hand::Left => {
-                    // 红色
+                    // 左手 - 柔和的珊瑚色
                     color.r = 1.0;
-                    color.g *= 0.5;
-                    color.b *= 0.5;
+                    color.g = color.g.mul_add(0.5, 0.3).min(1.0); // 混合原始绿色+基础值
+                    color.b = color.b * 0.4; // 减少蓝色成分
                 }
                 Hand::Right => {
-                    //蓝色
+                    // 右手 - 柔和的淡蓝色
                     color.b = 1.0;
-                    color.r *= 0.5;
-                    color.g *= 0.5;
+                    color.g = color.g.mul_add(0.6, 0.3).min(1.0); // 保留部分绿色
+                    color.r = color.r * 0.4; // 减少红色成分
                 }
             }
+
+            // 亮度调整
+            let luminance = color.r * 0.299 + color.g * 0.587 + color.b * 0.114;
+            let adjust_factor = BASE_LUMINANCE / luminance.max(0.001);
+            color.r = (color.r * adjust_factor).min(1.0);
+            color.g = (color.g * adjust_factor).min(1.0);
+            color.b = (color.b * adjust_factor).min(1.0);
+
+            // 多押特效 - 更柔和的脉冲效果
+            if self.multiple_hint {
+                let pulse = (res.time * 4.0).sin().mul_add(0.15, 0.85); // 更缓和的脉冲(85%-100%)
+                color.r = (color.r * pulse).min(1.0);
+                color.g = (color.g * pulse).min(1.0);
+                color.b = (color.b * pulse).min(1.0);
+
+                // 添加微弱的发光效果
+                let glow = (res.time * 5.0).sin().abs() * 0.1;
+                color.a = (color.a * (1.0 + glow)).min(1.0);
+            }
         }
+
+        // 透明度计算保持不变
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
         let y_factor = ctrl_obj.y.now_opt().unwrap_or(1.);
         let spd = self.speed * y_factor;
