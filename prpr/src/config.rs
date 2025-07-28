@@ -76,6 +76,7 @@ pub struct Config {
     pub volume_music: f32,
     pub volume_sfx: f32,
     pub volume_bgm: f32,
+    pub hand_split: bool,
 
     // for compatibility
     pub autoplay: Option<bool>,
@@ -134,6 +135,7 @@ impl Default for Config {
             autoplay: None,
             show_progress_text: false,
             show_time_text: false,
+            hand_split: true,
 
             ui_score: true,
             ui_combo: true,

@@ -12,6 +12,7 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use std::cell::RefCell;
 use tracing::warn;
+use crate::core::note::Hand;
 
 trait Take {
     fn take_f32(&mut self) -> Result<f32>;
@@ -209,9 +210,14 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
     macro_rules! last_note {
         () => {{
             let Some(last_line) = last_line else {
-                                                        ptl!(bail "no-notes-inserted");
-                                                    };
-            lines[last_line].notes.last_mut().unwrap()
+                ptl!(bail "no-notes-inserted");
+            };
+            note.hand = if note.object.translation.0.now() < 0.0 {
+                Hand::Left
+            } else {
+                Hand::Right
+            };
+            note
         }};
     }
     let mut inner = |line: &str| -> Result<()> {
@@ -271,15 +277,31 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
 
                         above,
                         multiple_hint: false,
+                        hand: if position_x < 0.5 { Hand::Left } else { Hand::Right },
                         fake,
                         judge: JudgeStatus::NotJudged,
 			format: false,
                     });
                     if it.next() == Some("#") {
-                        last_note!().speed = it.take_f32()?;
+                        let last_line = last_line.unwrap();
+                        let line = &mut lines[last_line];
+                        let note = line.notes.last_mut().unwrap();
+                        note.hand = if note.object.translation.0.now() < 0.0 {
+                            Hand::Left
+                        } else {
+                            Hand::Right
+                        };
+                        note.speed = it.take_f32()?;
                     }
                     if it.next() == Some("&") {
-                        let note = last_note!();
+                        let last_line = last_line.unwrap();
+                        let line = &mut lines[last_line];
+                        let note = line.notes.last_mut().unwrap();
+                        note.hand = if note.object.translation.0.now() < 0.0 {
+                            Hand::Left
+                        } else {
+                            Hand::Right
+                        };
                         let size = it.take_f32()?;
                         if (size - 1.0).abs() >= EPS {
                             note.object.scale.0 = AnimFloat::fixed(size);
@@ -287,10 +309,25 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
                     }
                 }
                 '#' if cs.len() == 1 => {
-                    last_note!().speed = it.take_f32()?;
+                    let last_line = last_line.unwrap();
+                    let line = &mut lines[last_line];
+                    let note = line.notes.last_mut().unwrap();
+                    note.hand = if note.object.translation.0.now() < 0.0 {
+                        Hand::Left
+                    } else {
+                        Hand::Right
+                    };
+                    note.speed = it.take_f32()?;
                 }
                 '&' if cs.len() == 1 => {
-                    let note = last_note!();
+                    let last_line = last_line.unwrap();
+                    let line = &mut lines[last_line];
+                    let note = line.notes.last_mut().unwrap();
+                    note.hand = if note.object.translation.0.now() < 0.0 {
+                        Hand::Left
+                    } else {
+                        Hand::Right
+                    };
                     let size = it.take_f32()?;
                     if (size - 1.0).abs() >= EPS {
                         note.object.scale.0 = AnimFloat::fixed(size);

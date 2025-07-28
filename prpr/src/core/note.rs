@@ -21,6 +21,12 @@ pub enum NoteKind {
     Drag,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hand {
+    Left,
+    Right,
+}
+
 impl NoteKind {
     #[inline]
     pub fn order(&self) -> i8 {
@@ -41,6 +47,7 @@ pub struct Note {
     pub speed: f32,
     pub end_speed: f32,
     pub start_height: f32,
+    pub hand: Hand,
 
     pub above: bool,
     pub multiple_hint: bool,
@@ -250,12 +257,28 @@ impl Note {
         let ctrl_obj = &mut config.ctrl_obj;
         self.init_ctrl_obj(ctrl_obj, config.line_height);
         let mut color = self.object.now_color();
+        if res.config.hand_split {
+            match self.hand {
+                Hand::Left => {
+                    // 红色
+                    color.r = 1.0;
+                    color.g *= 0.5;
+                    color.b *= 0.5;
+                }
+                Hand::Right => {
+                    //蓝色
+                    color.b = 1.0;
+                    color.r *= 0.5;
+                    color.g *= 0.5;
+                }
+            }
+        }
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
         let y_factor = ctrl_obj.y.now_opt().unwrap_or(1.);
         let spd = self.speed * y_factor;
         let end_spd = self.end_speed * y_factor;
 
-        let inv_aspect = 1.0 / res.aspect_ratio; // 预计算倒数，避免除法
+        let inv_aspect = 1.0 / res.aspect_ratio;
         let line_height = config.line_height * inv_aspect * spd;
         let height = self.height * inv_aspect * spd;
         let base = height - line_height;

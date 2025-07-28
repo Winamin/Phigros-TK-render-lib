@@ -15,6 +15,7 @@ use serde::{Deserialize};
 use std::cell::RefCell;
 use tracing::warn;
 use anyhow::bail;
+use crate::core::note::Hand;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,7 +163,7 @@ fn parse_move_events(r: f32, mut pgr: Vec<PgrEvent>) -> Result<AnimVector> {
     }
     Ok(AnimVector(AnimFloat::new(kf1), AnimFloat::new(kf2)))
 }
-                     
+
 fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mut AnimFloat, above: bool) -> Result<Vec<Note>> {
     // is_sorted is unstable...
     if pgr.is_empty() {
@@ -203,7 +204,11 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                     height.set_time(time);
                     height.now()
                 },
-
+                hand: if pgr.position_x < 0.5 {
+                    Hand::Left
+                } else {
+                    Hand::Right
+                },
                 above,
                 multiple_hint: false,
                 fake: false,
