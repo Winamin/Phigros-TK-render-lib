@@ -247,6 +247,13 @@ impl JudgeLine {
             }
             true
         });
+        if res.config.hand_split {
+            let rot = self.object.rotation.now();
+            Note::assign_hands(&mut self.notes, rot);
+            self.height.set_time(res.time);
+            //let line_height = self.height.now();
+            //let mut ctrl_obj = self.ctrl_obj.borrow_mut();
+        }
     }
 
     pub fn fetch_pos(line: &JudgeLine, res: &Resource, lines: &[JudgeLine]) -> Vector {
