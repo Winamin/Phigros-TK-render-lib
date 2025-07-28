@@ -7,7 +7,7 @@ use crate::{
 
 use macroquad::prelude::*;
 //use ::rand::{thread_rng, Rng};
-
+use crate::core::Vector;
 //const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
@@ -233,111 +233,416 @@ impl Note {
     }
 
     pub fn assign_hands(notes: &mut [Note], rotation: f32) {
+        // 使用传入的 hand_split 参数
         const LANE_SPLIT: f32 = 0.0;
-        const MAX_COMFORT_RADIUS: f32 = 0.25;
-        const MAX_STRETCH_RADIUS: f32 = 0.35;
-        const SAME_FINGER_PENALTY: f32 = 0.3;
-        const HAND_BALANCE_FACTOR: f32 = 0.2;
+        //const MAX_COMFORT_RADIUS: f32 = 0.25;
+        const MAX_STRETCH_RADIUS: f32 = 0.38;
+        //const BASE_FINGER_SPEED: f32 = 1.2;
+        const FATIGUE_DECAY_RATE: f32 = 0.03;
+        //const HAND_BALANCE_FACTOR: f32 = 0.25;
+        const CROSS_HAND_PENALTY: f32 = 0.4;
+        const SAME_FINGER_PENALTY: f32 = 0.35;
+
+        const FINGER_COMFORT_ZONES: [f32; 4] = [0.28, 0.12, 0.12, 0.28];
+        const FINGER_DEXTERITY: [f32; 4] = [0.9, 1.0, 1.0, 0.9];
+
+        #[derive(Clone, Copy)]
+        struct FingerState {
+            id: usize,
+            hand: Hand,
+            position: Vector,
+            last_used_time: f32,
+            fatigue: f32,
+            travel_distance: f32,
+            activity_level: f32,
+            preferred_zone: f32,
+            comfort_radius: f32,
+        }
+
+        #[derive(Clone)]
+        struct NoteAssignment {
+            note_idx: usize,
+            finger_idx: usize,
+            cost: f32,
+            is_cross_hand: bool,
+        }
 
         let rad = rotation.to_radians();
         let cos = rad.cos();
         let sin = rad.sin();
 
-        #[derive(Copy, Clone)]
-        struct Finger {
-            hand: Hand,
-            last_x: f32,
-            last_y: f32,
-            last_t: f32,
-            fatigue: f32,
-        }
-
-        let mut fingers = [
-            Finger { hand: Hand::Left,  last_x: -0.33, last_y: 0.0, last_t: -1.0, fatigue: 0.0 },
-            Finger { hand: Hand::Left,  last_x: -0.11, last_y: 0.0, last_t: -1.0, fatigue: 0.0 },
-            Finger { hand: Hand::Right, last_x:  0.11, last_y: 0.0, last_t: -1.0, fatigue: 0.0 },
-            Finger { hand: Hand::Right, last_x:  0.33, last_y: 0.0, last_t: -1.0, fatigue: 0.0 },
+        let mut fingers = vec![
+            // 左手食指
+            FingerState {
+                id: 0,
+                hand: Hand::Left,
+                position: Vector::new(-0.35, 0.0),
+                last_used_time: -1.0,
+                fatigue: 0.0,
+                travel_distance: 0.0,
+                activity_level: 0.0,
+                preferred_zone: -0.35,
+                comfort_radius: FINGER_COMFORT_ZONES[0],
+            },
+            // 左手中指
+            FingerState {
+                id: 1,
+                hand: Hand::Left,
+                position: Vector::new(-0.15, 0.02),
+                last_used_time: -1.0,
+                fatigue: 0.0,
+                travel_distance: 0.0,
+                activity_level: 0.0,
+                preferred_zone: -0.15,
+                comfort_radius: FINGER_COMFORT_ZONES[1],
+            },
+            // 右手食指
+            FingerState {
+                id: 2,
+                hand: Hand::Right,
+                position: Vector::new(0.15, -0.02),
+                last_used_time: -1.0,
+                fatigue: 0.0,
+                travel_distance: 0.0,
+                activity_level: 0.0,
+                preferred_zone: 0.15,
+                comfort_radius: FINGER_COMFORT_ZONES[2],
+            },
+            // 右手中指
+            FingerState {
+                id: 3,
+                hand: Hand::Right,
+                position: Vector::new(0.35, 0.0),
+                last_used_time: -1.0,
+                fatigue: 0.0,
+                travel_distance: 0.0,
+                activity_level: 0.0,
+                preferred_zone: 0.35,
+                comfort_radius: FINGER_COMFORT_ZONES[3],
+            },
         ];
 
-        let mut idx_time: Vec<(usize, f32, f32, f32)> = notes.iter()
-            .enumerate()
-            .map(|(i, n)| {
-                let x = n.object.translation.0.now();
-                let y = n.object.translation.1.now();
-                let rotated_x = x * cos - y * sin;
-                let rotated_y = x * sin + y * cos;
-                (i, n.time, rotated_x, rotated_y)
-            })
-            .collect();
-        idx_time.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        let mut hand_usage = [0usize; 2]; // [left, right]
-
-        for &(idx, t, x, y) in &idx_time {
-            let natural_hand = if x < LANE_SPLIT { Hand::Left } else { Hand::Right };
-            let balance_factor = if natural_hand == Hand::Left {
-                HAND_BALANCE_FACTOR * (hand_usage[1] as f32 - hand_usage[0] as f32)
-            } else {
-                HAND_BALANCE_FACTOR * (hand_usage[0] as f32 - hand_usage[1] as f32)
-            };
-            let mut best_finger = 0;
-            let mut best_cost = f32::MAX;
-
-            for (i, finger) in fingers.iter_mut().enumerate() {
-                let dx = x - finger.last_x;
-                let dy = y - finger.last_y;
-                let distance = (dx * dx + dy * dy).sqrt();
-                let dt = t - finger.last_t;
-                let time_cost = if dt > 0.0 && dt < 0.15 {
-                    SAME_FINGER_PENALTY * (0.15 - dt) / 0.15
-                } else {
-                    0.0
-                };
-                let mut cost = distance + time_cost + finger.fatigue;
-                if finger.hand != natural_hand {
-                    cost += 0.3;
-                }
-                cost += balance_factor;
-                if distance > MAX_COMFORT_RADIUS {
-                    cost += (distance - MAX_COMFORT_RADIUS) * 2.0;
-                }
-                if distance > MAX_STRETCH_RADIUS {
-                    continue;
-                }
-                if cost < best_cost {
-                    best_cost = cost;
-                    best_finger = i;
-                }
-            }
-            let finger = &mut fingers[best_finger];
-            notes[idx].hand = finger.hand;
-
-            finger.last_x = x;
-            finger.last_y = y;
-            finger.last_t = t;
-            finger.fatigue += 0.1;
-            hand_usage[finger.hand as usize] += 1;
-
-            notes[idx].multiple_hint = {
-                const TIME_MARGIN: f32 = 0.01;
-                const POS_MARGIN: f32 = 0.06;
-                let simultaneous = idx_time.iter().any(|&(other_idx, other_t, other_x, other_y)| {
-                    other_idx != idx &&
-                        (other_t - t).abs() < TIME_MARGIN &&
-                        ((other_x - x).abs() < POS_MARGIN || (other_y - y).abs() < POS_MARGIN)
-                });
-
-                let alternating = idx_time.iter().any(|&(other_idx, other_t, _, _)| {
-                    other_idx != idx &&
-                        (other_t - t).abs() < 0.05 &&
-                        notes[other_idx].hand != notes[idx].hand
-                });
-
-                simultaneous || alternating
-            };
+        struct ProcessedNote {
+            idx: usize,
+            time: f32,
+            position: Vector,
+            natural_hand: Hand,
+            velocity: Vector,
+            complexity: f32,
         }
 
+        let mut processed_notes: Vec<ProcessedNote> = notes.iter()
+            .enumerate()
+            .map(|(i, note)| {
+                let raw_x = note.object.translation.0.now();
+                let raw_y = note.object.translation.1.now();
+                let rotated_x = raw_x * cos - raw_y * sin;
+                let rotated_y = raw_x * sin + raw_y * cos;
+
+                let natural_hand = if rotated_x < LANE_SPLIT {
+                    Hand::Left
+                } else {
+                    Hand::Right
+                };
+
+                const EPS: f32 = 0.001;
+                let t = note.time;
+                //let x_now = note.object.translation.0.now();
+                //let y_now = note.object.translation.1.now();
+
+                let mut temp_trans_x = note.object.translation.0.clone();
+                let mut temp_trans_y = note.object.translation.1.clone();
+
+                temp_trans_x.set_time(t + EPS);
+                let x_plus = temp_trans_x.now();
+                temp_trans_x.set_time(t - EPS);
+                let x_minus = temp_trans_x.now();
+                let dx = (x_plus - x_minus) / (2.0 * EPS);
+
+                temp_trans_y.set_time(t + EPS);
+                let y_plus = temp_trans_y.now();
+                temp_trans_y.set_time(t - EPS);
+                let y_minus = temp_trans_y.now();
+                let dy = (y_plus - y_minus) / (2.0 * EPS);
+
+                let velocity = Vector::new(
+                    dx * cos - dy * sin,
+                    dx * sin + dy * cos
+                );
+
+                let complexity = match note.kind {
+                    NoteKind::Click => 1.0,
+                    NoteKind::Drag => 1.3,
+                    NoteKind::Flick => 1.5,
+                    NoteKind::Hold { .. } => 1.7,
+                };
+
+                ProcessedNote {
+                    idx: i,
+                    time: note.time,
+                    position: Vector::new(rotated_x, rotated_y),
+                    natural_hand,
+                    velocity,
+                    complexity,
+                }
+            })
+            .collect();
+
+        processed_notes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+
+        let mut assignments: Vec<NoteAssignment> = Vec::new();
+        let mut hand_usage = [0.0f32; 2]; // [left, right]
+
+        for pnote in &processed_notes {
+            let mut candidate_fingers = Vec::new();
+
+            for (finger_idx, finger) in fingers.iter().enumerate() {
+                let delta_pos = pnote.position - finger.position;
+                let distance = delta_pos.magnitude();
+
+                if distance > MAX_STRETCH_RADIUS * 1.5 {
+                    continue;
+                }
+
+                let time_since_last = pnote.time - finger.last_used_time;
+                let is_same_finger_recent = time_since_last > 0.0 && time_since_last < 0.18;
+
+                let predicted_position = pnote.position + pnote.velocity * (pnote.time - pnote.velocity.magnitude().max(0.05));
+
+                let predicted_delta = predicted_position - finger.position;
+                let predicted_distance = predicted_delta.magnitude();
+
+                let mut cost = 0.0;
+                cost += predicted_distance * 1.2;
+
+                if is_same_finger_recent {
+                    let penalty_factor = (0.18 - time_since_last) / 0.18;
+                    cost += SAME_FINGER_PENALTY * penalty_factor * pnote.complexity;
+                }
+
+                cost += finger.fatigue * (0.5 + finger.activity_level * 0.3);
+
+                if finger.hand != pnote.natural_hand {
+                    cost += CROSS_HAND_PENALTY * (1.0 + distance * 0.5);
+                }
+
+                let comfort_factor = (predicted_distance / finger.comfort_radius).min(3.0);
+                if comfort_factor > 1.0 {
+                    cost += (comfort_factor - 1.0).powi(2) * 0.8;
+                }
+
+                let zone_diff = (predicted_position.x - finger.preferred_zone).abs();
+                if zone_diff < finger.comfort_radius * 0.6 {
+                    cost *= 0.85;
+                }
+
+                cost *= 1.1 - FINGER_DEXTERITY[finger.id] * 0.1;
+
+                candidate_fingers.push((finger_idx, cost));
+            }
+
+            if candidate_fingers.is_empty() {
+                candidate_fingers = fingers.iter()
+                    .enumerate()
+                    .map(|(i, _)| (i, f32::MAX))
+                    .collect();
+            }
+
+            candidate_fingers.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let (best_finger_idx, best_cost) = candidate_fingers[0];
+
+            let is_cross_hand = fingers[best_finger_idx].hand != pnote.natural_hand;
+            assignments.push(NoteAssignment {
+                note_idx: pnote.idx,
+                finger_idx: best_finger_idx,
+                cost: best_cost,
+                is_cross_hand,
+            });
+
+            let finger = &mut fingers[best_finger_idx];
+            finger.position = pnote.position;
+            finger.last_used_time = pnote.time;
+            finger.travel_distance += (pnote.position - finger.position).magnitude();
+            finger.activity_level = (finger.activity_level * 0.7 + 0.3).min(1.0);
+
+            let hand_idx = finger.hand as usize;
+            hand_usage[hand_idx] += pnote.complexity;
+        }
+
+        const MAX_OPTIMIZATION_PASSES: usize = 3;
+        let mut improved = true;
+        let mut pass_count = 0;
+
+        while improved && pass_count < MAX_OPTIMIZATION_PASSES {
+            improved = false;
+            pass_count += 1;
+
+            for i in 0..assignments.len() {
+                let original_assignment = &assignments[i];
+                if original_assignment.cost < 1.5 {
+                    continue;
+                }
+
+                let pnote = &processed_notes[original_assignment.note_idx];
+                let mut best_swap: Option<(usize, f32)> = None; // (swap_with, delta)
+
+                for j in 0..assignments.len() {
+                    if i == j { continue; }
+                    let other_note = &processed_notes[assignments[j].note_idx];
+                    if (pnote.time - other_note.time).abs() > 0.15 {
+                        continue;
+                    }
+                    let current_finger_i = assignments[i].finger_idx;
+                    let current_finger_j = assignments[j].finger_idx;
+                    let current_cost = assignments[i].cost + assignments[j].cost;
+                    let cost_i = calculate_note_finger_cost(pnote, &fingers[current_finger_j]);
+                    let cost_j = calculate_note_finger_cost(other_note, &fingers[current_finger_i]);
+                    let new_cost = cost_i + cost_j;
+                    if new_cost < current_cost * 0.85 {
+                        let improvement = current_cost - new_cost;
+                        if best_swap.map_or(true, |(_, delta)| improvement > delta) {
+                            best_swap = Some((j, improvement));
+                        }
+                    }
+                }
+                if let Some((swap_idx, _)) = best_swap {
+                    assignments.swap(i, swap_idx);
+                    improved = true;
+                    let finger_i = assignments[i].finger_idx;
+                    let finger_j = assignments[swap_idx].finger_idx;
+                    fingers[finger_i].position = pnote.position;
+                    fingers[finger_j].position = processed_notes[assignments[swap_idx].note_idx].position;
+                }
+            }
+        }
+        let mut finger_usage_count = [0usize; 4];
+
+        for assignment in &assignments {
+            let note_idx = assignment.note_idx;
+            let finger_idx = assignment.finger_idx;
+            notes[note_idx].hand = fingers[finger_idx].hand;
+            let finger = &mut fingers[finger_idx];
+            finger.last_used_time = processed_notes[note_idx].time;
+            finger.fatigue += 0.08 * processed_notes[note_idx].complexity;
+            finger.travel_distance += (processed_notes[note_idx].position - finger.position).magnitude();
+            finger.activity_level = (finger.activity_level * 0.6 + 0.4).min(1.0);
+            finger.position = processed_notes[note_idx].position;
+            finger_usage_count[finger_idx] += 1;
+            hand_usage[finger.hand as usize] += processed_notes[note_idx].complexity;
+        }
+        let mut time_groups: Vec<Vec<usize>> = Vec::new();
+        let mut current_group: Vec<usize> = Vec::new();
+        let mut last_time = -1.0;
+        for (i, pnote) in processed_notes.iter().enumerate() {
+            if current_group.is_empty() || (pnote.time - last_time) <= 0.015 {
+                current_group.push(i);
+            } else {
+                if current_group.len() > 1 {
+                    time_groups.push(current_group.clone());
+                }
+                current_group = vec![i];
+            }
+            last_time = pnote.time;
+        }
+
+        if current_group.len() > 1 {
+            time_groups.push(current_group);
+        }
+
+        for group in &time_groups {
+            let mut finger_used = [false; 4];
+            let mut hands_used = [false; 2];
+
+            for &note_idx in group {
+                let assignment_idx = assignments.iter()
+                    .position(|a| a.note_idx == note_idx)
+                    .unwrap();
+                let finger_idx = assignments[assignment_idx].finger_idx;
+                finger_used[finger_idx] = true;
+                hands_used[fingers[finger_idx].hand as usize] = true;
+            }
+            let is_simultaneous = group.len() > 1;
+            let is_alternating = hands_used[0] && hands_used[1];
+            let is_chord = finger_used.iter().filter(|&&used| used).count() >= 2;
+
+            if is_simultaneous || is_alternating || is_chord {
+                for &note_idx in group {
+                    notes[processed_notes[note_idx].idx].multiple_hint = true;
+                }
+            }
+        }
+
+        let total_hand_usage = hand_usage[0] + hand_usage[1];
+        let balance_ratio = if total_hand_usage > 0.0 {
+            (hand_usage[0] - hand_usage[1]).abs() / total_hand_usage
+        } else {
+            0.0
+        };
+        let dynamic_decay = FATIGUE_DECAY_RATE * (1.0 + balance_ratio * 0.5);
+
         for finger in &mut fingers {
-            finger.fatigue = (finger.fatigue - 0.05).max(0.0);
+            let usage_factor = finger_usage_count[finger.id] as f32 / processed_notes.len() as f32;
+            finger.fatigue = (finger.fatigue - dynamic_decay * (1.0 + usage_factor * 0.5)).max(0.0);
+            finger.activity_level *= 0.8;
+        }
+
+        let avg_left_x: f32 = fingers.iter()
+            .filter(|f| f.hand == Hand::Left)
+            .map(|f| f.position.x)
+            .sum::<f32>() / 2.0;
+
+        let avg_right_x: f32 = fingers.iter()
+            .filter(|f| f.hand == Hand::Right)
+            .map(|f| f.position.x)
+            .sum::<f32>() / 2.0;
+
+        for finger in &mut fingers {
+            if finger.hand == Hand::Left {
+                finger.preferred_zone = (finger.preferred_zone * 0.7 + avg_left_x * 0.3).clamp(-0.5, 0.0);
+            } else {
+                finger.preferred_zone = (finger.preferred_zone * 0.7 + avg_right_x * 0.3).clamp(0.0, 0.5);
+            }
+
+            finger.comfort_radius = FINGER_COMFORT_ZONES[finger.id] *
+                (1.0 - finger.activity_level * 0.2 + finger.fatigue * 0.1);
+        }
+
+        fn calculate_note_finger_cost(note: &ProcessedNote, finger: &FingerState) -> f32 {
+            let delta_pos = note.position - finger.position;
+            let distance = delta_pos.magnitude();
+
+            let time_since_last = note.time - finger.last_used_time;
+            let is_same_finger_recent = time_since_last > 0.0 && time_since_last < 0.18;
+
+            let mut cost = distance * 1.2;
+
+            if is_same_finger_recent {
+                let penalty_factor = (0.18 - time_since_last) / 0.18;
+                cost += SAME_FINGER_PENALTY * penalty_factor * note.complexity;
+            }
+
+            cost += finger.fatigue * (0.5 + finger.activity_level * 0.3);
+
+            if finger.hand != note.natural_hand {
+                cost += CROSS_HAND_PENALTY * (1.0 + distance * 0.5);
+            }
+
+            let comfort_factor = (distance / finger.comfort_radius).min(3.0);
+            if comfort_factor > 1.0 {
+                cost += (comfort_factor - 1.0).powi(2) * 0.8;
+            }
+
+            let zone_diff = (note.position.x - finger.preferred_zone).abs();
+            if zone_diff < finger.comfort_radius * 0.6 {
+                cost *= 0.85;
+            }
+
+            cost *= 1.1 - FINGER_DEXTERITY[finger.id] * 0.1;
+
+            cost
         }
     }
 
@@ -367,47 +672,27 @@ impl Note {
         self.init_ctrl_obj(ctrl_obj, config.line_height);
         let mut color = self.object.now_color();
 
-        // 应用手序拆解颜色
         if res.config.hand_split {
-            const HAND_COLOR_SATURATION: f32 = 0.6; // 降低饱和度
-            const BASE_LUMINANCE: f32 = 0.7; // 提高基础亮度
-
             match self.hand {
                 Hand::Left => {
-                    // 左手 - 柔和的珊瑚色
                     color.r = 1.0;
-                    color.g = color.g.mul_add(0.5, 0.3).min(1.0); // 混合原始绿色+基础值
-                    color.b = color.b * 0.4; // 减少蓝色成分
+                    color.g = 0.6;
+                    color.b = 0.7;
                 }
                 Hand::Right => {
-                    // 右手 - 柔和的淡蓝色
+                    color.r = 0.2;
+                    color.g = 0.5;
                     color.b = 1.0;
-                    color.g = color.g.mul_add(0.6, 0.3).min(1.0); // 保留部分绿色
-                    color.r = color.r * 0.4; // 减少红色成分
                 }
             }
-
-            // 亮度调整
+            const BASE_LUMINANCE: f32 = 0.7;
             let luminance = color.r * 0.299 + color.g * 0.587 + color.b * 0.114;
             let adjust_factor = BASE_LUMINANCE / luminance.max(0.001);
             color.r = (color.r * adjust_factor).min(1.0);
             color.g = (color.g * adjust_factor).min(1.0);
             color.b = (color.b * adjust_factor).min(1.0);
-
-            // 多押特效 - 更柔和的脉冲效果
-            if self.multiple_hint {
-                let pulse = (res.time * 4.0).sin().mul_add(0.15, 0.85); // 更缓和的脉冲(85%-100%)
-                color.r = (color.r * pulse).min(1.0);
-                color.g = (color.g * pulse).min(1.0);
-                color.b = (color.b * pulse).min(1.0);
-
-                // 添加微弱的发光效果
-                let glow = (res.time * 5.0).sin().abs() * 0.1;
-                color.a = (color.a * (1.0 + glow)).min(1.0);
-            }
         }
 
-        // 透明度计算保持不变
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
         let y_factor = ctrl_obj.y.now_opt().unwrap_or(1.);
         let spd = self.speed * y_factor;

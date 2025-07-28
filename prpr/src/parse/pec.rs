@@ -158,6 +158,7 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32) -> Result<J
         }
     });
     process_notes(&mut pec.notes);
+    Note::assign_hands(&mut pec.notes, 0.0);
     let cache = JudgeLineCache::new(&mut pec.notes);
     Ok(JudgeLine {
         object: Object {
