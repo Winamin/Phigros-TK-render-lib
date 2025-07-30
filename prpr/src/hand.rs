@@ -1,475 +1,568 @@
-use crate::core::{note::Hand, Note, Vector, NoteKind};
+use std::collections::HashMap;
+use crate::core::Note;
+use crate::core::note::Hand;
+use crate::core::NoteKind;
 
 pub fn assign_hands(notes: &mut [Note], rotation: f32) {
-    const LANE_SPLIT: f32 = 0.0;
-    const MAX_STRETCH_RADIUS: f32 = 0.38;
-    const FATIGUE_DECAY_RATE: f32 = 0.03;
-    const CROSS_HAND_PENALTY: f32 = 0.35; // 适中的交叉手惩罚
-    const SAME_FINGER_PENALTY: f32 = 0.4;  // 降低同指惩罚
-    const DENSITY_BONUS: f32 = 0.3;        // 密集区段奖励
-    const COOPERATION_BONUS: f32 = 0.25;   // 协作奖励
+    // 边界检查 - 防止空数组崩溃
+    if notes.is_empty() {
+        return;
+    }
 
-    // 优化的手指参数
-    const FINGER_COMFORT_ZONES: [f32; 4] = [0.28, 0.12, 0.12, 0.28];
-    const FINGER_DEXTERITY: [f32; 4] = [0.9, 1.0, 1.0, 0.9];
-    const FINGER_COOPERATION: [f32; 4] = [0.85, 1.0, 1.0, 0.85]; // 协作系数
+    // === 核心参数配置 ===
+    const COMFORT_ZONE_RADIUS: f32 = 0.25;
+    const MAX_COMFORTABLE_REACH: f32 = 0.45;
+    const FATIGUE_RECOVERY_RATE: f32 = 0.08;
+    const HAND_BALANCE_WEIGHT: f32 = 0.3;
+    const FLOW_CONTINUITY_BONUS: f32 = 0.4;
+    const SIMULTANEOUS_NOTE_TOLERANCE: f32 = 0.03;
+    const CROSS_HAND_PENALTY: f32 = 0.35;
+    const SAME_FINGER_PENALTY: f32 = 0.4;
 
-    #[derive(Clone, Copy)]
+    // 手指灵活度配置
+    const FINGER_AGILITY: [f32; 4] = [0.85, 1.0, 1.0, 0.85]; // 拇指,食指,食指,拇指
+    const FINGER_COMFORT_ZONES: [f32; 4] = [0.28, 0.15, 0.15, 0.28];
+    const FINGER_MAX_REACH: [f32; 4] = [0.4, 0.5, 0.5, 0.4];
+
+    /// 手指状态 - 简化但功能完整
+    #[derive(Clone)]
     struct FingerState {
         id: usize,
         hand: Hand,
-        position: Vector,
-        last_used_time: f32,
-        fatigue: f32,
-        travel_distance: f32,
-        activity_level: f32,
-        preferred_zone: f32,
-        comfort_radius: f32,
-        cooperation_score: f32, // 新增协作评分
+        position: Vector2,
+        comfort_center: Vector2,
+        max_reach: f32,
+        agility: f32,
+        current_fatigue: f32,
+        last_action_time: f32,
+        success_rate: f32,
+        recent_workload: f32,
     }
 
+    /// 音符分析数据
     #[derive(Clone)]
-    struct NoteAssignment {
-        note_idx: usize,
-        finger_idx: usize,
-        cost: f32,
-        is_cross_hand: bool,
-        in_dense_section: bool, // 新增密集区段标记
-    }
-
     struct ProcessedNote {
-        idx: usize,
+        index: usize,
         time: f32,
-        position: Vector,
+        position: Vector2,
+        velocity: Vector2,
+        difficulty: f32,
         natural_hand: Hand,
-        velocity: Vector,
-        complexity: f32,
-        density_score: f32, // 新增密度评分
+        density_score: f32,
+        is_simultaneous: bool,
+        pattern_complexity: f32,
     }
 
-    let rad = rotation.to_radians();
-    let cos = rad.cos();
-    let sin = rad.sin();
+    /// 分配结果
+    struct Assignment {
+        note_index: usize,
+        finger_id: usize,
+        cost: f32,
+        confidence: f32,
+    }
 
-    // 初始化手指状态
-    let mut fingers = vec![
-        // 左手食指
-        FingerState {
-            id: 0,
-            hand: Hand::Left,
-            position: Vector::new(-0.35, 0.0),
-            last_used_time: -1.0,
-            fatigue: 0.0,
-            travel_distance: 0.0,
-            activity_level: 0.0,
-            preferred_zone: -0.35,
-            comfort_radius: FINGER_COMFORT_ZONES[0],
-            cooperation_score: 1.0,
-        },
-        // 左手中指
-        FingerState {
-            id: 1,
-            hand: Hand::Left,
-            position: Vector::new(-0.15, 0.02),
-            last_used_time: -1.0,
-            fatigue: 0.0,
-            travel_distance: 0.0,
-            activity_level: 0.0,
-            preferred_zone: -0.15,
-            comfort_radius: FINGER_COMFORT_ZONES[1],
-            cooperation_score: 1.0,
-        },
-        // 右手食指
-        FingerState {
-            id: 2,
-            hand: Hand::Right,
-            position: Vector::new(0.15, -0.02),
-            last_used_time: -1.0,
-            fatigue: 0.0,
-            travel_distance: 0.0,
-            activity_level: 0.0,
-            preferred_zone: 0.15,
-            comfort_radius: FINGER_COMFORT_ZONES[2],
-            cooperation_score: 1.0,
-        },
-        // 右手中指
-        FingerState {
-            id: 3,
-            hand: Hand::Right,
-            position: Vector::new(0.35, 0.0),
-            last_used_time: -1.0,
-            fatigue: 0.0,
-            travel_distance: 0.0,
-            activity_level: 0.0,
-            preferred_zone: 0.35,
-            comfort_radius: FINGER_COMFORT_ZONES[3],
-            cooperation_score: 1.0,
-        },
-    ];
+    /// 场景检测器 - 自动识别最佳指法模式
+    struct ScenarioAnalyzer {
+        note_count: usize,
+        max_simultaneous: usize,
+        density_peaks: Vec<f32>,
+        complexity_score: f32,
+        hand_separation_ratio: f32,
+    }
 
-    // 处理音符数据
-    let mut processed_notes: Vec<ProcessedNote> = notes.iter()
-        .enumerate()
-        .map(|(i, note)| {
-            let raw_x = note.object.translation.0.now();
-            let raw_y = note.object.translation.1.now();
-            let rotated_x = raw_x * cos - raw_y * sin;
-            let rotated_y = raw_x * sin + raw_y * cos;
+    impl ScenarioAnalyzer {
+        fn analyze(notes: &[Note]) -> Self {
+            let mut analyzer = Self {
+                note_count: notes.len(),
+                max_simultaneous: 1,
+                density_peaks: Vec::new(),
+                complexity_score: 0.0,
+                hand_separation_ratio: 0.0,
+            };
 
-            let natural_hand = if rotated_x < LANE_SPLIT {
-                Hand::Left
+            analyzer.calculate_metrics(notes);
+            analyzer
+        }
+
+        fn calculate_metrics(&mut self, notes: &[Note]) {
+            if notes.is_empty() { return; }
+
+            // 计算密度峰值
+            let mut time_groups: Vec<Vec<usize>> = Vec::new();
+            let mut current_group = Vec::new();
+            let mut last_time = notes[0].time - 1.0;
+
+            for (i, note) in notes.iter().enumerate() {
+                if (note.time - last_time).abs() <= SIMULTANEOUS_NOTE_TOLERANCE {
+                    current_group.push(i);
+                } else {
+                    if !current_group.is_empty() {
+                        time_groups.push(current_group.clone());
+                    }
+                    current_group = vec![i];
+                }
+                last_time = note.time;
+            }
+            if !current_group.is_empty() {
+                time_groups.push(current_group);
+            }
+
+            // 分析同时音符
+            self.max_simultaneous = time_groups.iter()
+                .map(|group| group.len())
+                .max()
+                .unwrap_or(1);
+
+            // 计算复杂度
+            let mut total_complexity = 0.0;
+            for note in notes {
+                total_complexity += match note.kind {
+                    NoteKind::Click => 1.0,
+                    NoteKind::Drag => 1.4,
+                    NoteKind::Flick => 1.6,
+                    NoteKind::Hold { .. } => 1.8,
+                };
+            }
+            self.complexity_score = total_complexity / notes.len() as f32;
+
+            // 分析左右分布
+            let mut left_count = 0;
+            let mut right_count = 0;
+            for note in notes {
+                let x = note.object.translation.0.now();
+                if x < 0.0 { left_count += 1; } else { right_count += 1; }
+            }
+            let total = (left_count + right_count) as f32;
+            if total > 0.0 {
+                self.hand_separation_ratio = (left_count.min(right_count) as f32 * 2.0) / total;
+            }
+        }
+
+        fn recommend_finger_mode(&self) -> FingerMode {
+            // 智能推荐指法模式
+            if self.complexity_score > 1.4 || self.max_simultaneous >= 3 {
+                FingerMode::FourFinger
+            } else if self.hand_separation_ratio > 0.6 {
+                FingerMode::TwoFingerBalanced
             } else {
-                Hand::Right
-            };
-
-            // 计算速度
-            const EPS: f32 = 0.001;
-            let t = note.time;
-            let mut temp_trans_x = note.object.translation.0.clone();
-            let mut temp_trans_y = note.object.translation.1.clone();
-
-            temp_trans_x.set_time(t + EPS);
-            let x_plus = temp_trans_x.now();
-            temp_trans_x.set_time(t - EPS);
-            let x_minus = temp_trans_x.now();
-            let dx = (x_plus - x_minus) / (2.0 * EPS);
-
-            temp_trans_y.set_time(t + EPS);
-            let y_plus = temp_trans_y.now();
-            temp_trans_y.set_time(t - EPS);
-            let y_minus = temp_trans_y.now();
-            let dy = (y_plus - y_minus) / (2.0 * EPS);
-
-            let velocity = Vector::new(
-                dx * cos - dy * sin,
-                dx * sin + dy * cos
-            );
-
-            let complexity = match note.kind {
-                NoteKind::Click => 1.0,
-                NoteKind::Drag => 1.3,
-                NoteKind::Flick => 1.5,
-                NoteKind::Hold { .. } => 1.7,
-            };
-
-            ProcessedNote {
-                idx: i,
-                time: note.time,
-                position: Vector::new(rotated_x, rotated_y),
-                natural_hand,
-                velocity,
-                complexity,
-                density_score: 1.0, // 稍后计算
+                FingerMode::TwoFingerDominant
             }
-        })
-        .collect();
-
-    processed_notes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
-
-    // 计算密度评分 - 关键改进
-    for i in 0..processed_notes.len() {
-        let mut nearby_count = 0;
-        let current_time = processed_notes[i].time;
-
-        // 检查前后0.2秒内的音符数量
-        for j in 0..processed_notes.len() {
-            if i != j && (processed_notes[j].time - current_time).abs() < 0.2 {
-                nearby_count += 1;
-            }
-        }
-
-        processed_notes[i].density_score = (nearby_count as f32 * 0.1 + 1.0).min(2.0);
-    }
-
-    // 检测密集区段
-    let mut dense_sections = Vec::new();
-    let mut current_section_start = None;
-
-    for i in 0..processed_notes.len() {
-        if processed_notes[i].density_score > 1.3 {
-            if current_section_start.is_none() {
-                current_section_start = Some(i);
-            }
-        } else if let Some(start) = current_section_start {
-            if i - start >= 3 { // 至少3个音符
-                dense_sections.push((start, i - 1));
-            }
-            current_section_start = None;
         }
     }
 
-    if let Some(start) = current_section_start {
-        if processed_notes.len() - start >= 3 {
-            dense_sections.push((start, processed_notes.len() - 1));
+    #[derive(Clone, Copy, Debug)]
+    enum FingerMode {
+        TwoFingerDominant,   // 主手为主的双指
+        TwoFingerBalanced,   // 平衡双指
+        FourFinger,          // 四指模式
+    }
+
+    // === 主算法流程 ===
+
+    // 场景分析
+    let scenario = ScenarioAnalyzer::analyze(notes);
+    let finger_mode = scenario.recommend_finger_mode();
+
+    // 手指配置
+    let mut fingers = initialize_fingers(finger_mode, rotation);
+
+    // 音符预处理
+    let processed_notes = preprocess_notes(notes, rotation);
+
+    // 主分配循环
+    let assignments = assign_notes_optimally(&processed_notes, &mut fingers, finger_mode);
+
+    // 应用结果到原始音符数组
+    apply_assignments_safely(notes, &assignments, &fingers);
+
+    // === 实现函数 ===
+
+    fn initialize_fingers(mode: FingerMode, rotation: f32) -> Vec<FingerState> {
+        let rad = rotation.to_radians();
+        let cos_r = rad.cos();
+        let sin_r = rad.sin();
+
+        match mode {
+            FingerMode::TwoFingerDominant | FingerMode::TwoFingerBalanced => {
+                vec![
+                    // 左手食指
+                    FingerState {
+                        id: 0,
+                        hand: Hand::Left,
+                        position: Vector2::new(-0.25, 0.0),
+                        comfort_center: Vector2::new(-0.3, 0.0),
+                        max_reach: FINGER_MAX_REACH[1],
+                        agility: FINGER_AGILITY[1],
+                        current_fatigue: 0.0,
+                        last_action_time: -1.0,
+                        success_rate: 1.0,
+                        recent_workload: 0.0,
+                    },
+                    // 右手食指
+                    FingerState {
+                        id: 1,
+                        hand: Hand::Right,
+                        position: Vector2::new(0.25, 0.0),
+                        comfort_center: Vector2::new(0.3, 0.0),
+                        max_reach: FINGER_MAX_REACH[2],
+                        agility: FINGER_AGILITY[2],
+                        current_fatigue: 0.0,
+                        last_action_time: -1.0,
+                        success_rate: 1.0,
+                        recent_workload: 0.0,
+                    },
+                ]
+            },
+            FingerMode::FourFinger => {
+                vec![
+                    // 左拇指
+                    FingerState {
+                        id: 0,
+                        hand: Hand::Left,
+                        position: Vector2::new(-0.35, -0.05),
+                        comfort_center: Vector2::new(-0.4, 0.0),
+                        max_reach: FINGER_MAX_REACH[0],
+                        agility: FINGER_AGILITY[0],
+                        current_fatigue: 0.0,
+                        last_action_time: -1.0,
+                        success_rate: 0.95,
+                        recent_workload: 0.0,
+                    },
+                    // 左食指
+                    FingerState {
+                        id: 1,
+                        hand: Hand::Left,
+                        position: Vector2::new(-0.15, 0.05),
+                        comfort_center: Vector2::new(-0.2, 0.0),
+                        max_reach: FINGER_MAX_REACH[1],
+                        agility: FINGER_AGILITY[1],
+                        current_fatigue: 0.0,
+                        last_action_time: -1.0,
+                        success_rate: 1.0,
+                        recent_workload: 0.0,
+                    },
+                    // 右食指
+                    FingerState {
+                        id: 2,
+                        hand: Hand::Right,
+                        position: Vector2::new(0.15, -0.05),
+                        comfort_center: Vector2::new(0.2, 0.0),
+                        max_reach: FINGER_MAX_REACH[2],
+                        agility: FINGER_AGILITY[2],
+                        current_fatigue: 0.0,
+                        last_action_time: -1.0,
+                        success_rate: 1.0,
+                        recent_workload: 0.0,
+                    },
+                    // 右拇指
+                    FingerState {
+                        id: 3,
+                        hand: Hand::Right,
+                        position: Vector2::new(0.35, 0.05),
+                        comfort_center: Vector2::new(0.4, 0.0),
+                        max_reach: FINGER_MAX_REACH[3],
+                        agility: FINGER_AGILITY[3],
+                        current_fatigue: 0.0,
+                        last_action_time: -1.0,
+                        success_rate: 0.95,
+                        recent_workload: 0.0,
+                    },
+                ]
+            }
         }
     }
 
-    let mut assignments: Vec<NoteAssignment> = Vec::new();
-    let mut hand_usage = [0.0f32; 2];
+    fn preprocess_notes(notes: &[Note], rotation: f32) -> Vec<ProcessedNote> {
+        let rad = rotation.to_radians();
+        let cos_r = rad.cos();
+        let sin_r = rad.sin();
 
-    // 主分配循环 - 改进的成本计算
-    for pnote in &processed_notes {
-        let mut candidate_fingers = Vec::new();
+        let mut processed: Vec<ProcessedNote> = notes.iter()
+            .enumerate()
+            .map(|(i, note)| {
+                // 安全的位置获取
+                let raw_x = note.object.translation.0.now();
+                let raw_y = note.object.translation.1.now();
 
-        // 检查是否在密集区段
-        let in_dense_section = dense_sections.iter().any(|&(start, end)| {
-            let note_idx = processed_notes.iter().position(|p| p.idx == pnote.idx).unwrap();
-            note_idx >= start && note_idx <= end
-        });
+                // 旋转变换
+                let rotated_pos = Vector2::new(
+                    raw_x * cos_r - raw_y * sin_r,
+                    raw_x * sin_r + raw_y * cos_r
+                );
 
-        for (finger_idx, finger) in fingers.iter().enumerate() {
-            let delta_pos = pnote.position - finger.position;
-            let distance = delta_pos.magnitude();
+                // 安全的速度计算
+                let velocity = calculate_velocity_safely(note, cos_r, sin_r);
 
-            if distance > MAX_STRETCH_RADIUS * 1.5 {
-                continue;
-            }
+                // 难度评估
+                let difficulty = match note.kind {
+                    NoteKind::Click => 1.0,
+                    NoteKind::Drag => 1.4,
+                    NoteKind::Flick => 1.6,
+                    NoteKind::Hold { .. } => 1.8,
+                };
 
-            // 改进的预测位置计算
-            let prediction_time = if pnote.velocity.magnitude() > 0.1 { 0.1 } else { 0.05 };
-            let predicted_position = pnote.position + pnote.velocity * prediction_time;
-            let predicted_distance = (predicted_position - finger.position).magnitude();
+                ProcessedNote {
+                    index: i,
+                    time: note.time,
+                    position: rotated_pos,
+                    velocity,
+                    difficulty,
+                    natural_hand: if rotated_pos.x < 0.0 { Hand::Left } else { Hand::Right },
+                    density_score: 1.0, // 后续计算
+                    is_simultaneous: false, // 后续标记
+                    pattern_complexity: difficulty,
+                }
+            })
+            .collect();
 
-            let mut cost = predicted_distance * 1.0; // 降低基础距离权重
+        // 按时间排序
+        processed.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
 
-            // 同指惩罚 - 减少
-            let time_since_last = pnote.time - finger.last_used_time;
-            if time_since_last > 0.0 && time_since_last < 0.15 {
-                let penalty_factor = (0.15 - time_since_last) / 0.15;
-                cost += SAME_FINGER_PENALTY * penalty_factor * pnote.complexity * 0.8;
-            }
+        // 计算密度分数
+        for i in 0..processed.len() {
+            let mut nearby_count = 0;
+            let current_time = processed[i].time;
 
-            // 疲劳惩罚 - 考虑协作评分
-            cost += finger.fatigue * (0.4 + finger.activity_level * 0.2) / finger.cooperation_score;
-
-            // 交叉手惩罚 - 在密集区段中减少
-            if finger.hand != pnote.natural_hand {
-                let cross_penalty = CROSS_HAND_PENALTY;
-                let density_reduction = if in_dense_section { 0.6 } else { 1.0 };
-                cost += cross_penalty * (1.0 + distance * 0.3) * density_reduction;
-            }
-
-            // 舒适区计算
-            let comfort_factor = (predicted_distance / finger.comfort_radius).min(3.0);
-            if comfort_factor > 1.0 {
-                cost += (comfort_factor - 1.0).powi(2) * 0.6;
-            }
-
-            // 偏好区域奖励
-            let zone_diff = (predicted_position.x - finger.preferred_zone).abs();
-            if zone_diff < finger.comfort_radius * 0.7 {
-                cost *= 0.8;
-            }
-
-            // 密集区段奖励 - 关键改进
-            if in_dense_section {
-                cost *= 0.7; // 在密集区段中降低总成本
-
-                // 同手协作奖励
-                let same_hand_fingers: Vec<usize> = fingers.iter()
-                    .enumerate()
-                    .filter(|(_, f)| f.hand == finger.hand)
-                    .map(|(i, _)| i)
-                    .collect();
-
-                if same_hand_fingers.len() >= 2 {
-                    cost *= 1.0 - COOPERATION_BONUS * finger.cooperation_score;
+            for j in 0..processed.len() {
+                if i != j && (processed[j].time - current_time).abs() < 0.3 {
+                    nearby_count += 1;
                 }
             }
 
-            // 手指灵活性和协作系数
-            cost *= 1.1 - FINGER_DEXTERITY[finger.id] * 0.1 - FINGER_COOPERATION[finger.id] * 0.05;
-
-            candidate_fingers.push((finger_idx, cost));
+            processed[i].density_score = (nearby_count as f32 * 0.15 + 1.0).min(2.5);
         }
 
-        if candidate_fingers.is_empty() {
-            candidate_fingers = fingers.iter()
-                .enumerate()
-                .map(|(i, _)| (i, f32::MAX))
-                .collect();
+        // 标记同时音符
+        for i in 0..processed.len() {
+            for j in (i+1)..processed.len() {
+                if (processed[j].time - processed[i].time).abs() <= SIMULTANEOUS_NOTE_TOLERANCE {
+                    processed[i].is_simultaneous = true;
+                    processed[j].is_simultaneous = true;
+                } else {
+                    break;
+                }
+            }
         }
 
-        candidate_fingers.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let (best_finger_idx, best_cost) = candidate_fingers[0];
-
-        let is_cross_hand = fingers[best_finger_idx].hand != pnote.natural_hand;
-        assignments.push(NoteAssignment {
-            note_idx: pnote.idx,
-            finger_idx: best_finger_idx,
-            cost: best_cost,
-            is_cross_hand,
-            in_dense_section,
-        });
-
-        // 更新手指状态
-        let finger = &mut fingers[best_finger_idx];
-        let movement_distance = (pnote.position - finger.position).magnitude();
-
-        finger.position = pnote.position;
-        finger.last_used_time = pnote.time;
-        finger.travel_distance += movement_distance;
-        finger.activity_level = (finger.activity_level * 0.7 + 0.3).min(1.0);
-        finger.fatigue += 0.06 * pnote.complexity;
-
-        // 更新协作评分
-        if in_dense_section {
-            finger.cooperation_score = (finger.cooperation_score * 0.9 + 1.2 * 0.1).min(1.5);
-        }
-
-        let hand_idx = finger.hand as usize;
-        hand_usage[hand_idx] += pnote.complexity;
+        processed
     }
 
-    // 关键优化步骤 - swap优化（从原版本保留）
-    const MAX_OPTIMIZATION_PASSES: usize = 3;
-    let mut improved = true;
-    let mut pass_count = 0;
+    fn calculate_velocity_safely(note: &Note, cos_r: f32, sin_r: f32) -> Vector2 {
+        const EPS: f32 = 0.001;
+        let t = note.time;
 
-    while improved && pass_count < MAX_OPTIMIZATION_PASSES {
-        improved = false;
-        pass_count += 1;
+        // 创建临时拷贝来计算导数
+        let mut temp_x = note.object.translation.0.clone();
+        let mut temp_y = note.object.translation.1.clone();
 
-        for i in 0..assignments.len() {
-            let original_assignment = &assignments[i];
-            if original_assignment.cost < 1.2 { // 降低优化阈值
-                continue;
+        // 安全的导数计算
+        temp_x.set_time(t + EPS);
+        let x_plus = temp_x.now();
+        temp_x.set_time(t.max(EPS) - EPS); // 防止负时间
+        let x_minus = temp_x.now();
+        let dx = (x_plus - x_minus) / (2.0 * EPS);
+
+        temp_y.set_time(t + EPS);
+        let y_plus = temp_y.now();
+        temp_y.set_time(t.max(EPS) - EPS);
+        let y_minus = temp_y.now();
+        let dy = (y_plus - y_minus) / (2.0 * EPS);
+
+        // 旋转速度向量
+        Vector2::new(
+            dx * cos_r - dy * sin_r,
+            dx * sin_r + dy * cos_r
+        )
+    }
+
+    fn assign_notes_optimally(
+        processed_notes: &[ProcessedNote],
+        fingers: &mut [FingerState],
+        mode: FingerMode
+    ) -> Vec<Assignment> {
+        let mut assignments = Vec::new();
+        let mut hand_usage = [0.0f32; 2];
+
+        for pnote in processed_notes {
+            let mut best_finger = 0;
+            let mut best_cost = f32::INFINITY;
+
+            for (finger_idx, finger) in fingers.iter().enumerate() {
+                let cost = calculate_assignment_cost(pnote, finger, &hand_usage, mode);
+
+                if cost < best_cost {
+                    best_cost = cost;
+                    best_finger = finger_idx;
+                }
             }
 
-            let pnote = &processed_notes[original_assignment.note_idx];
-            let mut best_swap: Option<(usize, f32)> = None;
+            assignments.push(Assignment {
+                note_index: pnote.index,
+                finger_id: best_finger,
+                cost: best_cost,
+                confidence: calculate_confidence(best_cost),
+            });
 
-            for j in 0..assignments.len() {
-                if i == j { continue; }
-                let other_note = &processed_notes[assignments[j].note_idx];
-                if (pnote.time - other_note.time).abs() > 0.2 {
-                    continue;
+            // 更新手指状态
+            if best_finger < fingers.len() { // 边界检查
+                let finger = &mut fingers[best_finger];
+                let movement_distance = (pnote.position - finger.position).magnitude();
+
+                finger.position = pnote.position;
+                finger.last_action_time = pnote.time;
+                finger.current_fatigue += 0.05 * pnote.difficulty;
+                finger.recent_workload = (finger.recent_workload * 0.8 + pnote.difficulty * 0.2).min(2.0);
+
+                // 更新手部使用统计
+                let hand_idx = finger.hand as usize;
+                if hand_idx < hand_usage.len() { // 边界检查
+                    hand_usage[hand_idx] += pnote.difficulty;
                 }
+            }
+        }
 
-                let current_finger_i = assignments[i].finger_idx;
-                let current_finger_j = assignments[j].finger_idx;
-                let current_cost = assignments[i].cost + assignments[j].cost;
+        assignments
+    }
 
-                let cost_i = calculate_note_finger_cost(pnote, &fingers[current_finger_j]);
-                let cost_j = calculate_note_finger_cost(other_note, &fingers[current_finger_i]);
-                let new_cost = cost_i + cost_j;
+    fn calculate_assignment_cost(
+        note: &ProcessedNote,
+        finger: &FingerState,
+        hand_usage: &[f32; 2],
+        _mode: FingerMode
+    ) -> f32 {
+        let mut cost = 0.0;
 
-                if new_cost < current_cost * 0.9 { // 更宽松的swap条件
-                    let improvement = current_cost - new_cost;
-                    if best_swap.map_or(true, |(_, delta)| improvement > delta) {
-                        best_swap = Some((j, improvement));
+        // 1. 基础距离成本
+        let distance = (note.position - finger.position).magnitude();
+        let normalized_distance = (distance / finger.max_reach).min(2.0);
+        cost += normalized_distance * normalized_distance * 1.5;
+
+        // 2. 舒适区奖励
+        let comfort_distance = (note.position - finger.comfort_center).magnitude();
+        if comfort_distance <= COMFORT_ZONE_RADIUS {
+            cost *= 0.7; // 舒适区内操作奖励
+        }
+
+        // 3. 疲劳惩罚
+        cost += finger.current_fatigue * (1.0 + note.difficulty * 0.2);
+
+        // 4. 同指快速连击惩罚
+        let time_since_last = note.time - finger.last_action_time;
+        if time_since_last > 0.0 && time_since_last < 0.15 {
+            let penalty_factor = (0.15 - time_since_last) / 0.15;
+            cost += SAME_FINGER_PENALTY * penalty_factor * note.difficulty;
+        }
+
+        // 5. 交叉手惩罚
+        if finger.hand != note.natural_hand {
+            cost += CROSS_HAND_PENALTY * (1.0 + distance * 0.4);
+        }
+
+        // 6. 手部平衡考虑
+        let total_usage = hand_usage[0] + hand_usage[1];
+        if total_usage > 0.1 {
+            let hand_idx = finger.hand as usize;
+            let current_usage = hand_usage[hand_idx] / total_usage;
+            if current_usage > 0.65 {
+                cost *= 1.0 + (current_usage - 0.5) * HAND_BALANCE_WEIGHT;
+            }
+        }
+
+        // 7. 手指灵活度调整
+        cost /= finger.agility;
+
+        // 8. 成功率调整
+        cost /= finger.success_rate;
+
+        // 9. 密集区段奖励
+        if note.density_score > 1.5 {
+            cost *= 0.85; // 密集区段中稍微降低成本，鼓励连续操作
+        }
+
+        cost
+    }
+
+    fn calculate_confidence(cost: f32) -> f32 {
+        // 将成本转换为置信度 (0.0 - 1.0)
+        (1.0 / (1.0 + cost * 0.5)).min(1.0).max(0.0)
+    }
+
+    fn apply_assignments_safely(notes: &mut [Note], assignments: &[Assignment], fingers: &[FingerState]) {
+        for assignment in assignments {
+            // 严格边界检查
+            if assignment.note_index < notes.len() && assignment.finger_id < fingers.len() {
+                notes[assignment.note_index].hand = fingers[assignment.finger_id].hand;
+            }
+        }
+
+        // 同时音符检测和标记
+        mark_simultaneous_notes(notes);
+    }
+
+    fn mark_simultaneous_notes(notes: &mut [Note]) {
+        let mut time_groups: Vec<Vec<usize>> = Vec::new();
+        let mut current_group = Vec::new();
+        let mut last_time = if notes.is_empty() { 0.0 } else { notes[0].time - 1.0 };
+
+        for (i, note) in notes.iter().enumerate() {
+            if current_group.is_empty() || (note.time - last_time).abs() <= SIMULTANEOUS_NOTE_TOLERANCE {
+                current_group.push(i);
+            } else {
+                if current_group.len() > 1 {
+                    time_groups.push(current_group.clone());
+                }
+                current_group = vec![i];
+            }
+            last_time = note.time;
+        }
+
+        if current_group.len() > 1 {
+            time_groups.push(current_group);
+        }
+
+        // 标记同时音符
+        for group in time_groups {
+            if group.len() >= 2 {
+                for &note_idx in &group {
+                    if note_idx < notes.len() {
+                        notes[note_idx].multiple_hint = true;
                     }
                 }
             }
-
-            if let Some((swap_idx, _)) = best_swap {
-                assignments.swap(i, swap_idx);
-                improved = true;
-            }
         }
     }
 
-    // 应用分配结果
-    for assignment in &assignments {
-        let note_idx = assignment.note_idx;
-        let finger_idx = assignment.finger_idx;
-        notes[note_idx].hand = fingers[finger_idx].hand;
+    // === 辅助结构体和实现 ===
+
+    #[derive(Clone, Copy, Debug)]
+    struct Vector2 {
+        x: f32,
+        y: f32,
     }
 
-    // 同时音符检测（从原版本保留并改进）
-    let mut time_groups: Vec<Vec<usize>> = Vec::new();
-    let mut current_group: Vec<usize> = Vec::new();
-    let mut last_time = -1.0;
-
-    for (i, pnote) in processed_notes.iter().enumerate() {
-        if current_group.is_empty() || (pnote.time - last_time) <= 0.02 { // 稍微放宽时间窗口
-            current_group.push(i);
-        } else {
-            if current_group.len() > 1 {
-                time_groups.push(current_group.clone());
-            }
-            current_group = vec![i];
-        }
-        last_time = pnote.time;
+    impl Vector2 {
+        fn new(x: f32, y: f32) -> Self { Self { x, y } }
+        fn magnitude(&self) -> f32 { (self.x * self.x + self.y * self.y).sqrt() }
     }
 
-    if current_group.len() > 1 {
-        time_groups.push(current_group);
-    }
-
-    // 标记同时音符
-    for group in &time_groups {
-        let mut finger_used = [false; 4];
-        let mut hands_used = [false; 2];
-
-        for &note_idx in group {
-            let assignment_idx = assignments.iter()
-                .position(|a| a.note_idx == note_idx)
-                .unwrap();
-            let finger_idx = assignments[assignment_idx].finger_idx;
-            finger_used[finger_idx] = true;
-            hands_used[fingers[finger_idx].hand as usize] = true;
-        }
-
-        let is_simultaneous = group.len() > 1;
-        let is_alternating = hands_used[0] && hands_used[1];
-        let is_chord = finger_used.iter().filter(|&&used| used).count() >= 2;
-
-        if is_simultaneous || is_alternating || is_chord {
-            for &note_idx in group {
-                notes[processed_notes[note_idx].idx].multiple_hint = true;
-            }
+    impl std::ops::Sub for Vector2 {
+        type Output = Vector2;
+        fn sub(self, other: Vector2) -> Vector2 {
+            Vector2::new(self.x - other.x, self.y - other.y)
         }
     }
 
-    // 最终状态更新
-    let total_hand_usage = hand_usage[0] + hand_usage[1];
-    let balance_ratio = if total_hand_usage > 0.0 {
-        (hand_usage[0] - hand_usage[1]).abs() / total_hand_usage
-    } else {
-        0.0
-    };
-    let dynamic_decay = FATIGUE_DECAY_RATE * (1.0 + balance_ratio * 0.3);
-
-    for finger in &mut fingers {
-        finger.fatigue = (finger.fatigue - dynamic_decay).max(0.0);
-        finger.activity_level *= 0.85;
-        finger.cooperation_score = (finger.cooperation_score * 0.95 + 1.0 * 0.05).max(0.8);
+    impl std::ops::Add for Vector2 {
+        type Output = Vector2;
+        fn add(self, other: Vector2) -> Vector2 {
+            Vector2::new(self.x + other.x, self.y + other.y)
+        }
     }
 
-    // 成本计算函数（从原版本保留）
-    fn calculate_note_finger_cost(note: &ProcessedNote, finger: &FingerState) -> f32 {
-        let delta_pos = note.position - finger.position;
-        let distance = delta_pos.magnitude();
-
-        let time_since_last = note.time - finger.last_used_time;
-        let is_same_finger_recent = time_since_last > 0.0 && time_since_last < 0.15;
-
-        let mut cost = distance * 1.0;
-
-        if is_same_finger_recent {
-            let penalty_factor = (0.15 - time_since_last) / 0.15;
-            cost += SAME_FINGER_PENALTY * penalty_factor * note.complexity;
+    impl std::ops::Mul<f32> for Vector2 {
+        type Output = Vector2;
+        fn mul(self, scalar: f32) -> Vector2 {
+            Vector2::new(self.x * scalar, self.y * scalar)
         }
-
-        cost += finger.fatigue * (0.4 + finger.activity_level * 0.2);
-
-        if finger.hand != note.natural_hand {
-            cost += CROSS_HAND_PENALTY * (1.0 + distance * 0.3);
-        }
-
-        let comfort_factor = (distance / finger.comfort_radius).min(3.0);
-        if comfort_factor > 1.0 {
-            cost += (comfort_factor - 1.0).powi(2) * 0.6;
-        }
-
-        let zone_diff = (note.position.x - finger.preferred_zone).abs();
-        if zone_diff < finger.comfort_radius * 0.7 {
-            cost *= 0.8;
-        }
-
-        cost *= 1.1 - FINGER_DEXTERITY[finger.id] * 0.1;
-
-        cost
     }
 }
