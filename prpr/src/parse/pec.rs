@@ -13,6 +13,7 @@ use anyhow::{bail, Context, Result};
 use std::cell::RefCell;
 use tracing::warn;
 use crate::core::note::Hand;
+use crate::hand::assign_hands;
 
 trait Take {
     fn take_f32(&mut self) -> Result<f32>;
@@ -158,7 +159,7 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32) -> Result<J
         }
     });
     process_notes(&mut pec.notes);
-    Note::assign_hands(&mut pec.notes, 0.0);
+    assign_hands(&mut pec.notes, 0.0);
     let cache = JudgeLineCache::new(&mut pec.notes);
     Ok(JudgeLine {
         object: Object {

@@ -14,6 +14,8 @@ pub mod task;
 pub mod time;
 pub mod ui;
 
+pub mod hand;
+
 #[cfg(feature = "log")]
 pub mod log;
 

@@ -18,6 +18,7 @@ use image::{codecs::gif, AnimationDecoder, DynamicImage};
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 use crate::ext::SafeTexture;
 use crate::core::note::Hand;
+use crate::hand::assign_hands;
 
 pub const RPE_WIDTH: f32 = 1350.;
 pub const RPE_HEIGHT: f32 = 900.;
@@ -440,7 +441,7 @@ async fn parse_judge_line(
 
     let mut height = parse_speed_events(r, &event_layers, max_time)?;
     let mut notes = parse_notes(r, rpe.notes.unwrap_or_default(), &mut height)?;
-    Note::assign_hands(&mut notes, 0.0);
+    assign_hands(&mut notes, 0.0);
     let cache = JudgeLineCache::new(&mut notes);
 
     Ok(JudgeLine {

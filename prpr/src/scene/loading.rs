@@ -164,8 +164,6 @@ impl Scene for LoadingScene {
             draw_background(*self.background);
             draw_parallelogram(main, None, Color::new(0.0, 0.0, 0.0, 0.0), false);
 
-            /*
-
             let r = draw_illustration(
                 *self.illustration,
                 main.x + main.w / 2.0,
@@ -176,7 +174,7 @@ impl Scene for LoadingScene {
                 false
             );
 
-             */
+
             return Ok(());
         }
 

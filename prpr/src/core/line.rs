@@ -4,6 +4,7 @@ use crate::{
     ext::{draw_text_aligned, get_viewport, NotNanExt, SafeTexture},
     judge::{JudgeStatus, LIMIT_BAD},
     ui::Ui,
+    hand::assign_hands,
 };
 use macroquad::prelude::*;
 use miniquad::{RenderPass, Texture, TextureParams, TextureWrap, FilterMode};
@@ -249,7 +250,7 @@ impl JudgeLine {
         });
         if res.config.hand_split {
             let rot = self.object.rotation.now();
-            Note::assign_hands(&mut self.notes, rot);
+            assign_hands(&mut self.notes, rot);
             self.height.set_time(res.time);
             //let line_height = self.height.now();
             //let mut ctrl_obj = self.ctrl_obj.borrow_mut();
