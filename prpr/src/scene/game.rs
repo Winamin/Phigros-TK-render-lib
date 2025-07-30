@@ -402,10 +402,10 @@ impl GameScene {
         let gap = -1.0;
         let extra_offset = 0.8;
         let target_base_y = base_y - gap + extra_offset;
-    
+
         let mut counters = self.judgement_counters.clone();
         counters.sort_by(|a, b| a.last_update.partial_cmp(&b.last_update).unwrap());
-    
+
         for (i, counter) in counters.iter().enumerate() {
             let mut color = counter.color;
             color.a *= counter.current_alpha;
@@ -416,7 +416,7 @@ impl GameScene {
                 .anchor(0.5, 0.5)
                 .size((0.44 / chart_ratio))
                 .color(color)
-            .draw();
+                .draw();
         }
     }
 
@@ -459,8 +459,8 @@ impl GameScene {
             illustration,
             chart.extra.effects.is_empty() && effects.is_empty(),
         )
-        .await
-        .context("Failed to load resources")?;
+            .await
+            .context("Failed to load resources")?;
         let exercise_range = (chart.offset + info_offset + res.config.offset)..res.track_length;
 
         let judge = Judge::new(&chart);
@@ -1092,7 +1092,7 @@ impl GameScene {
         }
         Ok(())
     }
-    
+
     fn interactive(res: &Resource, state: &State) -> bool {
         res.config.interactive && matches!(state, State::Playing)
     }
@@ -1586,7 +1586,7 @@ impl Scene for GameScene {
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
         let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
-        
+
         let vp = res.camera.viewport.unwrap_or(ui.viewport);
         let asp2 = vp.2 as f32 / vp.3 as f32;
         let vec2_asp = vec2(1. * self.current_chart_ratio, -asp2 * self.current_chart_ratio);
@@ -1633,13 +1633,13 @@ impl Scene for GameScene {
                 Color::new(0., 0., 0., res.alpha * res.info.background_dim)
             );
         }
-        
+
         set_camera( &Camera2D {
             zoom: vec2_asp,
             viewport: chart_target_vp,
             ..Default::default()
         });
-        
+
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
         draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
         self.chart.render(ui, res);
@@ -1695,7 +1695,7 @@ impl Scene for GameScene {
                 e.render(&mut self.res);
             }
         }
-        
+
         {
             set_camera(&Camera2D {
                 zoom: vec2(1., -asp2),

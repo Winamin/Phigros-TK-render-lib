@@ -7,6 +7,7 @@ use crate::{
 
 use macroquad::prelude::*;
 //use ::rand::{thread_rng, Rng};
+
 //const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
