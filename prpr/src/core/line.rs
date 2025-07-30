@@ -452,68 +452,72 @@ impl JudgeLine {
             let height_below = p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) * res.aspect_ratio;
             let agg = res.config.aggressive;
 
-            // Above notes ?
-            for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| it.above) {
-                let note_height = note.height - config.line_height + note.object.translation.1.now();
-
-                if agg && note_height > height_above / note.speed {
-                    break;
-                }
-                if agg && note_height < height_below / note.speed {
-                    continue;
-                }
-                note.render(res, &mut config, bpm_list);
-            }
-
-            // up note
-            for index in &self.cache.above_indices {
-                let speed = self.notes[*index].speed;
-                for note in self.notes[*index..].iter() {
-                    if !note.above || note.speed != speed {
-                        break;
-                    }
-                    let note_height = note.height - config.line_height + note.object.translation.1.now();
-                    if agg && note_height > height_above / speed {
-                        break;
-                    }
-                    if agg && note_height < height_below / speed {
+            let mut height = self.height.clone();
+            if res.config.note_scale > 0. {
+                for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| it.above) {
+                    let line_height = {
+                        height.set_time(note.time.min(res.time));
+                        height.now()
+                    };
+                    let note_height = note.height - line_height + note.object.translation.1.now();
+                    if agg && note_height < height_below / note.speed  {
                         continue;
                     }
-                    note.render(res, &mut config, bpm_list);
-                }
-            }
-
-            // under note
-            res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
-                for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| !it.above) {
-                    let note_height = note.height - config.line_height + note.object.translation.1.now();
-
-                    if agg && note_height < -height_above / note.speed {
-                        continue;
-                    }
-                    if agg && note_height > -height_below / note.speed {
+                    if agg && note_height > height_above / note.speed  {
                         break;
                     }
                     note.render(res, &mut config, bpm_list);
                 }
-
-                for index in &self.cache.below_indices {
+                for index in &self.cache.above_indices {
                     let speed = self.notes[*index].speed;
                     for note in self.notes[*index..].iter() {
-                        if note.speed != speed {
+                        if !note.above || speed != note.speed {
                             break;
                         }
                         let note_height = note.height - config.line_height + note.object.translation.1.now();
-                        if agg && note_height < -height_above / speed {
+                        if agg && note_height < height_below / speed {
                             continue;
                         }
-                        if agg && note_height > -height_below / speed {
+                        if agg && note_height > height_above / speed {
                             break;
                         }
                         note.render(res, &mut config, bpm_list);
                     }
                 }
-            });
+
+                res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
+                    for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| !it.above) {
+                        let line_height = {
+                            height.set_time(note.time.min(res.time));
+                            height.now()
+                        };
+                        let note_height = note.height - line_height + note.object.translation.1.now();
+                        if agg && note_height < -height_above / note.speed {
+                            continue;
+                        }
+                        if agg && note_height > -height_below / note.speed {
+                            break;
+                        }
+                        note.render(res, &mut config, bpm_list);
+                    }
+                    for index in &self.cache.below_indices {
+                        let speed = self.notes[*index].speed;
+                        for note in self.notes[*index..].iter() {
+                            if speed != note.speed {
+                                break;
+                            }
+                            let note_height = note.height - config.line_height + note.object.translation.1.now();
+                            if agg && note_height < -height_above / speed {
+                                continue;
+                            }
+                            if agg && note_height > -height_below / speed {
+                                break;
+                            }
+                            note.render(res, &mut config, bpm_list);
+                        }
+                    }
+                });
+            }
             if res.config.chart_debug {
                 let pos = Self::fetch_pos(self, res, lines);
                 let rotation = self.object.rotation.now();
