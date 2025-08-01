@@ -20,11 +20,11 @@ pub fn assign_hands(notes: &mut [Note], rotation: f32) {
     const SAME_FINGER_PENALTY: f32 = 0.4;
 
     // 手指灵活度配置
-    const FINGER_AGILITY: [f32; 4] = [0.85, 1.0, 1.0, 0.85]; // 拇指,食指,食指,拇指
+    const FINGER_AGILITY: [f32; 4] = [0.15, 0.45, 0.60, 0.35]; // 中指,食指,食指,中指
     const FINGER_COMFORT_ZONES: [f32; 4] = [0.28, 0.15, 0.15, 0.28];
     const FINGER_MAX_REACH: [f32; 4] = [0.4, 0.5, 0.5, 0.4];
 
-    /// 手指状态 - 简化但功能完整
+    /// 手指状态
     #[derive(Clone)]
     struct FingerState {
         id: usize,
@@ -215,7 +215,7 @@ pub fn assign_hands(notes: &mut [Note], rotation: f32) {
             },
             FingerMode::FourFinger => {
                 vec![
-                    // 左拇指
+                    // 左中指
                     FingerState {
                         id: 0,
                         hand: Hand::Left,
@@ -254,7 +254,7 @@ pub fn assign_hands(notes: &mut [Note], rotation: f32) {
                         success_rate: 1.0,
                         recent_workload: 0.0,
                     },
-                    // 右拇指
+                    // 右中指
                     FingerState {
                         id: 3,
                         hand: Hand::Right,
@@ -280,7 +280,7 @@ pub fn assign_hands(notes: &mut [Note], rotation: f32) {
         let mut processed: Vec<ProcessedNote> = notes.iter()
             .enumerate()
             .map(|(i, note)| {
-                // 安全的位置获取
+                // 位置获取
                 let raw_x = note.object.translation.0.now();
                 let raw_y = note.object.translation.1.now();
 
@@ -290,7 +290,7 @@ pub fn assign_hands(notes: &mut [Note], rotation: f32) {
                     raw_x * sin_r + raw_y * cos_r
                 );
 
-                // 安全的速度计算
+                // 速度计算
                 let velocity = calculate_velocity_safely(note, cos_r, sin_r);
 
                 // 难度评估
@@ -432,33 +432,33 @@ pub fn assign_hands(notes: &mut [Note], rotation: f32) {
     ) -> f32 {
         let mut cost = 0.0;
 
-        // 1. 基础距离成本
+        // 基础距离成本
         let distance = (note.position - finger.position).magnitude();
         let normalized_distance = (distance / finger.max_reach).min(2.0);
         cost += normalized_distance * normalized_distance * 1.5;
 
-        // 2. 舒适区奖励
+        // 舒适区奖励
         let comfort_distance = (note.position - finger.comfort_center).magnitude();
         if comfort_distance <= COMFORT_ZONE_RADIUS {
             cost *= 0.7; // 舒适区内操作奖励
         }
 
-        // 3. 疲劳惩罚
+        // 疲劳惩罚
         cost += finger.current_fatigue * (1.0 + note.difficulty * 0.2);
 
-        // 4. 同指快速连击惩罚
+        // 同指快速连击惩罚
         let time_since_last = note.time - finger.last_action_time;
         if time_since_last > 0.0 && time_since_last < 0.15 {
             let penalty_factor = (0.15 - time_since_last) / 0.15;
             cost += SAME_FINGER_PENALTY * penalty_factor * note.difficulty;
         }
 
-        // 5. 交叉手惩罚
+        // 交叉手惩罚
         if finger.hand != note.natural_hand {
             cost += CROSS_HAND_PENALTY * (1.0 + distance * 0.4);
         }
 
-        // 6. 手部平衡考虑
+        // 手部平衡考虑
         let total_usage = hand_usage[0] + hand_usage[1];
         if total_usage > 0.1 {
             let hand_idx = finger.hand as usize;
@@ -468,13 +468,10 @@ pub fn assign_hands(notes: &mut [Note], rotation: f32) {
             }
         }
 
-        // 7. 手指灵活度调整
+        // 手指灵活度调整
         cost /= finger.agility;
-
-        // 8. 成功率调整
         cost /= finger.success_rate;
 
-        // 9. 密集区段奖励
         if note.density_score > 1.5 {
             cost *= 0.85; // 密集区段中稍微降低成本，鼓励连续操作
         }
@@ -532,7 +529,6 @@ pub fn assign_hands(notes: &mut [Note], rotation: f32) {
         }
     }
 
-    // === 辅助结构体和实现 ===
 
     #[derive(Clone, Copy, Debug)]
     struct Vector2 {

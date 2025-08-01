@@ -135,7 +135,7 @@ impl Default for Config {
             autoplay: None,
             show_progress_text: false,
             show_time_text: false,
-            hand_split: true,
+            hand_split: false,
 
             ui_score: true,
             ui_combo: true,

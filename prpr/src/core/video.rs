@@ -169,28 +169,30 @@ impl Video {
 }
 
 mod shader {
-    pub const VERTEX: &str = r#"#version 100
-attribute vec3 position;
-attribute vec2 texcoord;
-attribute vec4 color0;
+    pub const VERTEX: &str = r#"#version 300 es
+in vec3 position;
+in vec2 texcoord;
+in vec4 color0;
 
-varying lowp vec2 uv;
-varying lowp vec4 color;
+out vec2 uv;
+out vec4 color;
 
 uniform mat4 Model;
 uniform mat4 Projection;
 
 void main() {
-    gl_Position = Projection * Model * vec4(position, 1);
+    gl_Position = Projection * Model * vec4(position, 1.0);
     color = color0 / 255.0;
     uv = texcoord;
 }"#;
 
-    pub const FRAGMENT: &str = r#"#version 100
-precision lowp float;
+    pub const FRAGMENT: &str = r#"#version 300 es
+precision mediump float;
 
-varying lowp vec4 color;
-varying lowp vec2 uv;
+in vec4 color;
+in vec2 uv;
+
+out vec4 FragColor;
 
 uniform sampler2D tex_y;
 uniform sampler2D tex_u;
@@ -198,9 +200,9 @@ uniform sampler2D tex_v;
 
 void main() {
     vec3 yuv = vec3(
-        texture2D(tex_y, uv).a,
-        texture2D(tex_u, uv).a - 0.5,
-        texture2D(tex_v, uv).a - 0.5
+        texture(tex_y, uv).a,
+        texture(tex_u, uv).a - 0.5,
+        texture(tex_v, uv).a - 0.5
     );
     yuv.x = 1.1643 * (yuv.x - 0.0625);
     mat3 color_matrix = mat3(
@@ -209,6 +211,6 @@ void main() {
         vec3(1.0,   1.772,   0.0  )
     );
 
-    gl_FragColor = vec4(yuv * color_matrix, 1.0) * color;
+    FragColor = vec4(yuv * color_matrix, 1.0) * color;
 }"#;
 }
