@@ -23,8 +23,15 @@ use std::{
     task::{Poll, RawWaker, RawWakerVTable, Waker},
 };
 use tracing::{debug, info_span};
+use miniquad::gl::{
+    glGetIntegerv, glBindTexture, glTexParameteri,
+    GL_TEXTURE_2D,
+    GL_TEXTURE_MIN_FILTER,
+    GL_TEXTURE_MAG_FILTER,
+};
 
 pub type LocalTask<R> = Option<Pin<Box<dyn Future<Output = R>>>>;
+const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
 
 pub trait JoinToString {
     fn join(self, sep: &str) -> String;
@@ -90,6 +97,10 @@ impl Drop for SafeTextureInner {
 
 pub struct SafeTexture(Arc<SafeTextureInner>);
 impl SafeTexture {
+    pub fn get_tex(&self) -> &Texture2D {
+        &self.0.as_ref().0
+    }
+
     pub fn into_inner(self) -> Texture2D {
         let arc = self.0;
         let res = arc.0;
@@ -108,16 +119,23 @@ impl SafeTexture {
         self
     }
 
-    pub fn with_filter(self, filter: GLenum) -> Self{
+    pub fn with_filter(self, filter: GLenum) -> Self {
         let id = self.0 .0.raw_miniquad_texture_handle().gl_internal_id();
         unsafe {
-            use miniquad::gl::*;
+            let mut prev_binding: i32 = 0;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &mut prev_binding);
+
             glBindTexture(GL_TEXTURE_2D, id);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter as _);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter as _);
+
+            let filter_val = filter as i32;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter_val);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter_val);
+
+            glBindTexture(GL_TEXTURE_2D, prev_binding as u32);
         }
         self
     }
+
 
     pub fn from_image(img: &DynamicImage) -> Self {
         let rgba = img.to_rgba8();

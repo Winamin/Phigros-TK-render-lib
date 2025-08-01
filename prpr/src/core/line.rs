@@ -13,6 +13,12 @@ use serde::Deserialize;
 use std::{cell::RefCell, rc::Rc};
 use once_cell::sync::OnceCell;
 use std::sync::Mutex;
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+
+static TEXTURE_CACHE: Lazy<Mutex<HashMap<usize, Texture2D>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -102,10 +108,6 @@ impl JudgeLineCache {
     }
 }
 
-struct CachedTexture {
-    tex: Option<Texture2D>,
-}
-
 struct Painter {
     pass: RenderPass,
     viewport: (i32, i32, i32, i32),
@@ -121,23 +123,6 @@ pub struct GifFrames {
     frames: Vec<(u128, SafeTexture)>,
     /// milliseconds
     total_time: u128,
-}
-
-impl Default for CachedTexture {
-    fn default() -> Self {
-        CachedTexture {
-            tex: None,
-        }
-    }
-}
-
-impl CachedTexture {
-    fn get_or_create(&mut self, texture_ref: &Texture2D) -> &Texture2D {
-        if self.tex.is_none() {
-            self.tex = Some(texture_ref.clone());
-        }
-        self.tex.as_ref().unwrap()
-    }
 }
 
 impl GifFrames {
@@ -181,9 +166,7 @@ pub struct JudgeLine {
     pub attach_ui: Option<UIElement>,
 
     pub cache: JudgeLineCache,
-    pub anchor: [f32; 2],
 }
-
 
 impl Painter {
     pub fn new() -> Self {
@@ -407,11 +390,14 @@ impl JudgeLine {
                             } else {
                                 alpha
                             };
-                            let mut cached_texture = CachedTexture::default();
-                            let texture_2d = cached_texture.get_or_create(&**texture);
-                            let hf = vec2(texture.width(), texture.height());
+                            let key = texture.get_tex() as *const Texture2D as usize;
+                            let texture_2d = {
+                                let mut cache = TEXTURE_CACHE.lock().unwrap();
+                                cache.entry(key).or_insert_with(|| texture.get_tex().clone()).clone()
+                            };
+                            let hf = vec2(texture_2d.width(), texture_2d.height());
                             draw_texture_ex(
-                                *texture_2d,
+                                texture_2d,
                                 -hf.x / 2.,
                                 -hf.y / 2.,
                                 color,
@@ -469,25 +455,30 @@ impl JudgeLine {
                 })
             });
             if let JudgeLineKind::Paint(_, state) = &self.kind {
-                let gl = unsafe { get_internal_gl() };
-                let ctx = &gl.quad_context;
-                let guard = state.borrow_mut();
-                if let (true, Some(pass)) = (guard.1, &guard.0) {
-                    let tex = pass.texture(ctx);
-                    let top = 1. / res.aspect_ratio;
-                    draw_texture_ex(
-                        Texture2D::from_miniquad_texture(tex),
-                        -1.,
-                        -top,
-                        WHITE,
-                        DrawTextureParams {
-                            dest_size: Some(vec2(2., top * 2.)),
-                            ..Default::default()
-                        },
-                    );
-                }
-            }
+                let mut gl = unsafe { get_internal_gl() };
+                let ctx = &mut gl.quad_context;
 
+                let guard = state.borrow_mut();
+                let ready = guard.1;
+
+                if ready {
+                    if let Some(pass) = guard.0.as_ref() {
+                        let tex = pass.texture(ctx);
+                        let top = 1. / res.aspect_ratio;
+                        draw_texture_ex(
+                            Texture2D::from_miniquad_texture(tex),
+                            -1.,
+                            -top,
+                            WHITE,
+                            DrawTextureParams {
+                                dest_size: Some(vec2(2., top * 2.)),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+                // guard 会在这里被 drop
+            }
             let mut config = RenderConfig {
                 settings,
                 ctrl_obj: &mut self.ctrl_obj.borrow_mut(),

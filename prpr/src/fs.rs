@@ -5,7 +5,7 @@ use chardetng::EncodingDetector;
 use concat_string::concat_string;
 use macroquad::prelude::load_file;
 use serde::Deserialize;
-use serde_json::Value;
+//use serde_json::Value;
 use std::{
     any::Any,
     collections::HashMap,
@@ -333,8 +333,14 @@ pub async fn fix_info(fs: &mut dyn FileSystem, info: &mut ChartInfo) -> Result<(
     }
     if let Some(chart) = &chart {
         info.chart = chart.to_owned();
-        if let Ok(s) = String::from_utf8(fs.load_file(&info.chart).await?) {
-            if let Ok(mut value) = serde_json::from_str::<Value>(&s) {
+        if let Ok(bytes) = fs.load_file(&info.chart).await {
+            if let Ok((mut value, _s)) = tokio::task::spawn_blocking(move || {
+                let s = String::from_utf8(bytes)?;
+                let json: serde_json::Value = serde_json::from_str(&s)?;
+                Ok::<_, anyhow::Error>((json, s))
+            })
+                .await?
+            {
                 #[derive(Deserialize)]
                 struct RPEMeta {
                     name: String,
@@ -345,7 +351,8 @@ pub async fn fix_info(fs: &mut dyn FileSystem, info: &mut ChartInfo) -> Result<(
                     illustrator: Option<String>,
                     song: String,
                 }
-                if let Ok(mut meta) = serde_json::from_value::<RPEMeta>(value["META"].take()) {
+
+                if let Ok(meta) = serde_json::from_value::<RPEMeta>(value["META"].take()) {
                     info.name = meta.name;
                     infer_diff(info, &meta.level);
                     info.level = meta.level;
@@ -357,14 +364,15 @@ pub async fn fix_info(fs: &mut dyn FileSystem, info: &mut ChartInfo) -> Result<(
                         info.illustrator = val;
                     }
                     if illustration.is_none() {
-                        illustration = get(fs, &mut meta.background).await?;
+                        illustration = get(fs, &mut meta.background.clone()).await?;
                     }
                     if music.is_none() {
-                        music = get(fs, &mut meta.song).await?;
+                        music = get(fs, &mut meta.song.clone()).await?;
                     }
                 }
             }
         }
+
     } else {
         bail!("cannot find chart");
     }
