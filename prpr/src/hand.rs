@@ -4,12 +4,52 @@ use crate::core::note::Hand;
 use crate::core::NoteKind;
 
 pub fn assign_hands(notes: &mut [Note], rotation: f32) {
-    // 边界检查 - 防止空数组崩溃
-    if notes.is_empty() {
+    let config = crate::config::Config::default();
+
+    /*
+    如果 config 中的 hand_split 为 false，直接返回
+    byd这里不写个边界检查直接panic了
+    这里 notes 为空，直接返回
+     */
+
+    if !config.hand_split || notes.is_empty() {
         return;
     }
 
-    // === 核心参数配置 ===
+    /*
+     COMFORT_ZONE_RADIUS: 全局基础舒适区半径(0.25单位)
+     手指自然放置时的最佳操作范围，在此区域内操作成本最低
+
+     MAX_COMFORTABLE_REACH: 手指舒适操作的最大半径(0.45单位)
+     超过此距离会显著增加操作成本
+
+     FINGER_MAX_REACH: 各手指的最大理论可及范围 [左中,左食,右食,右中]
+     用于计算手指能否到达特定位置
+
+     FATIGUE_RECOVERY_RATE: 手指疲劳恢复速率(0.08/单位时间)
+     影响手指连续操作后的恢复速度
+
+     HAND_BALANCE_WEIGHT: 双手工作量平衡权重(0.3)
+     值越大越倾向于平衡双手的工作量
+
+     FLOW_CONTINUITY_BONUS: 连续操作奖励系数(0.4)
+     鼓励同一手指的流畅连续操作
+
+     SIMULTANEOUS_NOTE_TOLERANCE: 同时音符时间容差(0.03秒)
+     小于此时间差的音符被视为同时出现
+
+     CROSS_HAND_PENALTY: 交叉手操作惩罚系数(0.35)
+     当使用非自然手(左手点右侧/右手点左侧)时的额外成本
+
+     SAME_FINGER_PENALTY: 同指快速连击惩罚(0.4)
+     防止同一手指在短时间内重复操作
+
+     FINGER_AGILITY: 各手指的灵活度系数 [左中,左食,右食,右中]
+     影响不同手指的操作效率(食指通常比中指灵活)
+
+     FINGER_COMFORT_ZONES: 各手指的舒适区半径
+     在此区域内操作会有成本减免
+*/
     const COMFORT_ZONE_RADIUS: f32 = 0.25;
     const MAX_COMFORTABLE_REACH: f32 = 0.45;
     const FATIGUE_RECOVERY_RATE: f32 = 0.08;
@@ -21,7 +61,9 @@ pub fn assign_hands(notes: &mut [Note], rotation: f32) {
 
     // 手指灵活度配置
     const FINGER_AGILITY: [f32; 4] = [0.15, 0.45, 0.60, 0.35]; // 中指,食指,食指,中指
+    // 各手指舒适区半径(单位: 游戏坐标)
     const FINGER_COMFORT_ZONES: [f32; 4] = [0.28, 0.15, 0.15, 0.28];
+    // 各手指最大可及范围(单位: 游戏坐标)
     const FINGER_MAX_REACH: [f32; 4] = [0.4, 0.5, 0.5, 0.4];
 
     /// 手指状态
