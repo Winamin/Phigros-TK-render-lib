@@ -11,6 +11,8 @@ use miniquad::{RenderPass, Texture, TextureParams, TextureWrap, FilterMode};
 use nalgebra::Rotation2;
 use serde::Deserialize;
 use std::{cell::RefCell, rc::Rc};
+use once_cell::sync::OnceCell;
+use std::sync::Mutex;
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -100,11 +102,42 @@ impl JudgeLineCache {
     }
 }
 
+struct CachedTexture {
+    tex: Option<Texture2D>,
+}
+
+struct Painter {
+    pass: RenderPass,
+    viewport: (i32, i32, i32, i32),
+    cleared: bool,
+    last_color_alpha: f32,
+    last_size: f32,
+    cached_texture: Option<Texture>,
+    cached_pass: Option<RenderPass>,
+}
+
 pub struct GifFrames {
     /// time of each frame in milliseconds
     frames: Vec<(u128, SafeTexture)>,
     /// milliseconds
     total_time: u128,
+}
+
+impl Default for CachedTexture {
+    fn default() -> Self {
+        CachedTexture {
+            tex: None,
+        }
+    }
+}
+
+impl CachedTexture {
+    fn get_or_create(&mut self, texture_ref: &Texture2D) -> &Texture2D {
+        if self.tex.is_none() {
+            self.tex = Some(texture_ref.clone());
+        }
+        self.tex.as_ref().unwrap()
+    }
 }
 
 impl GifFrames {
@@ -148,42 +181,79 @@ pub struct JudgeLine {
     pub attach_ui: Option<UIElement>,
 
     pub cache: JudgeLineCache,
+    pub anchor: [f32; 2],
 }
 
-struct Painter {
-    pass: RenderPass,
-    viewport: (i32, i32, i32, i32),
-    cleared: bool,
-}
 
 impl Painter {
-    fn new() -> Self {
-        let mut gl = unsafe { get_internal_gl() };
-        let vp = get_viewport();
-        let tex = Texture::new_render_texture(
-            &mut gl.quad_context,
-            TextureParams {
-                width: vp.2 as _,
-                height: vp.3 as _,
-                format: miniquad::TextureFormat::RGBA8,
-                filter: FilterMode::Linear,
-                wrap: TextureWrap::Clamp,
-            },
-        );
-        let pass = RenderPass::new(&mut gl.quad_context, tex, None);
-        Painter { pass, viewport: vp, cleared: false }
+    pub fn new() -> Self {
+        static CACHE: OnceCell<Mutex<(RenderPass, Texture, (i32, i32, i32, i32))>> = OnceCell::new();
+
+        let (pass, tex, vp) = {
+            let mut gl = unsafe { get_internal_gl() };
+            let _vp = get_viewport();
+
+            let cache = CACHE.get_or_init(|| {
+                let mut _gl = unsafe { get_internal_gl() };
+                let vp = get_viewport();
+
+                let tex = Texture::new_render_texture(
+                    &mut gl.quad_context,
+                    TextureParams {
+                        width: vp.2 as _,
+                        height: vp.3 as _,
+                        format: miniquad::TextureFormat::RGBA8,
+                        filter: FilterMode::Linear,
+                        wrap: TextureWrap::Clamp,
+                    },
+                );
+
+                let pass = RenderPass::new(&mut gl.quad_context, tex.clone(), None);
+
+                Mutex::new((pass, tex, vp))
+            });
+
+            let guard = cache.lock().unwrap();
+            (guard.0.clone(), guard.1.clone(), guard.2)
+        };
+
+        Painter {
+            pass,
+            viewport: vp,
+            cleared: false,
+            last_color_alpha: -1.0,
+            last_size: -1.0,
+            cached_texture: Some(tex),
+            cached_pass: Some(pass),
+        }
     }
 
     fn paint(&mut self, ui: &mut Ui, size: f32, alpha: f32, mut color: Color) {
-        let gl = unsafe { get_internal_gl() };
-        let old_pass = gl.quad_gl.get_active_render_pass();
+        let mut gl = unsafe { get_internal_gl() };
+        let ctx = &mut gl.quad_context;
+        if let Some(cached_texture) = &self.cached_texture {
+            if cached_texture != &self.pass.texture(ctx) {
+                self.cached_texture = Some(self.pass.texture(ctx).clone());
+            }
+        }
+        if let Some(cached_pass) = &self.cached_pass {
+            if cached_pass != &self.pass {
+                self.cached_pass = Some(self.pass.clone());
+            }
+        }
         if self.cleared {
-            gl.quad_gl.render_pass(Some(self.pass));
+            if let Some(ref pass) = self.cached_pass {
+                gl.quad_gl.render_pass(Some(pass.clone()));
+            }
             gl.quad_gl.viewport(Some(self.viewport));
         }
         let new_alpha = alpha.max(0.0) * 2.55;
-        if color.a != new_alpha {
+        if self.last_color_alpha != new_alpha {
             color.a = new_alpha;
+            self.last_color_alpha = new_alpha;
+        }
+        if size != self.last_size {
+            self.last_size = size;
         }
         if size <= 0.0 {
             if !self.cleared {
@@ -195,11 +265,15 @@ impl Painter {
             ui.fill_circle(0., 0., radius, color);
             self.cleared = true;
         }
-        gl.quad_gl.render_pass(old_pass);
+        if let Some(ref pass) = self.cached_pass {
+            gl.quad_gl.render_pass(Some(pass.clone()));
+        }
         gl.quad_gl.viewport(Some(self.viewport));
     }
 }
 
+unsafe impl Sync for JudgeLine {}
+unsafe impl Send for JudgeLine {}
 
 impl JudgeLine {
     pub fn update(&mut self, res: &mut Resource, tr: Matrix, bpm_list: &mut BpmList, index: usize) {
@@ -286,6 +360,7 @@ impl JudgeLine {
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
         let color = self.color.now_opt();
         let painter_state: Rc<RefCell<Option<Painter>>> = Rc::new(RefCell::new(None));
+
         res.with_model(self.now_transform(res, lines), |res| {
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| {
@@ -319,26 +394,29 @@ impl JudgeLine {
                             }
                         }
                         JudgeLineKind::Texture(texture, _) => {
-                            let texture_ref = **texture;
                             let alpha = alpha.max(0.0);
                             if alpha == 0.0 && !res.config.chart_debug {
                                 return;
                             }
-                            let mut final_color = color.unwrap_or(WHITE);
-                            final_color.a = if res.config.chart_debug {
+                            let mut color = color.unwrap_or(WHITE);
+                            if res.time <= 0. && matches!(color, WHITE) {
+                                color = BLACK;
+                            }
+                            color.a = if res.config.chart_debug {
                                 0.10 + 0.90 * alpha
                             } else {
                                 alpha
                             };
-                            let (w, h) = (texture_ref.width() as f32, texture_ref.height() as f32);
-                            let half_size = vec2(w * 0.5, h * 0.5);
+                            let mut cached_texture = CachedTexture::default();
+                            let texture_2d = cached_texture.get_or_create(&**texture);
+                            let hf = vec2(texture.width(), texture.height());
                             draw_texture_ex(
-                                texture_ref,
-                                -half_size.x,
-                                -half_size.y,
-                                final_color,
+                                *texture_2d,
+                                -hf.x / 2.,
+                                -hf.y / 2.,
+                                color,
                                 DrawTextureParams {
-                                    dest_size: Some(vec2(w, h)),
+                                    dest_size: Some(hf),
                                     flip_y: true,
                                     ..Default::default()
                                 },
@@ -391,10 +469,11 @@ impl JudgeLine {
                 })
             });
             if let JudgeLineKind::Paint(_, state) = &self.kind {
+                let gl = unsafe { get_internal_gl() };
+                let ctx = &gl.quad_context;
                 let guard = state.borrow_mut();
-                if guard.1 {
-                    let ctx = unsafe { get_internal_gl() }.quad_context;
-                    let tex = guard.0.as_ref().unwrap().texture(ctx);
+                if let (true, Some(pass)) = (guard.1, &guard.0) {
+                    let tex = pass.texture(ctx);
                     let top = 1. / res.aspect_ratio;
                     draw_texture_ex(
                         Texture2D::from_miniquad_texture(tex),
@@ -408,6 +487,7 @@ impl JudgeLine {
                     );
                 }
             }
+
             let mut config = RenderConfig {
                 settings,
                 ctrl_obj: &mut self.ctrl_obj.borrow_mut(),
