@@ -177,26 +177,28 @@ impl Painter {
     fn paint(&mut self, ui: &mut Ui, size: f32, alpha: f32, mut color: Color) {
         let gl = unsafe { get_internal_gl() };
         let old_pass = gl.quad_gl.get_active_render_pass();
-        gl.quad_gl.render_pass(Some(self.pass));
-        gl.quad_gl.viewport(Some(self.viewport));
-
-        color.a = alpha.max(0.0) * 2.55;
+        if self.cleared {
+            gl.quad_gl.render_pass(Some(self.pass));
+            gl.quad_gl.viewport(Some(self.viewport));
+        }
+        let new_alpha = alpha.max(0.0) * 2.55;
+        if color.a != new_alpha {
+            color.a = new_alpha;
+        }
         if size <= 0.0 {
-            if self.cleared {
+            if !self.cleared {
                 clear_background(Color::default());
-                self.cleared = false;
+                self.cleared = true;
             }
         } else {
             let radius = size / self.viewport.2 as f32 * 2.0;
             ui.fill_circle(0., 0., radius, color);
             self.cleared = true;
         }
-
         gl.quad_gl.render_pass(old_pass);
         gl.quad_gl.viewport(Some(self.viewport));
     }
 }
-
 
 
 impl JudgeLine {
