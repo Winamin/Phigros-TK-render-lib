@@ -1,29 +1,44 @@
-use crate::core::{note::Hand, Note, Vector, NoteKind};
-pub fn assign_hands(notes: &mut [Note], rotation: f32) {
-    let config = crate::config::Config::default();
+use crate::config::Config;
+use crate::core::{note::Hand, Note, NoteKind, Vector};
 
-    /*
-    如果 config 中的 hand_split 为 false，直接返回
-    byd这里不写个边界检查直接panic了
-    这里 notes 为空，直接返回
-     */
+pub struct HandConfig {
+    pub config: Config,
+}
 
-    if !config.hand_split || notes.is_empty() {
-        return;
+pub fn assign_hands(notes: &mut [Note], config: &Config, rotation: f32) {
+    if notes.is_empty() || !config.hand_split {
+        let rad = rotation.to_radians();
+        let cos = rad.cos();
+        let sin = rad.sin();
+
+        for note in notes {
+            let raw_x = note.object.translation.0.now();
+            let raw_y = note.object.translation.1.now();
+            let rotated_x = raw_x * cos - raw_y * sin;
+            note.hand = if rotated_x < 0.0 { Hand::Left } else { Hand::Right };
+        }
+        return;//wtf bro
     }
 
     const LANE_SPLIT: f32 = 0.0;
     const MAX_STRETCH_RADIUS: f32 = 0.38;
     const FATIGUE_DECAY_RATE: f32 = 0.03;
-    const CROSS_HAND_PENALTY: f32 = 0.35; // 适中的交叉手惩罚
-    const SAME_FINGER_PENALTY: f32 = 0.4;  // 降低同指惩罚
-    const DENSITY_BONUS: f32 = 0.3;        // 密集区段奖励
-    const COOPERATION_BONUS: f32 = 0.25;   // 协作奖励
+    const CROSS_HAND_PENALTY: f32 = 0.35;
+    const SAME_FINGER_PENALTY: f32 = 0.4;
+    //const DENSITY_BONUS: f32 = 0.3;
+    const COOPERATION_BONUS: f32 = 0.25;
 
     const FINGER_COMFORT_ZONES: [f32; 4] = [0.28, 0.12, 0.12, 0.28];
     const FINGER_DEXTERITY: [f32; 4] = [0.9, 1.0, 1.0, 0.9];
-    const FINGER_COOPERATION: [f32; 4] = [0.65, 0.80, 1.0, 0.85]; // 协作系数
-
+    const FINGER_COOPERATION: [f32; 4] = [0.65, 0.80, 1.0, 0.85];
+    /*
+    手指状态结构体，包含手指的各种状态信息
+    这里的字段可以根据实际需要进行调整和扩展
+    例如手指的疲劳度、活动水平、合作评分等
+    const FINGER_COMFORT_ZONES: [f32; 4] = [0.28, 0.12, 0.12, 0.28];
+    第一个为左手食指，第二个为左手中指，第三个为右手中指，第四个为右手食指
+    AI注释很好用你知道吗.jpg
+     */
     #[derive(Clone, Copy)]
     struct FingerState {
         id: usize,

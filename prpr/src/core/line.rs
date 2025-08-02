@@ -15,6 +15,7 @@ use once_cell::sync::OnceCell;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use crate::config::Config;
 
 static TEXTURE_CACHE: Lazy<Mutex<HashMap<usize, Texture2D>>> = Lazy::new(|| {
     Mutex::new(HashMap::new())
@@ -308,8 +309,9 @@ impl JudgeLine {
             true
         });
         if res.config.hand_split {
+            let config = Config::default();
             let rot = self.object.rotation.now();
-            assign_hands(&mut self.notes, rot);
+            assign_hands(&mut self.notes,&config, rot);
             self.height.set_time(res.time);
             //let line_height = self.height.now();
             //let mut ctrl_obj = self.ctrl_obj.borrow_mut();

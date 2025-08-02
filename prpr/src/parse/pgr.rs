@@ -17,6 +17,7 @@ use tracing::warn;
 use anyhow::bail;
 use crate::core::note::Hand;
 use crate::hand::assign_hands;
+use crate::config::Config;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -229,8 +230,9 @@ fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32) -> Result<JudgeLine> {
     let notes_above = parse_notes(r, pgr.notes_above, &mut speed, &mut height, true).context("Failed to parse notes above")?;
     let mut notes_below = parse_notes(r, pgr.notes_below, &mut speed, &mut height, false).context("Failed to parse notes below")?;
     let mut notes = notes_above;
+    let config = Config::default();
     notes.append(&mut notes_below);
-    assign_hands(&mut notes, 0.0);
+    assign_hands(&mut notes, &config, 0.0);
     let cache = JudgeLineCache::new(&mut notes);
     Ok(JudgeLine {
         object: Object {
