@@ -69,7 +69,7 @@ impl Triple {
     }
 }
 
-#[derive(Default)] // the default is a dummy
+#[derive(Default, Clone)] // the default is a dummy
 pub struct BpmList {
     elements: Vec<(f32, f32, f32)>, // (beats, time, bpm)
     cursor: usize,

@@ -4,7 +4,8 @@ use crate::{
     parse::RPE_HEIGHT,
     core::HEIGHT_RATIO,
 };
-
+use serde::Serialize;
+use serde::Deserialize;
 use macroquad::prelude::*;
 //use ::rand::{thread_rng, Rng};
 
@@ -21,7 +22,7 @@ pub enum NoteKind {
     Drag,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hand {
     Left,
     Right,

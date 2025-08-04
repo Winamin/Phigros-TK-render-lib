@@ -443,7 +443,7 @@ async fn parse_judge_line(
     let mut height = parse_speed_events(r, &event_layers, max_time)?;
     let mut notes = parse_notes(r, rpe.notes.unwrap_or_default(), &mut height)?;
     let config = Config::default();
-    assign_hands(&mut notes,&config, 0.0);
+    assign_hands(&mut notes,&config, 0.0, r);
     let cache = JudgeLineCache::new(&mut notes);
 
     Ok(JudgeLine {

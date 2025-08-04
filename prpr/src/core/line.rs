@@ -311,12 +311,12 @@ impl JudgeLine {
         if res.config.hand_split {
             let config = Config::default();
             let rot = self.object.rotation.now();
-            assign_hands(&mut self.notes,&config, rot);
+            // 将BPM列表传递给hand分配函数
+            assign_hands(&mut self.notes, &config, rot, bpm_list);
             self.height.set_time(res.time);
-            //let line_height = self.height.now();
-            //let mut ctrl_obj = self.ctrl_obj.borrow_mut();
         }
     }
+
 
     pub fn fetch_pos(line: &JudgeLine, res: &Resource, lines: &[JudgeLine]) -> Vector {
         if let Some(parent) = line.parent {

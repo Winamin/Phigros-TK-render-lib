@@ -221,7 +221,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
         .collect()
 }
 
-fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32) -> Result<JudgeLine> {
+fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32, bpm_list: &BpmList) -> Result<JudgeLine> {
     if pgr.bpm <= 0.0 {
         bail!("Invalid BPM: {}", pgr.bpm);
     }
@@ -232,7 +232,7 @@ fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32) -> Result<JudgeLine> {
     let mut notes = notes_above;
     let config = Config::default();
     notes.append(&mut notes_below);
-    assign_hands(&mut notes, &config, 0.0);
+    assign_hands(&mut notes, &config, 0.0, bpm_list);
     let cache = JudgeLineCache::new(&mut notes);
     Ok(JudgeLine {
         object: Object {
@@ -284,7 +284,7 @@ pub fn parse_phigros(source: &str, extra: ChartExtra) -> Result<Chart> {
         .judge_line_list
         .into_iter()
         .enumerate()
-        .map(|(id, pgr)| parse_judge_line(pgr, max_time).with_context(|| ptl!("judge-line-location", "jlid" => id)))
+        .map(|(id, pgr)| parse_judge_line(pgr, max_time, &_r).with_context(|| ptl!("judge-line-location", "jlid" => id)))
         .collect::<Result<Vec<_>>>()?;
 
     process_lines(&mut lines);

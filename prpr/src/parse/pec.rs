@@ -140,7 +140,7 @@ fn parse_speed_events(mut pec: Vec<(f32, f32)>, max_time: f32) -> AnimFloat {
     AnimFloat::new(kfs)
 }
 
-fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32) -> Result<JudgeLine> {
+fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32, r: &mut BpmList) -> Result<JudgeLine> {
     let mut height = parse_speed_events(pec.speed_events, max_time);
     let mut process_notes = |notes: &mut Vec<Note>| {
         for note in notes {
@@ -161,7 +161,7 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32) -> Result<J
     });
     process_notes(&mut pec.notes);
     let config = Config::default();
-    assign_hands(&mut pec.notes, &config, 0.0);
+    assign_hands(&mut pec.notes, &config, 0.0, r);
     let cache = JudgeLineCache::new(&mut pec.notes);
     Ok(JudgeLine {
         object: Object {
@@ -185,7 +185,7 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32) -> Result<J
     })
 }
 
-pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
+pub fn parse_pec_with_list(source: &str, extra: ChartExtra, r: &mut BpmList) -> Result<Chart> {
     let mut offset = None;
     let mut r = None;
     let mut lines = Vec::new();
@@ -406,7 +406,7 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
     let mut lines = lines
         .into_iter()
         .enumerate()
-        .map(|(id, line)| parse_judge_line(line, id, max_time).with_context(|| ptl!("judge-line-location", "jlid" => id)))
+        .map(|(id, line)| parse_judge_line(line, id, max_time, bpm!()).with_context(|| ptl!("judge-line-location", "jlid" => id)))
         .collect::<Result<Vec<_>>>()?;
     process_lines(&mut lines);
     ensure_bpm(&mut r, &mut bpm_list);
@@ -420,4 +420,9 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
         },
         extra,
      ))
+}
+
+pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
+    let mut bpm_list = BpmList::new(vec![]);
+    parse_pec_with_list(source, extra, &mut bpm_list)
 }
