@@ -311,8 +311,7 @@ impl JudgeLine {
         if res.config.hand_split {
             let config = Config::default();
             let rot = self.object.rotation.now();
-            // 将BPM列表传递给hand分配函数
-            assign_hands(&mut self.notes, &config, rot, bpm_list);
+            assign_hands(&mut self.notes, &config, index, rot, bpm_list);
             self.height.set_time(res.time);
         }
     }

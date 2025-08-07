@@ -161,13 +161,18 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32, r: &mut Bpm
     });
     process_notes(&mut pec.notes);
     let config = Config::default();
-    assign_hands(&mut pec.notes, &config, 0.0, r);
+    let mut rotation_anim = parse_events(pec.rotate_events, id, "rotate")?;
+    rotation_anim.set_time(0.0);
+    let initial_rotation_rad = rotation_anim.now().to_radians();
+    process_notes(&mut pec.notes);
+    assign_hands(&mut pec.notes, &config, id, initial_rotation_rad, r);
     let cache = JudgeLineCache::new(&mut pec.notes);
     Ok(JudgeLine {
         object: Object {
             alpha: parse_events(pec.alpha_events, id, "alpha")?,
             translation: AnimVector(parse_events(pec.move_events.0, id, "move X")?, parse_events(pec.move_events.1, id, "move Y")?),
-            rotation: parse_events(pec.rotate_events, id, "rotate")?,
+            //rotation: parse_events(pec.rotate_events, id, "rotate")?,
+            rotation: rotation_anim,
             scale: AnimVector(AnimFloat::fixed(3.91 / 6.), AnimFloat::default()),
         },
         ctrl_obj: RefCell::default(),
@@ -211,6 +216,7 @@ pub fn parse_pec_with_list(source: &str, extra: ChartExtra, _r: &mut BpmList) ->
             ensure_bpm(&mut r, &mut bpm_list)
         };
     }
+    #[warn(unused_macros)]
     macro_rules! last_note {
         () => {{
             let Some(last_line) = last_line else {

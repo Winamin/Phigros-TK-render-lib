@@ -419,6 +419,7 @@ async fn parse_judge_line(
     fs: &mut dyn FileSystem,
     bezier_map: &BezierMap,
     texture_cache: &mut std::collections::HashMap<String, SafeTexture>,
+    id: usize
 ) -> Result<JudgeLine> {
     let event_layers: Vec<_> = rpe.event_layers.into_iter().flatten().collect();
 
@@ -443,7 +444,10 @@ async fn parse_judge_line(
     let mut height = parse_speed_events(r, &event_layers, max_time)?;
     let mut notes = parse_notes(r, rpe.notes.unwrap_or_default(), &mut height)?;
     let config = Config::default();
-    assign_hands(&mut notes,&config, 0.0, r);
+    let mut rotation = events_with_factor(r, &event_layers, |it| &it.rotate_events, -1., "rotate", bezier_map)?;
+    rotation.set_time(0.0);
+    let rotation_angle = rotation.now();
+    assign_hands(&mut notes, &config, id, rotation_angle, r);
     let cache = JudgeLineCache::new(&mut notes);
 
     Ok(JudgeLine {
@@ -661,7 +665,7 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra)
     for (id, rpe) in rpe.judge_line_list.into_iter().enumerate() {
         let name = rpe.name.clone();
         lines.push(
-            parse_judge_line(&mut r, rpe, max_time, fs, &bezier_map, &mut texture_cache)
+            parse_judge_line(&mut r, rpe, max_time, fs, &bezier_map, &mut texture_cache, id)
                 .await
                 .with_context(move || ptl!("judge-line-location-name", "jlid" => id, "name" => name))?,
         );
