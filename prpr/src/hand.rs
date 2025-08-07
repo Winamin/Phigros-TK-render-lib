@@ -43,14 +43,12 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, rotation: f32, bpm_list
 
     let mut ai = ai_mutex.lock().unwrap();
 
-    // 检查是否需要轻量级更新（0.02秒）
-    if now.duration_since(*last_light_update) >= Duration::from_millis(20) {
+    if now.duration_since(*last_light_update) >= Duration::from_millis(10) {
         *last_light_update = now;
         ai.light_update_hand_states(notes);
     }
 
-    // 检查是否需要完整更新（0.1秒）
-    if now.duration_since(*last_full_update) >= Duration::from_millis(40) {
+    if now.duration_since(*last_full_update) >= Duration::from_millis(20) {
         *last_full_update = now;
 
         ai.rotation = rotation;
@@ -136,7 +134,192 @@ impl std::ops::Mul<f32> for Vector2 {
     }
 }
 
-// === 深度神经网络结构 ===
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum GameMode {
+    TwoFinger,   // 二指模式：左右手各一个食指
+    FourFinger,  // 四指模式：左右手各食指+中指
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum Finger {
+    LeftIndex,      // 左食指
+    LeftMiddle,     // 左中指
+    RightIndex,     // 右食指
+    RightMiddle,    // 右中指
+}
+
+impl Finger {
+    pub fn to_hand(&self) -> Hand {
+        match self {
+            Finger::LeftIndex | Finger::LeftMiddle => Hand::Left,
+            Finger::RightIndex | Finger::RightMiddle => Hand::Right,
+        }
+    }
+
+    pub fn is_index(&self) -> bool {
+        matches!(self, Finger::LeftIndex | Finger::RightIndex)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FingerState {
+    finger: Finger,
+    position: Vector2,
+    velocity: Vector2,
+    #[serde(default)]
+    last_time: f32,
+    #[serde(default)]
+    fatigue: f32,
+    #[serde(default)]
+    confidence: f32,
+    success_streak: u32,
+    total_actions: u32,
+    #[serde(default)]
+    performance_score: f32,
+    #[serde(default)]
+    is_busy: bool,
+    #[serde(default)]
+    busy_until: f32,
+}
+
+impl FingerState {
+    fn new(finger: Finger, initial_pos: Vector2) -> Self {
+        Self {
+            finger,
+            position: initial_pos,
+            velocity: Vector2::new(0.0, 0.0),
+            last_time: -1.0,
+            fatigue: 0.0,
+            confidence: 1.0,
+            success_streak: 0,
+            total_actions: 0,
+            performance_score: 1.0,
+            is_busy: false,
+            busy_until: -1.0,
+        }
+    }
+
+    pub fn clean(&mut self) {
+        self.position.clean();
+        self.velocity.clean();
+        if !self.last_time.is_finite() {
+            self.last_time = -1.0;
+        }
+        if !self.fatigue.is_finite() {
+            self.fatigue = 0.0;
+        }
+        if !self.confidence.is_finite() {
+            self.confidence = 1.0;
+        }
+        if !self.performance_score.is_finite() {
+            self.performance_score = 1.0;
+        }
+        if !self.busy_until.is_finite() {
+            self.busy_until = -1.0;
+        }
+    }
+
+    fn validate(&self) -> bool {
+        self.position.x.is_finite() &&
+            self.position.y.is_finite() &&
+            self.velocity.x.is_finite() &&
+            self.velocity.y.is_finite() &&
+            self.last_time.is_finite() &&
+            self.fatigue.is_finite() &&
+            self.confidence.is_finite() &&
+            self.performance_score.is_finite() &&
+            self.busy_until.is_finite()
+    }
+
+    fn update_state(&mut self, new_pos: Vector2, time: f32, success: bool, note_duration: f32) {
+        let time_diff = time - self.last_time;
+
+        if time_diff > 0.001 {
+            let distance = new_pos.distance_to(&self.position);
+            let new_velocity = (new_pos - self.position) * (1.0 / time_diff);
+            self.velocity = self.velocity * 0.6 + new_velocity * 0.4;
+
+            let movement_cost = distance * 0.08 + self.velocity.magnitude() * 0.03;
+            let speed_penalty = if self.velocity.magnitude() > 5.0 {
+                (self.velocity.magnitude() - 5.0) * 0.02
+            } else { 0.0 };
+
+            self.fatigue = (self.fatigue + movement_cost + speed_penalty).min(1.0);
+            let recovery = (time_diff * 0.4).min(0.2);
+            self.fatigue = (self.fatigue - recovery).max(0.0);
+        }
+
+        self.is_busy = true;
+        self.busy_until = time + note_duration + 0.05;
+
+        self.total_actions += 1;
+        if success {
+            self.success_streak += 1;
+            self.confidence = (self.confidence + 0.005).min(1.0);
+        } else {
+            self.success_streak = 0;
+            self.confidence = (self.confidence - 0.01).max(0.2);
+        }
+
+        let recent_window = 20.0_f32.min(self.total_actions as f32);
+        let recent_success_rate = self.success_streak as f32 / recent_window;
+        self.performance_score = recent_success_rate * 0.4 +
+            self.confidence * 0.3 +
+            (1.0 - self.fatigue) * 0.3;
+
+        self.position = new_pos;
+        self.last_time = time;
+    }
+
+    fn update_busy_status(&mut self, current_time: f32) {
+        if current_time > self.busy_until {
+            self.is_busy = false;
+        }
+    }
+
+    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32, current_time: f32) -> f32 {
+        let is_available = current_time > self.busy_until;
+        let distance = target_pos.distance_to(&self.position);
+        let time_diff = time - self.last_time;
+        let mut score = 1.0;
+
+        if !is_available {
+            let busy_penalty = (self.busy_until - current_time) * 10.0;
+            score -= busy_penalty;
+        }
+
+        let distance_score = if distance < 0.2 {
+            1.0 - distance * 2.0
+        } else if distance < 0.5 {
+            0.6 - (distance - 0.2) * 1.5
+        } else {
+            0.15 - (distance - 0.5).min(0.5) * 0.3
+        };
+        score *= distance_score;
+
+        score *= 1.0 - self.fatigue * 0.3;
+
+        if time_diff > 0.0 {
+            let time_score = if time_diff < 0.08 {
+                (time_diff / 0.08) * 0.5
+            } else if time_diff < 0.15 {
+                1.0
+            } else if time_diff < 0.3 {
+                0.9
+            } else {
+                1.1
+            };
+            score *= time_score;
+        }
+
+        score *= 0.7 + self.performance_score * 0.3;
+        let difficulty_factor = 1.0 - (note_difficulty - 1.0) * (1.0 - self.confidence) * 0.2;
+        score *= difficulty_factor;
+
+        score.max(0.0)
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeepNeuralNetwork {
@@ -343,29 +526,33 @@ impl DeepNeuralNetwork {
         network
     }
 
-    fn build_architecture(&mut self) {
+    pub fn build_architecture(&mut self) {
         // 输入层: [position_x, position_y, time, velocity, fatigue, pattern_features...]
-        // 第一层：特征提取层 (128 neurons)
+
+        // 第一层：特征提取层 (16 -> 128)
         self.add_dense_layer(16, 128, ActivationFunction::ReLU);
 
-        // 第二层：注意力层 (128 neurons)
+        // 第二层：自注意力层 (128 -> 128)
         self.add_attention_layer(128, 128);
+        // 残差连接
+        self.add_residual_layer(128, 128);
 
-        // 第三层：LSTM层 (256 neurons) - 处理时序依赖
+        // 第三层：LSTM时序层 (128 -> 256)
         self.add_lstm_layer(128, 256);
 
-        // 第四层：残差连接层 (256 neurons)
+        // 第四层：残差连接层 (256 -> 256)
         self.add_residual_layer(256, 256);
 
-        // 第五层：特征融合层 (512 neurons)
+        // 第五层：特征融合层 (256 -> 512)
         self.add_dense_layer(256, 512, ActivationFunction::Swish);
 
-        // 第六层：决策层 (256 neurons)
+        // 第六层：决策层 (512 -> 256)
         self.add_dense_layer(512, 256, ActivationFunction::GELU);
 
-        // 输出层：手部概率 (4 outputs: left_confidence, right_confidence, difficulty, certainty)
+        // 输出层：手部概率 (256 -> 4)
         self.add_dense_layer(256, 4, ActivationFunction::Sigmoid);
     }
+
 
     fn add_dense_layer(&mut self, input_size: usize, output_size: usize, activation: ActivationFunction) {
         let mut weights = Vec::new();
@@ -1317,6 +1504,30 @@ struct PhiTKAdvancedAI {
     performance_history: VecDeque<PerformanceMetrics>,
     #[serde(default)]
     last_update_time: f32,
+
+    game_mode: GameMode,
+    finger_states: Vec<FingerState>,
+
+    // 稳定性相关
+    #[serde(default)]
+    stability_factor: f32,
+    #[serde(default)]
+    hand_switch_penalty: f32,
+    #[serde(default)]
+    consistency_bonus: f32,
+
+    // 学习能力增强
+    #[serde(default)]
+    adaptive_learning_rate: f32,
+    #[serde(default)]
+    pattern_recognition_strength: f32,
+    #[serde(default)]
+    memory_consolidation_rate: f32,
+
+    // 性能跟踪
+    recent_assignments: VecDeque<(Hand, f32, f32)>,
+    hand_switch_count: u32,
+    last_assigned_hand: Option<Hand>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1494,6 +1705,12 @@ impl PhiTKAdvancedAI {
         let rad = self.rotation.to_radians();
 
         // 重置手部状态
+        self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
+
+        // 清空性能跟踪
+        self.recent_assignments.clear();
+        self.hand_switch_count = 0;
+        self.last_assigned_hand = None;
         self.left_hand_state = HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad));
         self.right_hand_state = HandState::new(Hand::Right, Vector2::new(0.3, 0.0).rotate(rad));
 
@@ -1502,7 +1719,7 @@ impl PhiTKAdvancedAI {
         self.feature_extractor.spatial_patterns.clear();
 
         // 清空经验回放
-        self.experience_replay = ExperienceReplay::new(10000);
+        self.experience_replay = ExperienceReplay::new(50000);
 
         // 重置性能历史
         self.performance_history.clear();
@@ -1538,6 +1755,30 @@ impl PhiTKAdvancedAI {
         if !self.confidence_threshold.is_finite() {
             self.confidence_threshold = default.confidence_threshold;
         }
+        // 清理手指状态
+        for finger_state in &mut self.finger_states {
+            finger_state.clean();
+        }
+
+        // 清理新增字段
+        if !self.stability_factor.is_finite() {
+            self.stability_factor = 0.85;
+        }
+        if !self.hand_switch_penalty.is_finite() {
+            self.hand_switch_penalty = 0.4;
+        }
+        if !self.consistency_bonus.is_finite() {
+            self.consistency_bonus = 0.3;
+        }
+        if !self.adaptive_learning_rate.is_finite() {
+            self.adaptive_learning_rate = 0.001;
+        }
+        if !self.pattern_recognition_strength.is_finite() {
+            self.pattern_recognition_strength = 1.0;
+        }
+        if !self.memory_consolidation_rate.is_finite() {
+            self.memory_consolidation_rate = 0.1;
+        }
 
         // 清理特征提取器中的浮点字段
         self.feature_extractor.difficulty_estimator.base_difficulty =
@@ -1564,6 +1805,9 @@ impl PhiTKAdvancedAI {
     }
     fn new(rotation: f32) -> Self {
         let rad = rotation.to_radians();
+        let game_mode = GameMode::TwoFinger;
+        let finger_states = Self::init_finger_states(game_mode, rad);
+
 
         let mut ai = Self {
             main_network: DeepNeuralNetwork::new(),
@@ -1573,7 +1817,7 @@ impl PhiTKAdvancedAI {
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad)),
             right_hand_state: HandState::new(Hand::Right, Vector2::new(0.3, 0.0).rotate(rad)),
             rotation,
-            exploration_rate: 0.1,
+            exploration_rate: 0.05,
             discount_factor: 0.95,
             target_update_frequency: 1000, // 每1000个训练回合更新一次目标网络
             total_notes_processed: 0,
@@ -1584,11 +1828,23 @@ impl PhiTKAdvancedAI {
             learning_momentum: 0.9,
             confidence_threshold: 0.7,
             pattern_memory: BTreeMap::new(),
-            performance_history: VecDeque::with_capacity(1000),
+            performance_history: VecDeque::with_capacity(50000),
             version: Self::CURRENT_VERSION,
             last_save_episodes: 0,
             //self.last_update_time = -1.0;
             last_update_time: -1.0,
+
+            game_mode,
+            finger_states,
+            stability_factor: 0.85,
+            hand_switch_penalty: 0.4,
+            consistency_bonus: 0.3,
+            adaptive_learning_rate: 0.001,
+            pattern_recognition_strength: 1.0,
+            memory_consolidation_rate: 0.1,
+            recent_assignments: VecDeque::with_capacity(50),
+            hand_switch_count: 0,
+            last_assigned_hand: None,
         };
 
         // 初始化目标网络权重
@@ -1673,6 +1929,91 @@ impl PhiTKAdvancedAI {
         }
 
         eprintln!("诊断完成");
+    }
+
+    fn init_finger_states(mode: GameMode, rotation_rad: f32) -> Vec<FingerState> {
+        let mut states = Vec::new();
+
+        match mode {
+            GameMode::TwoFinger => {
+                states.push(FingerState::new(
+                    Finger::LeftIndex,
+                    Vector2::new(-0.3, 0.0).rotate(rotation_rad)
+                ));
+                states.push(FingerState::new(
+                    Finger::RightIndex,
+                    Vector2::new(0.3, 0.0).rotate(rotation_rad)
+                ));
+            }
+            GameMode::FourFinger => {
+                states.push(FingerState::new(
+                    Finger::LeftIndex,
+                    Vector2::new(-0.4, 0.0).rotate(rotation_rad)
+                ));
+                states.push(FingerState::new(
+                    Finger::LeftMiddle,
+                    Vector2::new(-0.2, 0.0).rotate(rotation_rad)
+                ));
+                states.push(FingerState::new(
+                    Finger::RightIndex,
+                    Vector2::new(0.2, 0.0).rotate(rotation_rad)
+                ));
+                states.push(FingerState::new(
+                    Finger::RightMiddle,
+                    Vector2::new(0.4, 0.0).rotate(rotation_rad)
+                ));
+            }
+        }
+
+        states
+    }
+
+    fn select_optimal_mode(&mut self, notes: &[ProcessedNote]) -> GameMode {
+        if notes.len() < 10 {
+            return self.game_mode;
+        }
+
+        let mut simultaneous_count = 0;
+        let mut wide_spread_count = 0;
+        let mut high_speed_count = 0;
+
+        let mut time_groups: std::collections::HashMap<i32, Vec<usize>> = std::collections::HashMap::new();
+
+        for (i, note) in notes.iter().enumerate() {
+            let time_key = (note.time * 20.0).round() as i32;
+            time_groups.entry(time_key).or_insert_with(Vec::new).push(i);
+        }
+
+        for group in time_groups.values() {
+            if group.len() > 1 {
+                simultaneous_count += 1;
+
+                let positions: Vec<f32> = group.iter().map(|&i| notes[i].position.x).collect();
+                let min_x = positions.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+                let max_x = positions.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+
+                if max_x - min_x > 0.6 {
+                    wide_spread_count += 1;
+                }
+            }
+        }
+
+        for i in 1..notes.len().min(20) {
+            let time_diff = notes[i].time - notes[i-1].time;
+            if time_diff < 0.1 && time_diff > 0.001 {
+                high_speed_count += 1;
+            }
+        }
+
+        let complexity_score = simultaneous_count as f32 * 2.0 +
+            wide_spread_count as f32 * 3.0 +
+            high_speed_count as f32 * 1.5;
+
+        if complexity_score > 15.0 {
+            GameMode::FourFinger
+        } else {
+            GameMode::TwoFinger
+        }
     }
 
     fn update_hand_positions(&mut self) {
@@ -1889,14 +2230,13 @@ impl PhiTKAdvancedAI {
     }
 
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList) {
-        // 创建已分配音符的集合
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups
             .iter()
             .flatten()
             .copied()
             .collect();
 
-        const CONTEXT_WINDOW: usize = 8; // 上下文窗口大小
+        const CONTEXT_WINDOW: usize = 8;
 
 
         for i in 0..notes.len() {
@@ -1904,86 +2244,111 @@ impl PhiTKAdvancedAI {
                 continue;
             }
 
-            // 提取上下文特征
             let start_idx = i.saturating_sub(CONTEXT_WINDOW / 2);
             let end_idx = (i + CONTEXT_WINDOW / 2 + 1).min(notes.len());
             let context = &notes[start_idx..end_idx];
 
-            // 提取特征向量
             let mut features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
             notes[i].features = features.clone();
 
-            // AI决策
             let (chosen_hand, confidence) = self.make_ai_decision(&features, &notes[i]);
 
             notes[i].assigned_hand = Some(chosen_hand);
             notes[i].confidence = confidence;
 
-            // 更新对应手的状态
             let success = confidence > self.confidence_threshold;
             match chosen_hand {
                 Hand::Left => self.left_hand_state.update_state(notes[i].position, notes[i].time, success),
                 Hand::Right => self.right_hand_state.update_state(notes[i].position, notes[i].time, success),
             }
 
-            // 记录经验用于训练
             self.record_experience(&features, &notes[i], chosen_hand, confidence);
         }
     }
 
     fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote) -> (Hand, f32) {
-        // 使用神经网络预测
-        //let network_output = self.main_network.forward(features);
-        let network_output = self.main_network.light_forward(features);//这里使用推理模式
+        for finger_state in &mut self.finger_states {
+            finger_state.update_busy_status(note.time);
+        }
 
-        // 解析网络输出 [left_confidence, right_confidence, difficulty, certainty]
-        let left_confidence = network_output.get(0).unwrap_or(&0.5);
-        let right_confidence = network_output.get(1).unwrap_or(&0.5);
+        let network_output = self.main_network.light_forward(features);
+
+        let left_ai_confidence = network_output.get(0).unwrap_or(&0.5);
+        let right_ai_confidence = network_output.get(1).unwrap_or(&0.5);
         let predicted_difficulty = network_output.get(2).unwrap_or(&1.0);
         let certainty = network_output.get(3).unwrap_or(&0.5);
 
-        // 结合传统启发式方法
-        let left_heuristic_score = self.left_hand_state.calculate_assignment_score(
-            note.position, note.time, *predicted_difficulty
-        );
-        let right_heuristic_score = self.right_hand_state.calculate_assignment_score(
-            note.position, note.time, *predicted_difficulty
-        );
+        let mut finger_scores = Vec::new();
 
-        // 混合AI和启发式决策
-        let ai_weight = certainty.max(0.1).min(0.9);
+        let note_duration = match note.kind {
+            NoteKind::Hold { .. } => 0.3,
+            _ => 0.1,
+        };
+
+        for finger_state in &self.finger_states {
+            let score = finger_state.calculate_assignment_score(
+                note.position, note.time, *predicted_difficulty, note.time
+            );
+            finger_scores.push((finger_state.finger, score));
+        }
+
+        finger_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        let best_finger = finger_scores[0].0;
+        let best_score = finger_scores[0].1;
+        let chosen_hand = best_finger.to_hand();
+
+        let stability_bonus = if let Some(last_hand) = self.last_assigned_hand {
+            if chosen_hand == last_hand {
+                self.consistency_bonus
+            } else {
+                -self.hand_switch_penalty
+            }
+        } else {
+            0.0
+        };
+
+        let ai_weight = (certainty * self.pattern_recognition_strength).clamp(0.2, 0.8);
         let heuristic_weight = 1.0 - ai_weight;
 
-        let final_left_score = left_confidence * ai_weight +
-            (left_heuristic_score * 0.5 + 0.5) * heuristic_weight;
-        let final_right_score = right_confidence * ai_weight +
-            (right_heuristic_score * 0.5 + 0.5) * heuristic_weight;
+        let hand_ai_confidence = match chosen_hand {
+            Hand::Left => *left_ai_confidence,
+            Hand::Right => *right_ai_confidence,
+        };
 
-        // ε-贪心探索
-        let chosen_hand = if fastrand::f32() < self.exploration_rate {
+        let final_confidence = (hand_ai_confidence * ai_weight +
+            (best_score * 0.5 + 0.5) * heuristic_weight +
+            stability_bonus).clamp(0.0, 1.0);
+
+        if let Some(last_hand) = self.last_assigned_hand {
+            if chosen_hand != last_hand {
+                self.hand_switch_count += 1;
+            }
+        }
+
+        self.recent_assignments.push_back((chosen_hand, note.time, final_confidence));
+        if self.recent_assignments.len() > 50 {
+            self.recent_assignments.pop_front();
+        }
+        self.last_assigned_hand = Some(chosen_hand);
+        let adjusted_exploration = self.exploration_rate * (1.0 - self.stability_factor);
+        let final_hand = if fastrand::f32() < adjusted_exploration {
             if fastrand::bool() { Hand::Left } else { Hand::Right }
         } else {
-            if final_left_score > final_right_score { Hand::Left } else { Hand::Right }
+            chosen_hand
         };
 
-        let confidence = if chosen_hand == Hand::Left {
-            final_left_score
-        } else {
-            final_right_score
-        };
-
-        (chosen_hand, confidence.clamp(0.0, 1.0))
+        (final_hand, final_confidence)
     }
 
     fn record_experience(&mut self, features: &[f32], note: &ProcessedNote, chosen_hand: Hand, confidence: f32) {
-        // 计算奖励
         let reward = self.calculate_reward(note, chosen_hand, confidence);
 
         let experience = Experience {
             state: features.to_vec(),
             action: match chosen_hand { Hand::Left => 0, Hand::Right => 1 },
             reward,
-            next_state: features.to_vec(), // 简化：使用相同状态
+            next_state: features.to_vec(),
             done: false,
             timestamp: note.time,
         };
@@ -1992,61 +2357,78 @@ impl PhiTKAdvancedAI {
     }
 
     fn calculate_reward(&self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
-        let mut reward = confidence * 3.0;
-
-        // 更平滑的置信度奖励
-        reward += (confidence - 0.5) * 1.5;
-
-        // 更温和的手偏好奖励
-        let position_bias = if note.position.x < 0.0 {
-            if chosen_hand == Hand::Left { 0.6 } else { -0.2 }
+        let mut reward = confidence * 2.0;
+        let position_bonus = if note.position.x < -0.1 {
+            if chosen_hand == Hand::Left { 0.8 } else { -0.4 }
+        } else if note.position.x > 0.1 {
+            if chosen_hand == Hand::Right { 0.8 } else { -0.4 }
         } else {
-            if chosen_hand == Hand::Right { 0.6 } else { -0.2 }
+            0.3
         };
-        reward += position_bias;
+        reward += position_bonus;
+        let hand_fingers: Vec<_> = self.finger_states.iter()
+            .filter(|f| f.finger.to_hand() == chosen_hand)
+            .collect();
 
-        // 获取手状态
-        let hand_state = match chosen_hand {
-            Hand::Left => &self.left_hand_state,
-            Hand::Right => &self.right_hand_state,
+        if let Some(best_finger) = hand_fingers.iter().min_by(|a, b| {
+            let dist_a = a.position.distance_to(&note.position);
+            let dist_b = b.position.distance_to(&note.position);
+            dist_a.partial_cmp(&dist_b).unwrap()
+        }) {
+            let distance = best_finger.position.distance_to(&note.position);
+            let time_diff = note.time - best_finger.last_time;
+
+            let distance_reward = if distance < 0.3 {
+                (0.3 - distance) * 2.0
+            } else {
+                -(distance - 0.3).powf(1.3) * 0.8
+            };
+            reward += distance_reward;
+
+            let time_reward = if time_diff > 0.15 {
+                0.5
+            } else if time_diff > 0.08 {
+                0.2
+            } else if time_diff > 0.0 {
+                -((0.08 - time_diff) * 8.0).min(1.5)
+            } else {
+                -1.0
+            };
+            reward += time_reward;
+
+            reward -= best_finger.fatigue * 0.3;
+
+            if best_finger.is_busy && note.time < best_finger.busy_until {
+                reward -= (best_finger.busy_until - note.time) * 5.0;
+            }
+        }
+        if let Some(last_hand) = self.last_assigned_hand {
+            if chosen_hand == last_hand {
+                reward += self.consistency_bonus;
+            } else {
+                reward -= self.hand_switch_penalty;
+            }
+        }
+        let mode_bonus = match self.game_mode {
+            GameMode::TwoFinger => {
+                if (note.position.x < 0.0 && chosen_hand == Hand::Left) ||
+                    (note.position.x > 0.0 && chosen_hand == Hand::Right) {
+                    0.3
+                } else {
+                    -0.1
+                }
+            }
+            GameMode::FourFinger => 0.2,
         };
+        reward += mode_bonus;
 
-        let distance = note.position.distance_to(&hand_state.position);
-        let time_diff = note.time - hand_state.last_time;
-
-        // 更平滑的距离惩罚
-        let distance_penalty = if distance < 0.5 {
-            (0.5 - distance) * 0.4
-        } else {
-            -((distance - 0.5).min(1.0)).powf(1.2) * 0.4
-        };
-        reward += distance_penalty;
-
-        // 更平滑的时间间隔惩罚
-        let time_reward = if time_diff > 0.12 {
-            0.2
-        } else if time_diff > 0.0 {
-            -((0.12 - time_diff).powf(1.5)) * 1.2
-        } else {
-            -0.4
-        };
-        reward += time_reward;
-
-        // 更平缓的疲劳惩罚
-        reward -= (hand_state.fatigue.powf(1.2)) * 0.2;
-
-        reward.clamp(-2.0, 2.0)
+        reward.clamp(-3.0, 3.0)
     }
 
 
     fn post_process_assignments(&mut self, notes: &mut [ProcessedNote]) {
-        // 平滑处理
         self.smooth_hand_transitions(notes);
-
-        // 物理约束验证
         self.validate_physical_feasibility(notes);
-
-        // 模式优化
         self.optimize_recognized_patterns(notes);
     }
 
@@ -2107,8 +2489,8 @@ impl PhiTKAdvancedAI {
 
                             // 检查切换的合理性
                             let switch_reasonable = match other_hand {
-                                Hand::Left => notes[i].position.x < 0.4,
-                                Hand::Right => notes[i].position.x > -0.4,
+                                Hand::Left => notes[i].position.x < 0.3,
+                                Hand::Right => notes[i].position.x > -0.3,
                             };
 
                             if switch_reasonable {
