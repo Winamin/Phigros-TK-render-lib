@@ -185,7 +185,7 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32, r: &mut Bpm
     })
 }
 
-pub fn parse_pec_with_list(source: &str, extra: ChartExtra, r: &mut BpmList) -> Result<Chart> {
+pub fn parse_pec_with_list(source: &str, extra: ChartExtra, _r: &mut BpmList) -> Result<Chart> {
     let mut offset = None;
     let mut r = None;
     let mut lines = Vec::new();

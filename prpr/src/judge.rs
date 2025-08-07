@@ -13,6 +13,7 @@ use sasa::{PlaySfxParams, Sfx};
 use serde::Serialize;
 use std::{cell::RefCell, collections::HashMap, num::FpCategory};
 use tracing::debug;
+use crate::core::note::Hand;
 
 pub const FLICK_SPEED_THRESHOLD: f32 = 0.8;
 pub const LIMIT_PERFECT: f32 = 0.08;
@@ -97,7 +98,7 @@ impl FlickTracker {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum JudgeStatus {
     NotJudged,
     PreJudge,
@@ -327,6 +328,9 @@ impl Judge {
             self.auto_play_update(res, chart, skip_sfx);
             return;
         }
+        if res.config.hand_split {
+            self.validate_hand_assignments(chart);
+        }
         const X_DIFF_MAX: f32 = 0.21 / (16. / 9.) * 2.;
         let spd = res.config.speed;
 
@@ -500,10 +504,10 @@ impl Judge {
                     }
                     if dt
                         > if matches!(note.kind, NoteKind::Click) {
-                            LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
-                        } else {
-                            LIMIT_GOOD
-                        }
+                        LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
+                    } else {
+                        LIMIT_GOOD
+                    }
                     {
                         continue;
                     }
@@ -658,11 +662,11 @@ impl Judge {
                 let x = x.now();
                 if self.key_down_count != 0
                     || pos.iter().any(|it| {
-                        it.map_or(false, |it| {
-                            let dx = (it.x - x).abs();
-                            dx <= X_DIFF_MAX && dt <= (LIMIT_BAD - LIMIT_PERFECT * (dx - 0.9).max(0.))
-                        })
+                    it.map_or(false, |it| {
+                        let dx = (it.x - x).abs();
+                        dx <= X_DIFF_MAX && dt <= (LIMIT_BAD - LIMIT_PERFECT * (dx - 0.9).max(0.))
                     })
+                })
                 {
                     note.judge = JudgeStatus::PreJudge;
                 }
@@ -864,6 +868,32 @@ impl Judge {
     #[inline]
     pub fn counts(&self) -> [u32; 4] {
         self.inner.counts()
+    }
+
+    fn validate_hand_assignments(&self, chart: &mut Chart) {
+        const X_THRESHOLD: f32 = 0.2;
+
+        for line in &mut chart.lines {
+            for note in &mut line.notes {
+                let assigned_hand = note.hand; // 直接获取 Hand 类型
+                let x = note.object.translation.0.now();
+
+                // 检查分配是否合理
+                let should_be_left = x < -X_THRESHOLD;
+                let should_be_right = x > X_THRESHOLD;
+
+                if (should_be_left && assigned_hand == Hand::Right) ||
+                    (should_be_right && assigned_hand == Hand::Left)
+                {
+                    debug!(
+                    "可疑分配: time={:.2}, x={:.2}, 分配={:?}",
+                    note.time,
+                    x,
+                    assigned_hand
+                );
+                }
+            }
+        }
     }
 }
 

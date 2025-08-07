@@ -12,6 +12,7 @@ use once_cell::sync::OnceCell;
 use std::sync::Mutex;
 use std::time::{Instant, Duration};
 use crate::core::BpmList;
+use crate::judge::JudgeStatus;
 
 pub struct HandConfig {
     pub config: Config,
@@ -37,18 +38,18 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, rotation: f32, bpm_list
 
     // 全局单例，首次调用时加载模型，后续复用
     let ai_mutex = AI_SYSTEM.get_or_init(|| {
-        let mut ai = PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", rotation);
+        let ai = PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", rotation);
         Mutex::new(ai)
     });
 
     let mut ai = ai_mutex.lock().unwrap();
 
-    if now.duration_since(*last_light_update) >= Duration::from_millis(10) {
+    if now.duration_since(*last_light_update) >= Duration::from_millis(1) {
         *last_light_update = now;
         ai.light_update_hand_states(notes);
     }
 
-    if now.duration_since(*last_full_update) >= Duration::from_millis(20) {
+    if now.duration_since(*last_full_update) >= Duration::from_millis(5) {
         *last_full_update = now;
 
         ai.rotation = rotation;
@@ -56,8 +57,8 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, rotation: f32, bpm_list
         // 将BPM列表传递给AI分析
         ai.analyze_and_assign(notes, config, bpm_list);
 
-        // 每 1000 回合保存一次
-        const SAVE_EVERY_EPISODES: u64 = 1000;
+        // 每 10000 回合保存一次
+        const SAVE_EVERY_EPISODES: u64 = 10000;
         if ai.training_episodes % SAVE_EVERY_EPISODES == 0 {
             ai.save_model("phitk_ai_model.bin");
         }
@@ -218,7 +219,7 @@ impl FingerState {
             self.busy_until = -1.0;
         }
     }
-
+/*
     fn validate(&self) -> bool {
         self.position.x.is_finite() &&
             self.position.y.is_finite() &&
@@ -231,7 +232,9 @@ impl FingerState {
             self.busy_until.is_finite()
     }
 
-    fn update_state(&mut self, new_pos: Vector2, time: f32, success: bool, note_duration: f32) {
+
+ */
+    fn update_state(&mut self, new_pos: Vector2, time: f32, success: bool, note_kind: &NoteKind) {
         let time_diff = time - self.last_time;
 
         if time_diff > 0.001 {
@@ -249,8 +252,15 @@ impl FingerState {
             self.fatigue = (self.fatigue - recovery).max(0.0);
         }
 
+        let busy_duration = match note_kind {
+            NoteKind::Hold { end_time, .. } => end_time - time + 0.1, // Hold到结束时间
+            NoteKind::Drag => 0.25,
+            NoteKind::Flick => 0.2,
+            NoteKind::Click => 0.15,
+        };
+
         self.is_busy = true;
-        self.busy_until = time + note_duration + 0.05;
+        self.busy_until = time + busy_duration;
 
         self.total_actions += 1;
         if success {
@@ -277,8 +287,15 @@ impl FingerState {
         }
     }
 
-    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32, current_time: f32) -> f32 {
+    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32, current_time: f32, note_kind: &NoteKind, _note_duration: f32) -> f32 {
         let is_available = current_time > self.busy_until;
+        let note_duration = match note_kind {
+            NoteKind::Hold { end_time, .. } => end_time - time,
+            NoteKind::Drag => 0.2,
+            NoteKind::Flick => 0.15,
+            NoteKind::Click => 0.1,
+        };
+
         let distance = target_pos.distance_to(&self.position);
         let time_diff = time - self.last_time;
         let mut score = 1.0;
@@ -287,6 +304,30 @@ impl FingerState {
             let busy_penalty = (self.busy_until - current_time) * 10.0;
             score -= busy_penalty;
         }
+
+        let position_weight = match self.finger.to_hand() {
+            Hand::Left => {
+                // 左手更适合处理左侧音符
+                if target_pos.x < -0.1 {
+                    0.4  // 强加分
+                } else if target_pos.x > 0.1 {
+                    -0.3 // 减分
+                } else {
+                    0.0
+                }
+            }
+            Hand::Right => {
+                // 右手更适合处理右侧音符
+                if target_pos.x > 0.1 {
+                    0.4  // 强加分
+                } else if target_pos.x < -0.1 {
+                    -0.3 // 减分
+                } else {
+                    0.0
+                }
+            }
+        };
+        score += position_weight;
 
         let distance_score = if distance < 0.2 {
             1.0 - distance * 2.0
@@ -310,6 +351,14 @@ impl FingerState {
                 1.1
             };
             score *= time_score;
+        }
+
+        if matches!(note_kind, NoteKind::Hold { .. }) {
+            let hold_end_time = time + note_duration;
+            if current_time < hold_end_time {
+                // Hold音符会占用更长时间，需要更仔细的规划
+                score *= 0.8; // 轻微降低Hold的优先级以避免长时间占用
+            }
         }
 
         score *= 0.7 + self.performance_score * 0.3;
@@ -1072,7 +1121,7 @@ impl AdvancedFeatureExtractor {
         let current_time = notes[0].time;
         let current_bpm = bpm_list.now_bpm(current_time);
 
-        // === 添加 BPM 日志输出 ===
+        // === BPM 日志输出 ===
         // 每秒输出一次或当 BPM 变化时输出
         let should_log = self.last_logged_bpm.is_none() ||
             current_bpm != self.last_logged_bpm.unwrap() ||
@@ -1401,6 +1450,7 @@ struct ProcessedNote {
     confidence: f32,
     //#[serde(default)]
     features: Vec<f32>,
+    judge: JudgeStatus,  // Add this field
 }
 
 // === 经验回放系统 ===
@@ -1619,7 +1669,7 @@ impl HandState {
             self.performance_score.is_finite()
     }
 
-    fn update_state(&mut self, new_pos: Vector2, time: f32, success: bool) {
+    fn update_state(&mut self, new_pos: Vector2, time: f32, success: bool, note_kind: &NoteKind) {
         let time_diff = time - self.last_time;
 
         if time_diff > 0.001 {
@@ -1629,8 +1679,15 @@ impl HandState {
             let new_velocity = (new_pos - self.position) * (1.0 / time_diff);
             self.velocity = self.velocity * 0.7 + new_velocity * 0.3;
 
-            // 更新疲劳度
-            let movement_cost = distance * 0.1 + self.velocity.magnitude() * 0.05;
+            // 更新疲劳度，根据音符类型调整
+            let note_complexity_factor = match note_kind {
+                NoteKind::Click => 1.0,
+                NoteKind::Drag => 1.2,
+                NoteKind::Flick => 1.3,
+                NoteKind::Hold { .. } => 1.5,
+            };
+
+            let movement_cost = distance * 0.1 * note_complexity_factor + self.velocity.magnitude() * 0.05;
             self.fatigue = (self.fatigue + movement_cost).min(1.0);
 
             // 自然恢复
@@ -1660,12 +1717,36 @@ impl HandState {
         self.position = new_pos;
         self.last_time = time;
     }
-
+/*
     fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32) -> f32 {
         let distance = target_pos.distance_to(&self.position);
         let time_diff = time - self.last_time;
 
         let mut score = 1.0;
+
+        let position_weight = match self.hand {
+            Hand::Left => {
+                // 左手更适合处理左侧音符
+                if target_pos.x < -0.1 {
+                    0.4
+                } else if target_pos.x > 0.1 {
+                    -0.3
+                } else {
+                    0.0
+                }
+            }
+            Hand::Right => {
+                // 右手更适合处理右侧音符
+                if target_pos.x > 0.1 {
+                    0.4
+                } else if target_pos.x < -0.1 {
+                    -0.3
+                } else {
+                    0.0
+                }
+            }
+        };
+        score += position_weight;
 
         // 距离惩罚（非线性）
         score -= (distance * distance) * 2.0;
@@ -1698,6 +1779,8 @@ impl HandState {
 
         score
     }
+
+ */
 }
 
 impl PhiTKAdvancedAI {
@@ -1967,7 +2050,7 @@ impl PhiTKAdvancedAI {
 
         states
     }
-
+/*
     fn select_optimal_mode(&mut self, notes: &[ProcessedNote]) -> GameMode {
         if notes.len() < 10 {
             return self.game_mode;
@@ -2016,6 +2099,8 @@ impl PhiTKAdvancedAI {
         }
     }
 
+
+ */
     fn update_hand_positions(&mut self) {
         let rad = self.rotation.to_radians();
         self.left_hand_state.position = Vector2::new(-0.3, 0.0).rotate(rad);
@@ -2040,7 +2125,7 @@ impl PhiTKAdvancedAI {
         }
     }
 
-    fn analyze_and_assign(&mut self, notes: &mut [Note], config: &Config, bpm_list: &BpmList) {
+    fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList) {
         if notes.is_empty() {
             return;
         }
@@ -2092,7 +2177,7 @@ impl PhiTKAdvancedAI {
         self.last_save_episodes += 1;
 
         // 50 次训练保存一次
-        if self.last_save_episodes >= 50 {
+        if self.last_save_episodes >= 10000 {
             self.save_model("phitk_ai_model.bin");
             self.last_save_episodes = 0;
         }
@@ -2116,6 +2201,7 @@ impl PhiTKAdvancedAI {
                 assigned_hand: None,
                 confidence: 0.0,
                 features: Vec::new(),
+                judge: JudgeStatus::NotJudged,
             }
         }).collect()
     }
@@ -2138,7 +2224,16 @@ impl PhiTKAdvancedAI {
                     continue;
                 }
 
-                if (notes[j].time - base_time).abs() <= SIMULTANEOUS_THRESHOLD {
+                let time_diff = (notes[j].time - base_time).abs();
+
+                let threshold = if matches!(notes[i].kind, NoteKind::Hold { .. }) ||
+                    matches!(notes[j].kind, NoteKind::Hold { .. }) {
+                    SIMULTANEOUS_THRESHOLD * 0.5 // Hold音符使用更小的阈值
+                } else {
+                    SIMULTANEOUS_THRESHOLD
+                };
+
+                if time_diff <= threshold {
                     group.push(j);
                     used[j] = true;
                 }
@@ -2165,7 +2260,7 @@ impl PhiTKAdvancedAI {
                 .collect();
             sorted_group.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-            // 智能分配策略
+            // 计算中间点
             let mid_point = sorted_group.len() / 2;
 
             // 检查是否有明显的左右分离
@@ -2173,20 +2268,42 @@ impl PhiTKAdvancedAI {
             let rightmost_x = sorted_group[sorted_group.len() - 1].1;
             let separation = rightmost_x - leftmost_x;
 
-            if separation > 0.6 {
+            if separation > 0.4 && group.len() >= 2 {
                 // 明显分离：左右手分别处理
+                let mut assigned_left = 0;
+                let mut assigned_right = 0;
+
                 for (pos, (note_idx, _)) in sorted_group.iter().enumerate() {
-                    notes[*note_idx].assigned_hand = Some(if pos < mid_point {
+                    // 使用mid_point来划分左右手
+                    let hand = if pos < mid_point {
                         Hand::Left
                     } else {
                         Hand::Right
-                    });
+                    };
+
+                    // 最多分配 (group.len() / 2).ceil() 个音符
+                    match hand {
+                        Hand::Left if assigned_left < (group.len() + 1) / 2 => {
+                            notes[*note_idx].assigned_hand = Some(Hand::Left);
+                            assigned_left += 1;
+                        }
+                        Hand::Right if assigned_right < group.len() / 2 => {
+                            notes[*note_idx].assigned_hand = Some(Hand::Right);
+                            assigned_right += 1;
+                        }
+                        _ => {
+                            // 超出限额就交给AI处理
+                            let features = self.feature_extractor.extract_features(&notes[*note_idx..*note_idx+1], 1, bpm_list);
+                            let ai_decision = self.make_ai_decision(&features, &notes[*note_idx]);
+                            notes[*note_idx].assigned_hand = Some(ai_decision.0);
+                        }
+                    }
                     notes[*note_idx].confidence = 0.9;
                 }
             } else {
-                // 密集分布：使用AI决策
+                // 没有明显分离，全部交给AI处理
                 for (note_idx, _) in &sorted_group {
-                    let mut features = self.feature_extractor.extract_features(&notes[*note_idx..*note_idx+1], 1, bpm_list);
+                    let features = self.feature_extractor.extract_features(&notes[*note_idx..*note_idx+1], 1, bpm_list);
                     let ai_decision = self.make_ai_decision(&features, &notes[*note_idx]);
 
                     notes[*note_idx].assigned_hand = Some(ai_decision.0);
@@ -2196,6 +2313,67 @@ impl PhiTKAdvancedAI {
 
             // 更新手部状态
             self.update_hand_states_for_group(notes, group);
+        }
+    }
+
+    fn post_process_assignments(&mut self, notes: &mut [ProcessedNote]) {
+        self.smooth_hand_transitions(notes);
+        self.validate_physical_feasibility(notes);
+        self.optimize_recognized_patterns(notes);
+
+        // === 新增：确保连续音符交替分配 ===
+        self.ensure_alternating_pattern(notes);
+    }
+
+    fn ensure_alternating_pattern(&mut self, notes: &mut [ProcessedNote]) {
+        const MAX_CONSECUTIVE: usize = 3;
+        const TIME_THRESHOLD: f32 = 0.3;
+
+        let mut consecutive_count = 0;
+        let mut last_hand = None;
+
+        // 先收集需要修改的音符索引
+        let mut indices_to_switch = Vec::new();
+
+        for (i, note) in notes.iter().enumerate() {
+            if let Some(current_hand) = note.assigned_hand {
+                // 重置计数
+                if last_hand != Some(current_hand) {
+                    consecutive_count = 0;
+                    last_hand = Some(current_hand);
+                    continue;
+                }
+
+                // 检查是否连续同手
+                consecutive_count += 1;
+                if consecutive_count > MAX_CONSECUTIVE {
+                    // 查找前一个不同手的音符时间
+                    let prev_alt_time = notes[..i]
+                        .iter()
+                        .rev()
+                        .find(|n| n.assigned_hand != Some(current_hand))
+                        .map(|n| n.time);
+
+                    // 如果时间间隔允许，标记需要切换
+                    if let Some(prev_time) = prev_alt_time {
+                        if note.time - prev_time < TIME_THRESHOLD * 2.0 {
+                            indices_to_switch.push(i);
+                            consecutive_count = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 执行切换
+        for i in indices_to_switch {
+            if let Some(current_hand) = notes[i].assigned_hand {
+                notes[i].assigned_hand = match current_hand {
+                    Hand::Left => Some(Hand::Right),
+                    Hand::Right => Some(Hand::Left),
+                };
+                notes[i].confidence = (notes[i].confidence * 0.8).max(0.6);
+            }
         }
     }
 
@@ -2218,14 +2396,16 @@ impl PhiTKAdvancedAI {
         if !left_positions.is_empty() {
             let avg_pos = left_positions.iter().fold(Vector2::new(0.0, 0.0), |acc, &pos| acc + pos)
                 * (1.0 / left_positions.len() as f32);
-            self.left_hand_state.update_state(avg_pos, group_time, true); // 假设成功
+            let success = notes[group[0]].judge == JudgeStatus::Judged; // 实际判定结果
+            self.left_hand_state.update_state(avg_pos, group_time, success, &notes[group[0]].kind);
         }
 
         // 更新右手状态
         if !right_positions.is_empty() {
             let avg_pos = right_positions.iter().fold(Vector2::new(0.0, 0.0), |acc, &pos| acc + pos)
                 * (1.0 / right_positions.len() as f32);
-            self.right_hand_state.update_state(avg_pos, group_time, true); // 假设成功
+            let success = notes[group[0]].judge == JudgeStatus::Judged; // 实际判定结果
+            self.right_hand_state.update_state(avg_pos, group_time, success, &notes[group[0]].kind);
         }
     }
 
@@ -2256,10 +2436,10 @@ impl PhiTKAdvancedAI {
             notes[i].assigned_hand = Some(chosen_hand);
             notes[i].confidence = confidence;
 
-            let success = confidence > self.confidence_threshold;
+            let success = notes[i].judge == JudgeStatus::Judged;
             match chosen_hand {
-                Hand::Left => self.left_hand_state.update_state(notes[i].position, notes[i].time, success),
-                Hand::Right => self.right_hand_state.update_state(notes[i].position, notes[i].time, success),
+                Hand::Left => self.left_hand_state.update_state(notes[i].position, notes[i].time, success,&notes[i].kind),
+                Hand::Right => self.right_hand_state.update_state(notes[i].position, notes[i].time, success,&notes[i].kind),
             }
 
             self.record_experience(&features, &notes[i], chosen_hand, confidence);
@@ -2280,14 +2460,14 @@ impl PhiTKAdvancedAI {
 
         let mut finger_scores = Vec::new();
 
-        let note_duration = match note.kind {
-            NoteKind::Hold { .. } => 0.3,
+        let note_duration = match &note.kind {
+            NoteKind::Hold { end_time, .. } => end_time - note.time,
             _ => 0.1,
         };
 
         for finger_state in &self.finger_states {
             let score = finger_state.calculate_assignment_score(
-                note.position, note.time, *predicted_difficulty, note.time
+                note.position, note.time, *predicted_difficulty, note.time, &note.kind, note_duration
             );
             finger_scores.push((finger_state.finger, score));
         }
@@ -2425,12 +2605,6 @@ impl PhiTKAdvancedAI {
         reward.clamp(-3.0, 3.0)
     }
 
-
-    fn post_process_assignments(&mut self, notes: &mut [ProcessedNote]) {
-        self.smooth_hand_transitions(notes);
-        self.validate_physical_feasibility(notes);
-        self.optimize_recognized_patterns(notes);
-    }
 
     fn smooth_hand_transitions(&self, notes: &mut [ProcessedNote]) {
         if notes.len() < 3 {
@@ -2625,6 +2799,19 @@ impl PhiTKAdvancedAI {
         for (i, processed) in processed_notes.iter().enumerate() {
             if let Some(hand) = processed.assigned_hand {
                 original_notes[i].hand = hand;
+
+                // 更新对应手指状态，传递音符类型信息
+                for finger_state in &mut self.finger_states {
+                    if finger_state.finger.to_hand() == hand {
+                        finger_state.update_state(
+                            processed.position,
+                            processed.time,
+                            processed.confidence > self.confidence_threshold,
+                            &processed.kind  // 新增：传递音符类型
+                        );
+                        break; // 只更新第一个匹配的手指
+                    }
+                }
 
                 // 简化的学习：基于置信度判断预测质量
                 total_predictions += 1;
