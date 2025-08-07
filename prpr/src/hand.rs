@@ -309,21 +309,21 @@ impl FingerState {
 
         let position_weight = match self.finger.to_hand() {
             Hand::Left => {
-                if target_pos.x < -0.17 {
+                if target_pos.x < -0.14 {
                     0.4
-                } else if target_pos.x > -0.13 {
-                    -0.1
+                } else if target_pos.x > -0.07 {
+                    -0.5
                 } else {
-                    0.0
+                    -0.3
                 }
             }
             Hand::Right => {
-                if target_pos.x > 0.1 {
-                    0.4
-                } else if target_pos.x < -0.11 {
+                if target_pos.x > 0.07 {
+                    0.6
+                } else if target_pos.x < -0.8 {
                     -0.3
                 } else {
-                    0.09
+                    0.05
                 }
             }
         };
@@ -2446,7 +2446,7 @@ impl PhiTKAdvancedAI {
                 }
             }
         }
-        
+
         for i in indices_to_switch {
             if let Some(current_hand) = notes[i].assigned_hand {
                 notes[i].assigned_hand = match current_hand {
@@ -2573,14 +2573,14 @@ impl PhiTKAdvancedAI {
 
         let position_weight = match chosen_hand {
             Hand::Left => {
-                if note.position.x < -0.17 { 0.4 }
-                else if note.position.x > -0.13 { -0.5 }
-                else { -0.4 }
+                if note.position.x < -0.14 { 0.4 }
+                else if note.position.x > 0.07 { -0.5 }
+                else { -0.3 }
             }
             Hand::Right => {
-                if note.position.x > 0.1 { 0.6 }
-                else if note.position.x < -0.11 { -0.3 }
-                else { 0.09 } // | - | ++
+                if note.position.x > 0.07 { 0.6 }
+                else if note.position.x < -0.8 { -0.3 }
+                else { 0.05 } // | - | ++
             }
         };
         //TODO: Hand perf
@@ -2644,13 +2644,13 @@ impl PhiTKAdvancedAI {
 
     fn calculate_reward(&self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
         let mut reward = confidence * 2.0;
-        let position_bonus = if note.position.x < -0.2 {
-            if chosen_hand == Hand::Left { 0.6 } else { -0.4 }
-        } else if note.position.x > 0.1 {
-            if chosen_hand == Hand::Right { 0.8 } else { -0.1 }
+        let position_bonus = if note.position.x < -0.14 {
+            if chosen_hand == Hand::Left { 0.4 } else { -0.5 }
+        } else if note.position.x > 0.07 {
+            if chosen_hand == Hand::Right { 0.6 } else { -0.3 }
         } else {
             // Center area - bonus for right hand
-            if chosen_hand == Hand::Right { 0.3 } else { -0.1 }
+            if chosen_hand == Hand::Right { 0.05 } else { -0.3 }
         };
         reward += position_bonus;
         let hand_fingers: Vec<_> = self.finger_states.iter()
