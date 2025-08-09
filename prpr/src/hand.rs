@@ -309,21 +309,21 @@ impl FingerState {
 
         let position_weight = match self.finger.to_hand() {
             Hand::Left => {
-                if target_pos.x < -0.14 {
+                if target_pos.x < -0.17 {
                     0.4
-                } else if target_pos.x > -0.07 {
-                    -0.5
+                } else if target_pos.x > -0.13 {
+                    -0.1
                 } else {
-                    -0.3
+                    0.0
                 }
             }
             Hand::Right => {
-                if target_pos.x > 0.07 {
-                    0.6
-                } else if target_pos.x < -0.8 {
+                if target_pos.x > 0.1 {
+                    0.4
+                } else if target_pos.x < -0.11 {
                     -0.3
                 } else {
-                    0.05
+                    0.09
                 }
             }
         };
@@ -356,8 +356,7 @@ impl FingerState {
         if matches!(note_kind, NoteKind::Hold { .. }) {
             let hold_end_time = time + note_duration;
             if current_time < hold_end_time {
-                // Hold音符会占用更长时间，需要更仔细的规划
-                score *= 0.8; // 轻微降低Hold的优先级以避免长时间占用
+                score *= 0.8;
             }
         }
 
@@ -397,6 +396,12 @@ struct NetworkLayer {
     momentum_weights: Vec<Vec<f32>>,
     #[serde(default)]
     momentum_biases: Vec<f32>,
+
+    #[serde(default)]
+    bidirectional: bool,
+    #[serde(default)]
+    seq_len: usize,
+
     layer_type: LayerType,
     activation_func: ActivationFunction, //wtfbro
 }
@@ -418,12 +423,9 @@ enum ActivationFunction {
     GELU,
 }
 
-
-
 impl DeepNeuralNetwork {
     pub fn clean(&mut self) {
         for layer in &mut self.layers {
-            // 清理权重
             for weights in &mut layer.weights {
                 for w in weights {
                     if !w.is_finite() {
@@ -432,28 +434,24 @@ impl DeepNeuralNetwork {
                 }
             }
 
-            // 清理偏置
             for bias in &mut layer.biases {
                 if !bias.is_finite() {
                     *bias = 0.0;
                 }
             }
 
-            // 清理激活值
             for activation in &mut layer.activations {
                 if !activation.is_finite() {
                     *activation = 0.0;
                 }
             }
 
-            // 清理梯度
             for gradient in &mut layer.gradients {
                 if !gradient.is_finite() {
                     *gradient = 0.0;
                 }
             }
 
-            // 清理动量权重
             for momentum_row in &mut layer.momentum_weights {
                 for momentum in momentum_row {
                     if !momentum.is_finite() {
@@ -462,15 +460,19 @@ impl DeepNeuralNetwork {
                 }
             }
 
-            // 清理动量偏置
             for momentum_bias in &mut layer.momentum_biases {
                 if !momentum_bias.is_finite() {
                     *momentum_bias = 0.0;
                 }
             }
+
+            if layer.seq_len == 0 {
+                layer.seq_len = 1;
+            }
+            if layer.bidirectional && layer.activations.len() == 0 {
+            }
         }
 
-        // 清理学习率和其他参数
         if !self.learning_rate.is_finite() {
             self.learning_rate = 0.001;
         }
@@ -481,10 +483,9 @@ impl DeepNeuralNetwork {
             self.dropout_rate = 0.1;
         }
     }
+
     pub fn validate(&self) -> bool {
-        // 检查所有层是否有效
         for layer in &self.layers {
-            // 检查权重
             for weights in &layer.weights {
                 for w in weights {
                     if !w.is_finite() {
@@ -493,14 +494,12 @@ impl DeepNeuralNetwork {
                 }
             }
 
-            // 检查偏置
             for bias in &layer.biases {
                 if !bias.is_finite() {
                     return false;
                 }
             }
 
-            // 检查其他浮点字段
             for activation in &layer.activations {
                 if !activation.is_finite() {
                     return false;
@@ -528,11 +527,11 @@ impl DeepNeuralNetwork {
             }
         }
 
-        // 检查网络参数
         self.learning_rate.is_finite()
             && self.momentum.is_finite()
             && self.dropout_rate.is_finite()
     }
+
     pub fn activate(x: f32, func: &ActivationFunction) -> f32 {
         match func {
             ActivationFunction::ReLU => x.max(0.0),
@@ -544,15 +543,12 @@ impl DeepNeuralNetwork {
     }
 
     pub fn light_forward(&mut self, input: &[f32]) -> Vec<f32> {
-        // 仅使用前两层进行轻量级推理
         let mut output = input.to_vec();
 
-        // 第一层
         if self.layers.len() > 0 {
             output = Self::dense_forward(&mut self.layers[0], &output);
         }
 
-        // 第二层
         if self.layers.len() > 1 {
             output = Self::dense_forward(&mut self.layers[1], &output);
         }
@@ -570,7 +566,6 @@ impl DeepNeuralNetwork {
             epoch_count: 0,
         };
 
-        // 构建深度网络架构
         network.build_architecture();
         network
     }
@@ -587,7 +582,8 @@ impl DeepNeuralNetwork {
         self.add_residual_layer(128, 128);
 
         // 第三层：LSTM时序层 (128 -> 256)
-        self.add_lstm_layer(128, 256);
+        self.add_lstm_layer_bi(128, 256, true, 8);
+        //self.add_lstm_layer(128, 256);
 
         // 第四层：残差连接层 (256 -> 256)
         self.add_residual_layer(256, 256);
@@ -601,7 +597,6 @@ impl DeepNeuralNetwork {
         // 输出层：手部概率 (256 -> 4)
         self.add_dense_layer(256, 4, ActivationFunction::Sigmoid);
     }
-
 
     fn add_dense_layer(&mut self, input_size: usize, output_size: usize, activation: ActivationFunction) {
         let mut weights = Vec::new();
@@ -629,6 +624,8 @@ impl DeepNeuralNetwork {
             gradients: vec![0.0; output_size],
             momentum_weights,
             momentum_biases: vec![0.0; output_size],
+            bidirectional: false,
+            seq_len: 1,
             layer_type: LayerType::Dense,
             activation_func: activation,
         };
@@ -637,18 +634,38 @@ impl DeepNeuralNetwork {
     }
 
     fn add_lstm_layer(&mut self, input_size: usize, output_size: usize) {
-        // LSTM实现 -> 别问我为什么这么少，简化
         let layer = NetworkLayer {
-            weights: vec![vec![0.0; input_size]; output_size * 4], // 这里4个门
+            weights: vec![vec![0.0; input_size]; output_size * 4],
             biases: vec![0.0; output_size * 4],
             activations: vec![0.0; output_size],
             gradients: vec![0.0; output_size],
             momentum_weights: vec![vec![0.0; input_size]; output_size * 4],
             momentum_biases: vec![0.0; output_size * 4],
+            bidirectional: false,
+            seq_len: 1,
             layer_type: LayerType::LSTM,
-            activation_func: ActivationFunction::Tanh, // LSTM通常使用Tanh激活
+            activation_func: ActivationFunction::Tanh,
         };
 
+        self.layers.push(layer);
+    }
+
+    fn add_lstm_layer_bi(&mut self, input_size: usize, output_size: usize, bidirectional: bool, seq_len: usize) {
+        let dir_mul = if bidirectional { 2 } else { 1 };
+        // 行数：output_size * 4 * dir_mul
+        let rows = output_size * 4 * dir_mul;
+        let layer = NetworkLayer {
+            weights: vec![vec![0.0; input_size]; rows],
+            biases: vec![0.0; rows],
+            activations: vec![0.0; output_size * if bidirectional { 2 } else { 1 }],
+            gradients: vec![0.0; output_size * if bidirectional { 2 } else { 1 }],
+            momentum_weights: vec![vec![0.0; input_size]; rows],
+            momentum_biases: vec![0.0; rows],
+            bidirectional,
+            seq_len: if seq_len == 0 { 1 } else { seq_len },
+            layer_type: LayerType::LSTM,
+            activation_func: ActivationFunction::Tanh,
+        };
         self.layers.push(layer);
     }
 
@@ -660,8 +677,10 @@ impl DeepNeuralNetwork {
             gradients: vec![0.0; output_size],
             momentum_weights: vec![vec![0.0; input_size]; output_size * 3],
             momentum_biases: vec![0.0; output_size],
+            bidirectional: false,
+            seq_len: 1,
             layer_type: LayerType::Attention,
-            activation_func: ActivationFunction::ReLU, // 注意力层通常使用ReLU或Softmax
+            activation_func: ActivationFunction::ReLU,
         };
 
         self.layers.push(layer);
@@ -675,8 +694,10 @@ impl DeepNeuralNetwork {
             gradients: vec![0.0; output_size],
             momentum_weights: vec![vec![0.0; input_size]; output_size],
             momentum_biases: vec![0.0; output_size],
+            bidirectional: false,
+            seq_len: 1,
             layer_type: LayerType::Residual,
-            activation_func: ActivationFunction::ReLU, // 残差连接通常使用ReLU
+            activation_func: ActivationFunction::ReLU,
         };
 
         self.layers.push(layer);
@@ -690,26 +711,21 @@ impl DeepNeuralNetwork {
             match layer.layer_type {
                 LayerType::Dense => {
                     current_input = Self::dense_forward(layer, &current_input);
-                },
+                }
                 LayerType::LSTM => {
                     current_input = Self::lstm_forward(layer, &current_input);
-                },
+                }
                 LayerType::Attention => {
                     current_input = Self::attention_forward(layer, &current_input);
-                },
+                }
                 LayerType::Residual => {
-                    // 获取残差连接输入
                     let residual_input = layer_outputs
-                        .get(layer_idx.saturating_sub(2)) // 安全索引
-                        .unwrap_or(&current_input) // 回退到当前输入
+                        .get(layer_idx.saturating_sub(2))
+                        .unwrap_or(&current_input)
                         .clone();
 
-                    current_input = Self::residual_forward(
-                        layer,
-                        &current_input,
-                        &residual_input
-                    );
-                },
+                    current_input = Self::residual_forward(layer, &current_input, &residual_input);
+                }
             }
             layer_outputs.push(current_input.clone());
         }
@@ -724,30 +740,123 @@ impl DeepNeuralNetwork {
             for (w, x) in weights.iter().zip(input.iter()) {
                 sum += w * x;
             }
-            // 使用正确的激活函数
             output[i] = DeepNeuralNetwork::activate(sum, &layer.activation_func);
         }
         layer.activations = output.clone();
         output
     }
 
-    // 3. 修正 LSTM 层前向传播
     fn lstm_forward(layer: &mut NetworkLayer, input: &[f32]) -> Vec<f32> {
-        let output_size = layer.activations.len();
-        let mut output = vec![0.0; output_size];
-        for i in 0..output_size {
-            let mut sum = 0.0;
-            for (j, x) in input.iter().enumerate() {
-                if j < layer.weights[i].len() {
-                    sum += layer.weights[i][j] * x;
+        // 如果 seq_len == 1 行为近似原实现
+        if layer.seq_len <= 1 {
+            let output_size = layer.activations.len();
+            let mut output = vec![0.0; output_size];
+            // 当 layer.bidirectional==true 但 seq_len==1，则我们仍然把 activations 长度视为 out_size*2
+            let rows = layer.weights.len();
+            // Use first output_size rows as representative (backward part ignored for seq_len==1)
+            for i in 0..output_size {
+                let mut sum = 0.0;
+                if i < layer.weights.len() {
+                    for (j, x) in input.iter().enumerate() {
+                        if j < layer.weights[i].len() {
+                            sum += layer.weights[i][j] * x;
+                        }
+                    }
                 }
+                let bias = if i < layer.biases.len() { layer.biases[i] } else { 0.0 };
+                sum += bias;
+                output[i] = DeepNeuralNetwork::activate(sum, &layer.activation_func);
             }
-            sum += layer.biases[i];
-            // 使用正确的激活函数
-            output[i] = DeepNeuralNetwork::activate(sum, &layer.activation_func);
+            layer.activations = output.clone();
+            return output;
         }
-        layer.activations = output.clone();
-        output
+
+        // seq_len > 1: 把 input 视作 seq_len * input_size
+        let seq_len = layer.seq_len;
+        let total_len = input.len();
+        let input_size = if seq_len > 0 { total_len / seq_len } else { total_len };
+        let out_per_dir = if layer.bidirectional {
+            // activations length = out_per_dir * 2
+            layer.activations.len() / 2.max(1)
+        } else {
+            layer.activations.len()
+        };
+        // defensive:
+        let input_size = if input_size == 0 { total_len } else { input_size };
+
+        // split input into time steps
+        let mut seq_slices: Vec<&[f32]> = Vec::with_capacity(seq_len);
+        for t in 0..seq_len {
+            let start = t * input_size;
+            let end = (start + input_size).min(input.len());
+            seq_slices.push(&input[start..end]);
+        }
+
+        // helper: compute per-direction hidden sequence by a simplified linear->activation
+        // weights layout per direction: output_size * 4 rows (we simply pick representative gate rows)
+        let rows_per_dir = (layer.weights.len() / if layer.bidirectional { 2 } else { 1 }).max(1);
+        let compute_dir = |weights_chunk: &Vec<Vec<f32>>, biases_chunk: &[f32], seq: &Vec<&[f32]>| -> Vec<Vec<f32>> {
+            let mut h_seq: Vec<Vec<f32>> = Vec::with_capacity(seq.len());
+            // out size per dir:
+            let out_size = biases_chunk.len() / 4.max(1); // since biases_chunk stored per gate-set
+            let out_size = if out_size == 0 { weights_chunk.len() / 4 } else { out_size };
+            for t in 0..seq.len() {
+                let x = seq[t];
+                let mut h_t = vec![0.0f32; out_size];
+                for i in 0..out_size {
+                    // choose representative row index (i*4)
+                    let row_idx = i * 4;
+                    if row_idx < weights_chunk.len() {
+                        let wrow = &weights_chunk[row_idx];
+                        let mut s = 0.0f32;
+                        for (j, &xj) in x.iter().enumerate().take(wrow.len()) {
+                            s += wrow[j] * xj;
+                        }
+                        let b = if row_idx < biases_chunk.len() { biases_chunk[row_idx] } else { 0.0 };
+                        s += b;
+                        h_t[i] = DeepNeuralNetwork::activate(s, &layer.activation_func);
+                    } else {
+                        h_t[i] = 0.0;
+                    }
+                }
+                h_seq.push(h_t);
+            }
+            h_seq
+        };
+
+        // slice weights/biases for forward and backward
+        let mut outputs_concat: Vec<f32> = Vec::new();
+        let rows_per_dir = (layer.weights.len() / if layer.bidirectional { 2 } else { 1 }).max(1);
+        // build Vec copies for the two chunks to pass into compute_dir (safer to pass Vec)
+        let fw_weights_chunk: Vec<Vec<f32>> = layer.weights[0..rows_per_dir].to_vec();
+        let fw_biases_chunk: Vec<f32> = layer.biases[0..rows_per_dir].to_vec();
+        let fw_hidden_seq = compute_dir(&fw_weights_chunk, &fw_biases_chunk, &seq_slices);
+        let last_fw = fw_hidden_seq.last().cloned().unwrap_or_else(|| vec![0.0f32; out_per_dir]);
+
+        if layer.bidirectional {
+            let bw_weights_chunk: Vec<Vec<f32>> = layer.weights[rows_per_dir..rows_per_dir * 2].to_vec();
+            let bw_biases_chunk: Vec<f32> = layer.biases[rows_per_dir..rows_per_dir * 2].to_vec();
+            let mut rev_seq: Vec<&[f32]> = seq_slices.iter().rev().cloned().collect();
+            let bw_hidden_seq = compute_dir(&bw_weights_chunk, &bw_biases_chunk, &rev_seq);
+            let last_bw = bw_hidden_seq.last().cloned().unwrap_or_else(|| vec![0.0f32; out_per_dir]);
+
+            // concat forward last and backward last
+            for v in last_fw.iter().take(out_per_dir) { outputs_concat.push(*v); }
+            for v in last_bw.iter().take(out_per_dir) { outputs_concat.push(*v); }
+        } else {
+            for v in last_fw.iter().take(out_per_dir) { outputs_concat.push(*v); }
+        }
+
+        // assign to layer.activations (truncate/pad defensively)
+        for (i, val) in outputs_concat.iter().enumerate() {
+            if i < layer.activations.len() {
+                layer.activations[i] = *val;
+            } else {
+                break;
+            }
+        }
+
+        outputs_concat
     }
 
     fn attention_forward(layer: &mut NetworkLayer, input: &[f32]) -> Vec<f32> {
@@ -755,7 +864,7 @@ impl DeepNeuralNetwork {
         let output_size = layer.activations.len();
         let mut output = vec![0.0; output_size];
 
-        // 计算注意力权重
+        // 计算注意力权重（极简）
         let mut attention_weights = vec![0.0; input.len()];
         let mut attention_sum = 0.0;
 
@@ -765,12 +874,13 @@ impl DeepNeuralNetwork {
             attention_sum += weight;
         }
 
-        // 归一化注意力权重
+        if attention_sum == 0.0 {
+            attention_sum = 1.0;
+        }
         for weight in &mut attention_weights {
             *weight /= attention_sum;
         }
 
-        // 应用注意力
         for i in 0..output_size.min(input.len()) {
             output[i] = input[i] * attention_weights[i];
         }
@@ -782,15 +892,9 @@ impl DeepNeuralNetwork {
     fn residual_forward(
         layer: &mut NetworkLayer,
         input: &[f32],
-        residual: &[f32]
+        residual: &[f32],
     ) -> Vec<f32> {
-        // 使用静态版本的全连接计算
-        let dense_output = Self::dense_forward_static(
-            &layer.weights,
-            &layer.biases,
-            input,
-            &layer.activation_func // 传递激活函数
-        );
+        let dense_output = Self::dense_forward_static(&layer.weights, &layer.biases, input, &layer.activation_func); // 传递激活函数
         let mut output = vec![0.0; dense_output.len()];
         for i in 0..output.len() {
             output[i] = dense_output[i] + residual.get(i).unwrap_or(&0.0);
@@ -802,7 +906,7 @@ impl DeepNeuralNetwork {
         weights: &[Vec<f32>],
         biases: &[f32],
         input: &[f32],
-        activation: &ActivationFunction // 添加激活函数参数
+        activation: &ActivationFunction,
     ) -> Vec<f32> {
         let mut output = vec![0.0; weights.len()];
         for (i, (weight_row, bias)) in weights.iter().zip(biases.iter()).enumerate() {
@@ -829,7 +933,6 @@ impl DeepNeuralNetwork {
 
         self.epoch_count += 1;
 
-        // 学习率衰减
         if self.epoch_count % 100 == 0 {
             self.learning_rate *= 0.95;
         }
@@ -839,29 +942,28 @@ impl DeepNeuralNetwork {
         let mut total_gradients: Vec<Vec<Vec<f32>>> = vec![vec![vec![0.0; 0]; 0]; self.layers.len()];
         let mut total_bias_gradients: Vec<Vec<f32>> = vec![vec![0.0; 0]; self.layers.len()];
 
-        // 初始化梯度累积器
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            total_gradients[layer_idx] = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
+            if !layer.weights.is_empty() {
+                total_gradients[layer_idx] = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
+            } else {
+                total_gradients[layer_idx] = vec![];
+            }
             total_bias_gradients[layer_idx] = vec![0.0; layer.biases.len()];
         }
 
-        // 批量前向和反向传播
         for (input, target) in batch {
             let output = self.forward(input);
             self.backward(&output, target, &mut total_gradients, &mut total_bias_gradients);
         }
 
-        // 应用梯度
         self.apply_gradients(&total_gradients, &total_bias_gradients, batch.len());
     }
 
     fn backward(&mut self, output: &[f32], target: &[f32],
                 total_gradients: &mut [Vec<Vec<f32>>],
                 total_bias_gradients: &mut [Vec<f32>]) {
-        // 简化的反向传播实现
         let mut layer_errors = vec![vec![0.0; 0]; self.layers.len()];
 
-        // 计算输出层误差
         if let Some(last_layer_idx) = self.layers.len().checked_sub(1) {
             let output_errors: Vec<f32> = output.iter()
                 .zip(target.iter())
@@ -870,10 +972,8 @@ impl DeepNeuralNetwork {
             layer_errors[last_layer_idx] = output_errors;
         }
 
-        // 反向传播误差
         for layer_idx in (0..self.layers.len()).rev() {
             if layer_idx < self.layers.len() - 1 {
-                // 计算当前层误差
                 let next_layer = &self.layers[layer_idx + 1];
                 let mut current_errors = vec![0.0; self.layers[layer_idx].activations.len()];
 
@@ -887,7 +987,6 @@ impl DeepNeuralNetwork {
                 layer_errors[layer_idx] = current_errors;
             }
 
-            // 计算梯度
             self.calculate_layer_gradients(layer_idx, &layer_errors[layer_idx],
                                            &mut total_gradients[layer_idx],
                                            &mut total_bias_gradients[layer_idx]);
@@ -900,7 +999,7 @@ impl DeepNeuralNetwork {
         let prev_activations = if layer_idx > 0 {
             &self.layers[layer_idx - 1].activations
         } else {
-            return; // 需要输入数据
+            return;
         };
 
         for (i, error) in errors.iter().enumerate() {
@@ -919,23 +1018,20 @@ impl DeepNeuralNetwork {
 
     fn apply_gradients(&mut self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_size: usize) {
         let batch_size_f = batch_size as f32;
-        const MAX_GRAD: f32 = 5.0; // 梯度裁剪阈值
+        const MAX_GRAD: f32 = 5.0;
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             for (i, weight_row) in layer.weights.iter_mut().enumerate() {
                 for (j, weight) in weight_row.iter_mut().enumerate() {
                     if i < gradients[layer_idx].len() && j < gradients[layer_idx][i].len() {
-                        // 获取原始梯度值
                         let mut grad = gradients[layer_idx][i][j] / batch_size_f;
 
-                        // 梯度裁剪 - 确保梯度不会爆炸
                         if grad > MAX_GRAD {
                             grad = MAX_GRAD;
                         } else if grad < -MAX_GRAD {
                             grad = -MAX_GRAD;
                         }
 
-                        // 动量更新
                         layer.momentum_weights[i][j] =
                             self.momentum * layer.momentum_weights[i][j] - self.learning_rate * grad;
                         *weight += layer.momentum_weights[i][j];
@@ -945,10 +1041,8 @@ impl DeepNeuralNetwork {
 
             for (i, bias) in layer.biases.iter_mut().enumerate() {
                 if i < bias_gradients[layer_idx].len() {
-                    // 获取原始偏置梯度
                     let mut grad = bias_gradients[layer_idx][i] / batch_size_f;
 
-                    // 梯度裁剪
                     if grad > MAX_GRAD {
                         grad = MAX_GRAD;
                     } else if grad < -MAX_GRAD {
@@ -964,13 +1058,14 @@ impl DeepNeuralNetwork {
     }
 }
 
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AdvancedFeatureExtractor {
     pattern_library: HashMap<String, PatternSignature>,
     temporal_patterns: VecDeque<TemporalFeature>,
     spatial_patterns: Vec<SpatialFeature>,
     difficulty_estimator: DifficultyEstimator,
-    #[serde(skip)]  // 不需要序列化
+    #[serde(skip)]
     last_logged_bpm: Option<f32>,
     #[serde(skip)]
     last_logged_time: f32,
@@ -1450,7 +1545,7 @@ struct ProcessedNote {
     confidence: f32,
     //#[serde(default)]
     features: Vec<f32>,
-    judge: JudgeStatus,  // Add this field
+    judge: JudgeStatus,
     difficulty: f32,
     duration: f32,
 }
@@ -2172,8 +2267,7 @@ impl PhiTKAdvancedAI {
             return;
         }
 
-        //判定线id
-        let rotation = *self.line_rotations.get(&line_id).unwrap_or(&0.0);
+        let _rotation = *self.line_rotations.get(&line_id).unwrap_or(&0.0);
 
         /*
 
@@ -2396,7 +2490,7 @@ impl PhiTKAdvancedAI {
         for note in notes {
             if let Some(hand) = note.assigned_hand {
                 let mismatch = match hand {
-                    Hand::Left => note.position.x > 0.3,
+                    Hand::Left => note.position.x > 0.2,
                     Hand::Right => note.position.x < -0.3,
                 };
 
@@ -2532,13 +2626,13 @@ impl PhiTKAdvancedAI {
             finger_state.update_busy_status(note.time);
         }
         let rotation = *self.line_rotations.get(&line_id).unwrap_or(&0.0);
-        let rad = rotation.to_radians();
+        let _rad = rotation.to_radians();
 
         let network_output = self.main_network.light_forward(features);
 
         let left_ai_confidence = network_output.get(0).unwrap_or(&0.5);
         let right_ai_confidence = network_output.get(1).unwrap_or(&0.5);
-        let predicted_difficulty = network_output.get(2).unwrap_or(&1.0);
+        let _predicted_difficulty = network_output.get(2).unwrap_or(&1.0);
         let certainty = network_output.get(3).unwrap_or(&0.5);
 
         let note_duration = match &note.kind {
@@ -2546,7 +2640,7 @@ impl PhiTKAdvancedAI {
             _ => 0.1,
         };
 
-        let mut finger_scores: Vec<(Finger, f32)> = Vec::new();
+        let _finger_scores: Vec<(Finger, f32)> = Vec::new();
         for finger_state in &mut self.finger_states {
             finger_state.update_busy_status(note.time);
         }
@@ -2573,18 +2667,18 @@ impl PhiTKAdvancedAI {
 
         let position_weight = match chosen_hand {
             Hand::Left => {
-                if note.position.x < -0.14 { 0.4 }
-                else if note.position.x > 0.07 { -0.5 }
-                else { -0.3 }
+                if note.position.x < -0.17 { 0.4 }
+                else if note.position.x > -0.13 { -0.7 }
+                else { -0.4 }
             }
             Hand::Right => {
-                if note.position.x > 0.07 { 0.6 }
-                else if note.position.x < -0.8 { -0.3 }
-                else { 0.05 } // | - | ++
+                if note.position.x > 0.1 { 0.6 }
+                else if note.position.x < -0.11 { -0.5 }
+                else { 0.07 } // | - | ++
             }
         };
         //TODO: Hand perf
-        let stability_bonus = if let Some(last_hand) = self.last_assigned_hand {
+        let _stability_bonus = if let Some(last_hand) = self.last_assigned_hand {
             if chosen_hand == last_hand {
                 self.consistency_bonus
             } else {
@@ -2644,13 +2738,13 @@ impl PhiTKAdvancedAI {
 
     fn calculate_reward(&self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
         let mut reward = confidence * 2.0;
-        let position_bonus = if note.position.x < -0.14 {
-            if chosen_hand == Hand::Left { 0.4 } else { -0.5 }
+        let position_bonus = if note.position.x < 0.04 {
+            if chosen_hand == Hand::Left { 0.7 } else { -0.5 }
         } else if note.position.x > 0.07 {
-            if chosen_hand == Hand::Right { 0.6 } else { -0.3 }
+            if chosen_hand == Hand::Right { 0.6 } else { -0.5 }
         } else {
             // Center area - bonus for right hand
-            if chosen_hand == Hand::Right { 0.05 } else { -0.3 }
+            if chosen_hand == Hand::Right { 0.05 } else { -0.03 }
         };
         reward += position_bonus;
         let hand_fingers: Vec<_> = self.finger_states.iter()
