@@ -262,16 +262,22 @@ impl Note {
         if res.config.hand_split {
             match self.hand {
                 Hand::Left => {
-                    color.r = 1.0;
-                    color.g = 0.8;
-                    color.b = 0.8;
-                }
-                Hand::Right => {
                     color.r = 0.2;
                     color.g = 0.5;
                     color.b = 1.0;
                 }
+                Hand::Right => {
+                    color.r = 1.0;
+                    color.g = 0.6;
+                    color.b = 0.7;
+                }
             }
+            const BASE_LUMINANCE: f32 = 0.9;
+            let luminance = color.r * 0.299 + color.g * 0.587 + color.b * 0.114;
+            let adjust_factor = BASE_LUMINANCE / luminance.max(0.001);
+            color.r = (color.r * adjust_factor).min(1.0);
+            color.g = (color.g * adjust_factor).min(1.0);
+            color.b = (color.b * adjust_factor).min(1.0);
         }
 
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
