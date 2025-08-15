@@ -453,6 +453,7 @@ impl GameScene {
         let mut res = Resource::new(
             config.clone(),
             info,
+            chart_format.clone(),
             fs,
             player.as_ref().and_then(|it| it.avatar.clone()),
             background,

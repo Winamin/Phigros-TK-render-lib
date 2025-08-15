@@ -14,7 +14,7 @@ const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
 const RPE_HEIGHT_SCALE: f32 = RPE_HEIGHT * (1.0 / 720.0);
 
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum NoteKind {
     Click,
     Hold { end_time: f32, end_height: f32 },
@@ -65,6 +65,7 @@ pub struct RenderConfig<'a> {
     pub invisible_time: f32,
     pub draw_below: bool,
     pub incline_sin: f32,
+    pub global_speed_factor: f32, //speed
 }
 
 #[inline(always)]
@@ -190,6 +191,9 @@ impl Note {
 
     pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
         self.object.set_time(res.time);
+        //if matches!(self.judge, JudgeStatus::Hold(..)) {
+        //    self.height = line_height;
+        //}
         let color = match &mut self.judge {
             JudgeStatus::Hold(perfect, ref mut at, ..) if res.time >= *at => {
                 let bpm_index = if self.format { index as f32 } else { self.time };
@@ -282,6 +286,7 @@ impl Note {
 
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
         let y_factor = ctrl_obj.y.now_opt().unwrap_or(1.);
+        /*
         let spd = self.speed * y_factor;
         let end_spd = self.end_speed * y_factor;
 
@@ -290,6 +295,25 @@ impl Note {
         let height = self.height * inv_aspect * spd;
         let base = height - line_height;
         //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
+
+         */
+        let spd = self.speed * y_factor * config.global_speed_factor;
+        let end_spd = self.end_speed * y_factor * config.global_speed_factor;
+
+        // 使用调整后的速度计算位置
+        let inv_aspect = 1.0 / res.aspect_ratio;
+        let line_height = config.line_height * inv_aspect * spd;
+        let height = self.height * inv_aspect * spd;
+        let base = height - line_height;
+
+        let base = if (self.height - config.line_height).abs() < f32::EPSILON &&
+            config.global_speed_factor != 1.0
+        {
+            let time_offset = (self.time - res.time) * spd;
+            time_offset * inv_aspect
+        } else {
+            height - line_height
+        };
 
         if res.config.aggressive && matches!(self.kind, NoteKind::Hold { .. }) {
             let h = if self.time <= res.time { line_height } else { height };

@@ -3,7 +3,7 @@ use crate::{
     config::Config,
     ext::{create_audio_manger, nalgebra_to_glm, SafeTexture},
     fs::FileSystem,
-    info::ChartInfo,
+    info::{ChartInfo,ChartFormat},
     particle::{AtlasConfig, ColorCurve, Emitter, EmitterConfig},
 };
 use anyhow::{bail, Context, Result};
@@ -368,6 +368,7 @@ pub struct Resource {
     pub time: f32,
     pub config: Config,
     pub audio: AudioManager,
+    pub chart_format: ChartFormat,
     pub music: AudioClip,
     pub track_length: f32,
     pub sfx_click: Sfx,
@@ -451,6 +452,7 @@ impl Resource {
     pub async fn new(
         config: Config,
         info: ChartInfo,
+        chart_format: ChartFormat,
         mut fs: Box<dyn FileSystem>,
         player: Option<SafeTexture>,
         background: SafeTexture,
@@ -491,6 +493,7 @@ impl Resource {
         macroquad::window::gl_set_drawcall_buffer_capacity(MAX_SIZE * 4, MAX_SIZE * 6);
         Ok(Self {
             config,
+            chart_format,
             info,
             aspect_ratio,
             dpi: DPI_VALUE.load(std::sync::atomic::Ordering::SeqCst),

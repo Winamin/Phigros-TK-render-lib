@@ -77,6 +77,7 @@ pub struct Config {
     pub volume_sfx: f32,
     pub volume_bgm: f32,
     pub hand_split: bool,
+    pub note_speed_factor: f32,
 
     // for compatibility
     pub autoplay: Option<bool>,
@@ -136,6 +137,7 @@ impl Default for Config {
             show_progress_text: false,
             show_time_text: false,
             hand_split: false,
+            note_speed_factor: 1.0,
 
             ui_score: true,
             ui_combo: true,

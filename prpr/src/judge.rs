@@ -14,6 +14,7 @@ use serde::Serialize;
 use std::{cell::RefCell, collections::HashMap, num::FpCategory};
 use tracing::debug;
 use crate::core::note::Hand;
+use serde::Deserialize;
 
 pub const FLICK_SPEED_THRESHOLD: f32 = 0.8;
 pub const LIMIT_PERFECT: f32 = 0.08;
@@ -98,7 +99,7 @@ impl FlickTracker {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub enum JudgeStatus {
     NotJudged,
     PreJudge,

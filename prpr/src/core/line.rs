@@ -5,6 +5,7 @@ use crate::{
     judge::{JudgeStatus, LIMIT_BAD},
     ui::Ui,
     hand::assign_hands,
+    info::ChartFormat,
 };
 use macroquad::prelude::*;
 use miniquad::{RenderPass, Texture, TextureParams, TextureWrap, FilterMode};
@@ -488,6 +489,7 @@ impl JudgeLine {
                 invisible_time: f32::INFINITY,
                 draw_below: self.show_below,
                 incline_sin: self.incline.now_opt().map(|it| it.to_radians().sin()).unwrap_or_default(),
+                global_speed_factor: res.config.note_speed_factor,
             };
             if res.config.has_mod(Mods::FADE_OUT) {
                 config.invisible_time = LIMIT_BAD;
@@ -534,10 +536,10 @@ impl JudgeLine {
                         height.now()
                     };
                     let note_height = note.height - line_height + note.object.translation.1.now();
-                    if agg && note_height < height_below / note.speed  {
+                    if agg && note_height < height_below / note.speed && matches!(res.chart_format, ChartFormat::Pgr | ChartFormat::Rpe) {
                         continue;
                     }
-                    if agg && note_height > height_above / note.speed  {
+                    if agg && note_height > height_above / note.speed && matches!(res.chart_format, ChartFormat::Pgr | ChartFormat::Rpe) {
                         break;
                     }
                     note.render(res, &mut config, bpm_list);
@@ -566,10 +568,10 @@ impl JudgeLine {
                             height.now()
                         };
                         let note_height = note.height - line_height + note.object.translation.1.now();
-                        if agg && note_height < -height_above / note.speed {
+                        if agg && note_height < -height_above / note.speed && matches!(res.chart_format, ChartFormat::Pgr | ChartFormat::Rpe) {
                             continue;
                         }
-                        if agg && note_height > -height_below / note.speed {
+                        if agg && note_height > -height_below / note.speed && matches!(res.chart_format, ChartFormat::Pgr | ChartFormat::Rpe) {
                             break;
                         }
                         note.render(res, &mut config, bpm_list);
