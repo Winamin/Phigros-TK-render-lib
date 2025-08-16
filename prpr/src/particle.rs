@@ -686,7 +686,17 @@ impl Emitter {
             gpu.color *= cpu.color.to_vec();
             gpu.pos += vec4(cpu.velocity.x, cpu.velocity.y, cpu.angular_velocity, 0.0) * dt;
 
-            gpu.pos.w = cpu.initial_size * self.batched_size_curve.as_ref().map_or(1.0, |curve| curve.get(cpu.lived / cpu.lifetime));
+            let base_size = cpu.initial_size * self.batched_size_curve.as_ref().map_or(1.0, |curve| curve.get(cpu.lived / cpu.lifetime));
+            let life_progress = cpu.lived / cpu.lifetime;
+
+            let extra_scale = if life_progress > 0.8 {
+                let fade_progress = (life_progress - 0.8) / 0.2;
+                1.0 - fade_progress * (1.0 - 2.0 / 3.0)
+            } else {
+                1.0
+            };
+
+            gpu.pos.w = base_size * extra_scale;
 
             if cpu.lifetime != 0.0 {
                 gpu.data.y = cpu.lived / cpu.lifetime;
