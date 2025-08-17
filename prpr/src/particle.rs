@@ -396,6 +396,8 @@ struct CpuParticle {
     frame: u16,
     initial_size: f32,
     color: Color,
+    fade_order: f32,
+    fade_start_time: Option<f32>,
 }
 
 pub struct Emitter {
@@ -420,6 +422,9 @@ pub struct Emitter {
     mesh_dirty: bool,
 
     pub config: EmitterConfig,
+    active_particles: usize,
+    current_batch: u64,
+    batch_particle_count: usize,
 }
 
 impl Emitter {
@@ -553,6 +558,9 @@ impl Emitter {
             last_emit_time: 0.0,
             time_passed: 0.0,
             mesh_dirty: false,
+            active_particles: 0,
+            current_batch: 0,
+            batch_particle_count: 0,
         }
     }
 
@@ -601,6 +609,9 @@ impl Emitter {
         };
 
         self.particles_spawned += 1;
+        self.active_particles += 1;
+        self.particles_spawned += 1;
+        self.batch_particle_count += 1;
         self.gpu_particles.push(particle);
         self.cpu_counterpart.push(CpuParticle {
             velocity: random_initial_vector(
@@ -615,10 +626,20 @@ impl Emitter {
             frame: 0,
             initial_size: r,
             color: self.config.base_color,
+            // 为每个粒子分配随机消失顺序值 (0.0-1.0)
+            fade_order: rand::gen_range(0.0, 1.0),
+            fade_start_time: None,
         });
     }
 
     fn update(&mut self, ctx: &mut Context, dt: f32) {
+        // 更新活跃粒子数量
+        self.active_particles = self.cpu_counterpart.len();
+
+        if self.config.emitting {
+
+        }
+
         if self.mesh_dirty {
             self.bindings = self
                 .config
@@ -637,6 +658,7 @@ impl Emitter {
             } else {
                 // how many particles fits into this delta time
                 ((self.time_passed - self.last_emit_time) / gap) as usize
+
             };
 
             for _ in 0..spawn_amount {
@@ -650,6 +672,10 @@ impl Emitter {
                     break;
                 }
             }
+            self.batch_particle_count = self.cpu_counterpart
+                .iter()
+                .filter(|p| p.fade_start_time.is_none())
+                .count();
         }
 
         if self.config.one_shot && self.time_passed > self.config.lifetime {
@@ -659,20 +685,14 @@ impl Emitter {
         }
 
         for (gpu, cpu) in self.gpu_particles.iter_mut().zip(&mut self.cpu_counterpart) {
-            // TODO: this is not quite the way to apply acceleration, this is not
-            // fps independent and just wrong
-            /*
-            cpu.velocity += cpu.velocity * self.config.linear_accel * dt;
-            cpu.angular_velocity += cpu.angular_velocity * self.config.angular_accel * dt;
-            cpu.angular_velocity *= 1.0 - self.config.angular_damping;
-            */
-            //Link: Can use explicit euler integration
+            // 使用指数积分保持帧率独立性
             let linear_velocity_factor = (self.config.linear_accel * dt).exp();
             cpu.velocity *= linear_velocity_factor;
             let angular_net_factor = self.config.angular_accel - self.config.angular_damping;
             let angular_velocity_factor = (angular_net_factor * dt).exp();
             cpu.angular_velocity *= angular_velocity_factor;
 
+            // 颜色插值
             gpu.color = {
                 let t = cpu.lived / cpu.lifetime;
                 if t < 0.5 {
@@ -684,14 +704,23 @@ impl Emitter {
                 }
             };
             gpu.color *= cpu.color.to_vec();
+
             gpu.pos += vec4(cpu.velocity.x, cpu.velocity.y, cpu.angular_velocity, 0.0) * dt;
-
             let base_size = cpu.initial_size * self.batched_size_curve.as_ref().map_or(1.0, |curve| curve.get(cpu.lived / cpu.lifetime));
-            let life_progress = cpu.lived / cpu.lifetime;
 
-            let extra_scale = if life_progress > 0.8 {
-                let fade_progress = (life_progress - 0.8) / 0.2;
-                1.0 - fade_progress * (1.0 - 2.0 / 3.0)
+            if cpu.fade_start_time.is_none() && cpu.lived > self.config.lifetime * 0.45114514 {
+                let fade_delay = cpu.fade_order * self.config.lifetime * 0.3;
+                cpu.fade_start_time = Some(cpu.lived + fade_delay);
+            }
+
+            let extra_scale = if let Some(fade_start) = cpu.fade_start_time {
+                if cpu.lived > fade_start {
+                    let fade_duration = self.config.lifetime * 0.3;
+                    let fade_progress = ((cpu.lived - fade_start) / fade_duration).min(1.0);
+                    1.0 - fade_progress
+                } else {
+                    1.0
+                }
             } else {
                 1.0
             };
@@ -702,7 +731,6 @@ impl Emitter {
                 gpu.data.y = cpu.lived / cpu.lifetime;
             }
 
-            //cpu.lived = f32::min(cpu.lived + dt, cpu.lifetime);
             cpu.lived += dt;
             cpu.velocity += self.config.gravity * dt;
 
@@ -720,9 +748,8 @@ impl Emitter {
             }
         }
 
+        // 移除死亡粒子
         for i in (0..self.gpu_particles.len()).rev() {
-            // second if clause is just for the case when lifetime was changed in the editor
-            // normally particle lifetime is always less or equal config lifetime
             if self.cpu_counterpart[i].lived >= self.cpu_counterpart[i].lifetime || self.cpu_counterpart[i].lived > self.config.lifetime {
                 if self.cpu_counterpart[i].lived != self.cpu_counterpart[i].lifetime {
                     self.particles_spawned -= 1;
@@ -732,6 +759,7 @@ impl Emitter {
             }
         }
 
+        // 更新顶点缓冲区
         self.bindings.vertex_buffers[1].update(ctx, &self.gpu_particles[..]);
     }
 
@@ -741,6 +769,7 @@ impl Emitter {
             self.emit_particle(pos);
             self.particles_spawned += 1;
         }
+        self.current_batch += 1;
     }
 
     fn perform_render_pass(&mut self, quad_gl: &QuadGl, ctx: &mut Context) {
