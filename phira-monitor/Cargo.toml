@@ -16,7 +16,7 @@ serde_yaml = "*"
 tokio = "*"
 uuid = { version = "1.4.0", features = ["v4"] }
 
-phira-mp-client = { git = "https://github.com/TeamFlos/phira-mp" }
-phira-mp-common = { git = "https://github.com/TeamFlos/phira-mp" }
+phira-mp-client = { git = "https://github.com/Winamin/phira-mp" }
+phira-mp-common = { git = "https://github.com/Winamin/phira-mp" }
 prpr = { path = "../prpr" }
 serde_json = "1.0.99"
