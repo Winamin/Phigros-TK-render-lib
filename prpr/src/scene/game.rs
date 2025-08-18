@@ -1331,12 +1331,12 @@ impl Scene for GameScene {
         if !self.res.config.disable_loading {
             match self.state {
                 State::Starting => {
-                    // 从 1.0 动画到目标值
-                    self.current_chart_ratio = 1.0 + (self.target_chart_ratio - 1.0) * p;
+                    let t = p * p * (3.0 - 2.0 * p); // easeInOut
+                    self.current_chart_ratio = 1.0 + (self.target_chart_ratio - 1.0) * t;
                 }
                 State::Ending => {
-                    // 从当前值动画回 1.0
-                    self.current_chart_ratio = self.target_chart_ratio + (1.0 - self.target_chart_ratio) * (1.0 - p);
+                    let t = p * p * (3.0 - 2.0 * p); // easeInOut
+                    self.current_chart_ratio = self.target_chart_ratio + (1.0 - self.target_chart_ratio) * (1.0 - t);
                 }
                 _ => {
                     // 其他状态使用目标值
