@@ -626,14 +626,12 @@ impl Emitter {
             frame: 0,
             initial_size: r,
             color: self.config.base_color,
-            // 为每个粒子分配随机消失顺序值 (0.0-1.0)
             fade_order: rand::gen_range(0.0, 1.0),
             fade_start_time: None,
         });
     }
 
     fn update(&mut self, ctx: &mut Context, dt: f32) {
-        // 更新活跃粒子数量
         self.active_particles = self.cpu_counterpart.len();
 
         if self.config.emitting {
@@ -685,14 +683,12 @@ impl Emitter {
         }
 
         for (gpu, cpu) in self.gpu_particles.iter_mut().zip(&mut self.cpu_counterpart) {
-            // 使用指数积分保持帧率独立性
             let linear_velocity_factor = (self.config.linear_accel * dt).exp();
             cpu.velocity *= linear_velocity_factor;
             let angular_net_factor = self.config.angular_accel - self.config.angular_damping;
             let angular_velocity_factor = (angular_net_factor * dt).exp();
             cpu.angular_velocity *= angular_velocity_factor;
 
-            // 颜色插值
             gpu.color = {
                 let t = cpu.lived / cpu.lifetime;
                 if t < 0.5 {
@@ -708,7 +704,7 @@ impl Emitter {
             gpu.pos += vec4(cpu.velocity.x, cpu.velocity.y, cpu.angular_velocity, 0.0) * dt;
             let base_size = cpu.initial_size * self.batched_size_curve.as_ref().map_or(1.0, |curve| curve.get(cpu.lived / cpu.lifetime));
 
-            if cpu.fade_start_time.is_none() && cpu.lived > self.config.lifetime * 0.45114514 {
+            if cpu.fade_start_time.is_none() && cpu.lived > self.config.lifetime * 0.561124 {
                 let fade_delay = cpu.fade_order * self.config.lifetime * 0.3;
                 cpu.fade_start_time = Some(cpu.lived + fade_delay);
             }
@@ -748,7 +744,6 @@ impl Emitter {
             }
         }
 
-        // 移除死亡粒子
         for i in (0..self.gpu_particles.len()).rev() {
             if self.cpu_counterpart[i].lived >= self.cpu_counterpart[i].lifetime || self.cpu_counterpart[i].lived > self.config.lifetime {
                 if self.cpu_counterpart[i].lived != self.cpu_counterpart[i].lifetime {
@@ -758,8 +753,6 @@ impl Emitter {
                 self.cpu_counterpart.swap_remove(i);
             }
         }
-
-        // 更新顶点缓冲区
         self.bindings.vertex_buffers[1].update(ctx, &self.gpu_particles[..]);
     }
 
