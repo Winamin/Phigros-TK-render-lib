@@ -141,13 +141,14 @@ impl StaticTween {
     }
 }
 
-// TODO assuming monotone, but actually they're not (e.g. Back tween)
 pub struct ClampedTween(pub TweenId, pub Range<f32>, pub Range<f32>);
 impl TweenFunction for ClampedTween {
     fn y(&self, x: f32) -> f32 {
-        (TWEEN_FUNCTIONS[self.0 as usize](f32::tween(&self.1.start, &self.1.end, x)) - self.2.start) / (self.2.end - self.2.start)
+        let normalized_x = (x - self.1.start) / (self.1.end - self.1.start); // 将输入x从输入范围映射到[0,1]区间
+        let tween_value = TWEEN_FUNCTIONS[self.0 as usize](normalized_x); // 算 tween 的值并钳制到[0,1]范围
+        let clamped_value = tween_value.clamp(0.0, 1.0);
+        self.2.start + clamped_value * (self.2.end - self.2.start) // 然后将结果映射到输出范围
     }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
