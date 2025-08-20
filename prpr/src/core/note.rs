@@ -300,20 +300,10 @@ impl Note {
         let spd = self.speed * y_factor * config.global_speed_factor;
         let end_spd = self.end_speed * y_factor * config.global_speed_factor;
 
-        // 使用调整后的速度计算位置
         let inv_aspect = 1.0 / res.aspect_ratio;
         let line_height = config.line_height * inv_aspect * spd;
         let height = self.height * inv_aspect * spd;
         let base = height - line_height;
-
-        let base = if (self.height - config.line_height).abs() < f32::EPSILON &&
-            config.global_speed_factor != 1.0
-        {
-            let time_offset = (self.time - res.time) * spd;
-            time_offset * inv_aspect
-        } else {
-            height - line_height
-        };
 
         if res.config.aggressive && matches!(self.kind, NoteKind::Hold { .. }) {
             let h = if self.time <= res.time { line_height } else { height };
