@@ -578,12 +578,15 @@ impl GameScene {
         let res = &mut self.res;
         const BASE_ASPECT_RATIO: f32 = 16.0 / 9.0;
         let is_narrow = res.aspect_ratio < 1.5;  // 1.5 ≈ 3:2，4:3 .1.333
+        let is_4_3 = (res.aspect_ratio - 4.0/3.0).abs() < 0.01;
+
+        let scale_4_3 = if is_4_3 { 1.15 } else { 1.0 };
+        let combo_offset_4_3 = if is_4_3 { 0.012 } else { 0.0 };
 
         let eps = 2e-2 / res.aspect_ratio;
         let top = -1. / res.aspect_ratio;
 
-        // pause
-        let pause_w = 0.011;
+        let pause_w = 0.011 * scale_4_3;
         let pause_h = pause_w * 3.4;
         let mut pause_center = Point::new(
             pause_w * 4.4 - 1.,
@@ -606,7 +609,6 @@ impl GameScene {
             let narrow_factor2 = (BASE_ASPECT_RATIO - res.aspect_ratio) / (BASE_ASPECT_RATIO - 1.0);
             let adjustment = -0.012 / (narrow_factor2 * 2.4).max(0.0);
             score_top += adjustment;
-            //score_y_offset = 0.05;
         }
 
         let actual_score_y = top + eps * 2.8125 - (1. - p) * 0.4;
@@ -630,7 +632,7 @@ impl GameScene {
 
         // combo
         let combo_top = top + eps * 1.346 - (1. - p) * 0.4;
-
+        //按钮作用
         if res.config.ui_pause {
             if res.config.interactive
                 && !tm.paused()
@@ -639,7 +641,7 @@ impl GameScene {
                 touch.phase == TouchPhase::Started && {
                     let p = touch.position;
                     let p = Point::new(p.x, p.y);
-                    (pause_center - p).norm() < 0.05
+                    (pause_center - p).norm() < 0.05 * scale_4_3
                 }
             })
             {
@@ -656,37 +658,32 @@ impl GameScene {
             }
         }
         if tm.now() as f32 - self.pause_first_time <= PAUSE_CLICK_INTERVAL {
-            ui.fill_circle(pause_center.x, pause_center.y, 0.05, Color::new(1., 1., 1., 0.5));
+            ui.fill_circle(pause_center.x, pause_center.y, 0.05 * scale_4_3, Color::new(1., 1., 1., 0.5));
         }
 
         let ct = ui.text(&score).size(0.8).center();
+        // 分数
         if res.config.ui_score {
-            self.chart.with_element(ui, res, UIElement::Score,
-                                    Some((-ct.x + 1. - margin, ct.y + score_top)),
-                                    Some((1. - margin + 0.001, adjusted_score_y)),
-                                    |ui, color| {
-                                        let mut text_size = 0.70867;
-                                        let mut text = ui.text(&score).size(text_size);
-                                        let max_width = 0.55;
-                                        let text_width = text.measure().w;
-                                        if text_width > max_width {
-                                            text_size *= max_width / text_width
-                                        }
-                                        drop(text);
-                                        ui.text(format!("{:07}", self.judge.score()))
-                                            .pos(1. - margin + 0.001, adjusted_score_y)
-                                            .anchor(1., 0.)
-                                            .size(text_size)
-                                            .color(Color { a: color.a * c.a, ..color })
-                                            .draw();
-                                    });
+            self.chart.with_element(ui, res, UIElement::Score, Some((-ct.x + 1. - margin, ct.y + score_top)), Some((1. - margin + 0.001, adjusted_score_y)), |ui, color| {
+                let mut text_size = 0.70867 * scale_4_3;
+                let mut text = ui.text(&score).size(text_size);
+                let max_width = 0.55;
+                let text_width = text.measure().w;
+                if text_width > max_width {
+                    text_size *= max_width / text_width
+                }
+                drop(text);
+                ui.text(format!("{:07}", self.judge.score()))
+                    .pos(1. - margin + 0.001, adjusted_score_y)
+                    .anchor(1., 0.)
+                    .size(text_size)
+                    .color(Color { a: color.a * c.a, ..color })
+                    .draw();
+            });
         }
 
         if res.config.show_acc {
-            let mut acc_size = 0.4;
-            // if is_narrow {
-            //     acc_size *= 1.04;
-            //  }
+            let mut acc_size = 0.4 * scale_4_3;
 
             ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
                 .pos(1. - margin, score_top + score_y_offset)
@@ -710,9 +707,7 @@ impl GameScene {
         if res.config.ui_combo {
             if self.judge.combo() >= 3 {
                 let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
-                    let mut text_size = 1.;
-
-
+                    let mut text_size = 1. * scale_4_3;
                     let max_width = 0.55;
                     let mut text = ui.text(&res.config.combo)
                         .pos(0., combo_top)
@@ -732,10 +727,10 @@ impl GameScene {
                     text_btm
                 });
                 self.chart.with_element(ui, res, UIElement::Combo, Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), Some((0., btm + 0.007777 + unit_h * 0.325 / 2.)), |ui, color| {
-                    let mut combo_text_size = 0.325;
+                    let mut combo_text_size = 0.325 * scale_4_3;
 
                     ui.text(&res.config.combo)
-                        .pos(0., btm + 0.007777)
+                        .pos(0., btm + 0.007777 + combo_offset_4_3)
                         .anchor(0.5, 0.)
                         .size(combo_text_size)
                         .color(Color { a: color.a * c.a, ..color })
@@ -744,9 +739,10 @@ impl GameScene {
             }
         }
 
+        //名字
         if res.config.ui_name {
             self.chart.with_element(ui, res, UIElement::Name, Some((lf + ct.x, bt - ct.y)), Some((-1. + margin * 0.7, -top - eps * 2.)), |ui, color| {
-                let mut text_size = 0.5;
+                let mut text_size = 0.5 * scale_4_3;
 
                 let mut text = ui.text(&res.info.name).size(text_size);
                 let max_width = 0.9;
@@ -764,9 +760,10 @@ impl GameScene {
             });
         }
 
+        //等级
         if res.config.ui_level {
             self.chart.with_element(ui, res, UIElement::Level, Some((-lf - ct.x, bt - ct.y)), Some((1. - margin * 0.7, -top - eps * 2.)), |ui, color| {
-                let mut level_text_size = 0.5;
+                let mut level_text_size = 0.5 * scale_4_3;
 
                 ui.text(&res.info.level)
                     .pos(-lf, bt + (1. - p) * 0.4)
@@ -777,9 +774,10 @@ impl GameScene {
             });
         }
 
+        //水印
         {
             let watermark = res.config.watermark.clone();
-            let mut watermark_size = 0.25;
+            let mut watermark_size = 0.25 * scale_4_3;
 
             if res.config.chart_ratio >= 0.95 {
                 ui.text(&watermark)
@@ -803,8 +801,8 @@ impl GameScene {
         } else {
             res.aspect_ratio / BASE_ASPECT_RATIO
         };
-        let hw = 0.0015 * scale_factor;
-        let height = eps * 1.1;
+        let hw = 0.0015 * scale_factor * scale_4_3;
+        let height = eps * 1.1 * scale_4_3;
         let mut dest = (2. * res.time / res.track_length).min(2.0);
         let mut bar_y = top;
         let mut bar_alpha = 1.0;
@@ -814,7 +812,7 @@ impl GameScene {
             bar_alpha = 1.0 - progress.powi(2);
             bar_y = top - progress * height * 2.5;
         }
-
+        //进度条
         if res.config.ui_pb {
             self.chart.with_element(ui, res, UIElement::Bar, Some((-1., top + height / 2.)), Some((-1., top + height / 2.)), |ui, color| {
                 ui.fill_rect(
