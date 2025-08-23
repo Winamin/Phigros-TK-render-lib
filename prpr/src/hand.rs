@@ -15,7 +15,7 @@ use futures::executor::block_on;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap as StdHashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use wgpu;
 use wgpu::util::DeviceExt;
 
@@ -231,122 +231,163 @@ impl FingerState {
         if time_diff > 0.001 {
             let distance = new_pos.distance_to(&self.position);
             let new_velocity = (new_pos - self.position) * (1.0 / time_diff);
-            self.velocity = self.velocity * 0.6 + new_velocity * 0.4;
+            self.velocity = self.velocity * 0.7 + new_velocity * 0.3;
 
-            let movement_cost = distance * 0.08 + self.velocity.magnitude() * 0.03;
-            let speed_penalty = if self.velocity.magnitude() > 5.0 {
-                (self.velocity.magnitude() - 5.0) * 0.02
-            } else { 0.0 };
+            // 疲劳计算
+            let base_movement_cost = distance * 0.12;
+            let speed_cost = (self.velocity.magnitude() / 10.0).powf(1.5) * 0.08;
+            let time_factor = if time_diff < 0.1 { 2.0 } else { 1.0 };
 
-            self.fatigue = (self.fatigue + movement_cost + speed_penalty).min(1.0);
-            let recovery = (time_diff * 0.4).min(0.2);
+            let total_cost = (base_movement_cost + speed_cost) * time_factor;
+            self.fatigue = (self.fatigue + total_cost).min(1.0);
+
+            // 动态恢复率，基于休息时间
+            let rest_factor = if time_diff > 0.3 { 2.0 } else { 1.0 };
+            let recovery = (time_diff * 0.25 * rest_factor).min(0.3);
             self.fatigue = (self.fatigue - recovery).max(0.0);
         }
 
+        // 繁忙状态更新
         let busy_duration = match note_kind {
-            NoteKind::Hold { end_time, .. } => end_time - time + 0.1,
+            NoteKind::Hold { end_time, .. } => (end_time - time + 0.1).max(0.15),
             NoteKind::Drag => 0.25,
             NoteKind::Flick => 0.2,
-            NoteKind::Click => 0.15,
+            NoteKind::Click => 0.12,
         };
 
         self.is_busy = true;
         self.busy_until = time + busy_duration;
 
+        // 信心更新
         self.total_actions += 1;
         if success {
             self.success_streak += 1;
-            self.confidence = (self.confidence + 0.005).min(1.0);
+            // 信心增长有上限，避免过于自信.jpg
+            let confidence_gain = (0.01 * (1.0 - self.confidence)).max(0.002);
+            self.confidence = (self.confidence + confidence_gain).min(0.95);
         } else {
             self.success_streak = 0;
-            self.confidence = (self.confidence - 0.01).max(0.2);
+            // 失败时信心下降更明显
+            let confidence_loss = (0.03 + self.confidence * 0.01).max(0.01);
+            self.confidence = (self.confidence - confidence_loss).max(0.15);
         }
 
-        let recent_window = 20.0_f32.min(self.total_actions as f32);
-        let recent_success_rate = self.success_streak as f32 / recent_window;
-        self.performance_score = recent_success_rate * 0.4 +
-            self.confidence * 0.3 +
-            (1.0 - self.fatigue) * 0.3;
+        // 性能评分计算改进
+        let recent_window = 15.0_f32.min(self.total_actions as f32);
+        let recent_success_rate = if recent_window > 0.0 {
+            self.success_streak as f32 / recent_window
+        } else {
+            0.5
+        };
+
+        // 添加随机波动，模拟真实表现
+        let randomness = (fastrand::f32() - 0.5) * 0.1;
+        self.performance_score = (
+            recent_success_rate * 0.4 +
+                self.confidence * 0.35 +
+                (1.0 - self.fatigue) * 0.25 +
+                randomness
+        ).clamp(0.1, 0.95);
 
         self.position = new_pos;
         self.last_time = time;
     }
 
-    fn update_busy_status(&mut self, current_time: f32) {
-        if current_time > self.busy_until {
-            self.is_busy = false;
-        }
-    }
-
-    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32, current_time: f32, note_kind: &NoteKind, note_duration: f32) -> f32 {
-        let is_available = current_time > self.busy_until;
+    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32,
+                                  current_time: f32, note_kind: &NoteKind, note_duration: f32) -> f32 {
+        // 繁忙状态检查
+        let is_available = current_time >= self.busy_until;
         let distance = target_pos.distance_to(&self.position);
         let time_diff = time - self.last_time;
-        let mut score = 1.0;
 
+        let mut score = 0.5; // 基础分数
+
+        // 繁忙惩罚
         if !is_available {
-            let busy_penalty = (self.busy_until - current_time) * 10.0;
+            let busy_penalty = (self.busy_until - current_time).min(1.0) * 0.8;
             score -= busy_penalty;
         }
 
+        // 位置偏好 - 增加梯度变化
         let position_weight = match self.finger.to_hand() {
             Hand::Left => {
-                if target_pos.x < -0.17 {
-                    0.4
-                } else if target_pos.x > -0.13 {
-                    -0.1
+                if target_pos.x < -0.25 {
+                    0.35 + ((-0.25 - target_pos.x) * 0.5).min(0.15)
+                } else if target_pos.x > 0.0 {
+                    -0.15 - (target_pos.x * 0.8).min(0.4)
                 } else {
-                    0.0
+                    // 中性区域的线性过渡
+                    0.35 * ((-target_pos.x) / 0.25)
                 }
             }
             Hand::Right => {
-                if target_pos.x > 0.1 {
-                    0.4
-                } else if target_pos.x < -0.11 {
-                    -0.3
+                if target_pos.x > 0.15 {
+                    0.4 + ((target_pos.x - 0.15) * 0.6).min(0.2)
+                } else if target_pos.x < -0.15 {
+                    -0.25 - ((-target_pos.x - 0.15) * 0.9).min(0.35)
                 } else {
-                    0.09
+                    // 中性区域
+                    0.1 + (target_pos.x / 0.15) * 0.3
                 }
             }
         };
         score += position_weight;
 
-        let distance_score = if distance < 0.2 {
-            1.0 - distance * 2.0
-        } else if distance < 0.5 {
-            0.6 - (distance - 0.2) * 1.5
+        // 距离评分
+        let distance_score = if distance < 0.1 {
+            0.9 - distance * 2.0
+        } else if distance < 0.3 {
+            0.7 - (distance - 0.1) * 1.5
+        } else if distance < 0.6 {
+            0.4 - (distance - 0.3) * 0.8
         } else {
-            0.15 - (distance - 0.5).min(0.5) * 0.3
+            0.1 - (distance - 0.6).min(0.4) * 0.25
         };
-        score *= distance_score;
+        score *= distance_score.max(0.1);
 
-        score *= 1.0 - self.fatigue * 0.3;
+        // 疲劳影响 - 非线性
+        let fatigue_penalty = self.fatigue.powf(1.5) * 0.35;
+        score *= (1.0 - fatigue_penalty);
 
-        if time_diff > 0.0 {
-            let time_score = if time_diff < 0.08 {
-                (time_diff / 0.08) * 0.5
-            } else if time_diff < 0.15 {
-                1.0
-            } else if time_diff < 0.3 {
-                0.9
+        // 时间间隔评分
+        if time_diff > 0.001 {
+            let time_score = if time_diff < 0.06 {
+                0.3 + (time_diff / 0.06) * 0.4 // 过快惩罚
+            } else if time_diff < 0.2 {
+                0.7 + ((time_diff - 0.06) / 0.14) * 0.25 // 最佳区间
+            } else if time_diff < 0.5 {
+                0.95 - ((time_diff - 0.2) / 0.3) * 0.15 // 稍慢
             } else {
-                1.1
+                0.8 + ((time_diff - 0.5).min(0.5) / 0.5) * 0.15 // 很慢反而好
             };
             score *= time_score;
         }
 
         if matches!(note_kind, NoteKind::Hold { .. }) {
-            let hold_end_time = time + note_duration;
-            if current_time < hold_end_time {
-                score *= 0.8;
+            if self.is_busy {
+                score *= 0.6;
             }
         }
 
-        score *= 0.7 + self.performance_score * 0.3;
-        let difficulty_factor = 1.0 - (note_difficulty - 1.0) * (1.0 - self.confidence) * 0.2;
+        // 性能调整
+        let performance_factor = 0.5 + self.performance_score * 0.5;
+        score *= performance_factor;
+
+        // 难度适应
+        let difficulty_factor = 1.0 - (note_difficulty - 1.0).max(0.0) * (1.0 - self.confidence) * 0.15;
         score *= difficulty_factor;
 
-        score.max(0.0)
+        // 添加小量随机性，避免完全确定性
+        let randomness = (fastrand::f32() - 0.5) * 0.05;
+        score += randomness;
+
+        score.clamp(0.0, 1.0)
+    }
+    fn update_busy_status(&mut self, current_time: f32) {
+        if current_time >= self.busy_until {
+            self.is_busy = false;
+            self.busy_until = -1.0;
+        }
     }
 }
 
@@ -540,22 +581,49 @@ impl DeepNeuralNetwork {
     }
 
     pub fn light_forward(&mut self, input: &[f32]) -> Vec<f32> {
+        // 这里会优先走 GPU 路径，如果不行再走 CPU 路径
         if self.device.is_some() {
-            self.gpu_forward(input)
-        } else {
-            let mut output = input.to_vec();
-
-            if self.layers.len() > 0 {
-                output = Self::dense_forward(&mut self.layers[0], &output);
-            }
-
-            if self.layers.len() > 1 {
-                output = Self::dense_forward(&mut self.layers[1], &output);
-            }
-
-            output
+            return self.gpu_forward(input);
         }
+        let mut current_input = input.to_vec();
+        let mut layer_outputs: Vec<Vec<f32>> = Vec::new();
+
+        for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
+            match layer.layer_type {
+                LayerType::Dense => {
+                    current_input = Self::dense_forward(layer, &current_input);
+                }
+                LayerType::LSTM => {
+                    current_input = Self::lstm_forward(layer, &current_input);
+                }
+                LayerType::Attention => {
+                    current_input = Self::attention_forward(layer, &current_input);
+                }
+                LayerType::Residual => {
+                    // TODO：residual 通常需要一个较早层的输出作为 residual 输入（这里 forward 中使用了 layer_idx-2 的策略）
+                    let residual_input = layer_outputs
+                        .get(layer_idx.saturating_sub(2))
+                        .unwrap_or(&current_input)
+                        .clone();
+                    current_input = Self::residual_forward(layer, &current_input, &residual_input);
+                }
+            }
+            layer_outputs.push(current_input.clone());
+            #[cfg(debug_assertions)]
+            {
+                if current_input.iter().any(|v| !v.is_finite()) {
+                    eprintln!(
+                        "[light_forward DEBUG] layer {} produced non-finite values (first few): {:?}",
+                        layer_idx,
+                        &current_input[..current_input.len().min(4)]
+                    );
+                }
+            }
+        }
+
+        current_input
     }
+
 
     fn new() -> Self {
         let mut network = Self {
@@ -794,7 +862,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Matmul Pass"),
-                    timestamp_writes: None, // 添加此行
+                    timestamp_writes: None,
                 });
                 cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
                 cpass.set_bind_group(0, &matmul_bind_group, &[]);
@@ -816,9 +884,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             }
             queue.submit(Some(encoder.finish()));
 
-            // 为了将当前层的激活缓冲区用作下一层的输入，需要能够从中复制。
-            // wgpu 不允许一个缓冲区同时作为存储（Storage）和复制源（Copy Src）在同一个 pass 中。
-            // 因此需要创建一个新的缓冲区来承载下一层的输入。
+            // 为了将当前层的激活缓冲区用作下一层的输入，需要能够从中复制
+            // sb wgpu 不允许一个缓冲区同时作为存储（Storage）和复制源（Copy Src）在同一个 pass 中
+            // 需要创建一个新的缓冲区来承载下一层的输入
             let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Input Buffer for Layer {}", i + 1)),
                 size: activation_buffer.size(),
@@ -908,19 +976,32 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
     fn build_architecture(&mut self) {
         self.add_dense_layer(16, 128, ActivationFunction::ReLU);
-
         self.add_attention_layer(128, 128);
         self.add_residual_layer(128, 128);
-
         self.add_lstm_layer_bi(128, 256, true, 8);
-
         self.add_residual_layer(256, 256);
-
         self.add_dense_layer(256, 512, ActivationFunction::Swish);
-
         self.add_dense_layer(512, 256, ActivationFunction::GELU);
+        self.add_dense_layer(256, 4, ActivationFunction::Tanh);
+    }
 
-        self.add_dense_layer(256, 4, ActivationFunction::Sigmoid);
+    fn normalize_output(&self, raw_output: &[f32]) -> Vec<f32> {
+        let mut normalized = raw_output.to_vec();
+        if normalized.len() >= 2 {
+            let left_raw = normalized[0];
+            let right_raw = normalized[1];
+            let temperature = 2.0;
+            let left_exp = (left_raw / temperature).exp();
+            let right_exp = (right_raw / temperature).exp();
+            let sum = left_exp + right_exp;
+            normalized[0] = left_exp / sum;
+            normalized[1] = right_exp / sum;
+        }
+        if normalized.len() >= 4 {
+            normalized[3] = normalized[3].clamp(0.3, 0.9);
+        }
+
+        normalized
     }
 
     fn add_dense_layer(&mut self, input_size: usize, output_size: usize, activation: ActivationFunction) {
@@ -1440,6 +1521,7 @@ impl AdvancedFeatureExtractor {
 
     fn extract_features(&mut self, notes: &[ProcessedNote], window_size: usize, bpm_list: &BpmList) -> Vec<f32> {
         let mut features = Vec::new();
+        
 
         features.extend(self.extract_position_features(notes));
 
@@ -1453,7 +1535,10 @@ impl AdvancedFeatureExtractor {
 
         features.extend(self.extract_spatial_features(notes));
 
+        //println!("[特征提取] 特征: {:?}", features);
+
         features
+        
     }
 
     fn extract_position_features(&self, notes: &[ProcessedNote]) -> Vec<f32> {
@@ -2273,7 +2358,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn analyze_and_assign(&mut self, notes: &mut [Note], config: &Config, bpm_list: &BpmList, line_id: usize) {
-
+                //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
             return;
         }
@@ -2292,7 +2377,7 @@ impl PhiTKAdvancedAI {
 
         self.apply_and_learn(notes, &processed_notes);
 
-        if self.experience_replay.len() >= 64 && self.total_notes_processed % 100 == 0 {
+        if self.experience_replay.len() >= 32 && self.total_notes_processed % 50 == 0 {
             self.train_network();
         }
 
@@ -2567,10 +2652,14 @@ impl PhiTKAdvancedAI {
             let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
             notes[i].features = features.clone();
 
-            let (chosen_hand, confidence) = self.make_ai_decision(&features, &notes[i], line_id);
-
+            let (chosen_hand, confidence, chosen_finger) = self.make_ai_decision(&features, &notes[i], line_id);
             notes[i].assigned_hand = Some(chosen_hand);
             notes[i].confidence = confidence;
+
+            if let Some(finger_state) = self.finger_states.iter_mut().find(|fs| fs.finger == chosen_finger) {
+                let success = notes[i].judge == JudgeStatus::Judged;
+                finger_state.update_state(notes[i].position, notes[i].time, success, &notes[i].kind);
+            }
 
             let success = notes[i].judge == JudgeStatus::Judged;
             match chosen_hand {
@@ -2582,71 +2671,106 @@ impl PhiTKAdvancedAI {
         }
     }
 
-    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, line_id: usize) -> (Hand, f32) {
+    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, line_id: usize) -> (Hand, f32, Finger) {
         for finger_state in &mut self.finger_states {
             finger_state.update_busy_status(note.time);
         }
 
-        let network_output = self.main_network.light_forward(features);
+        // 网络前向传播
+        let raw_output = self.main_network.forward(features);
 
-        let left_ai_confidence = network_output.get(0).copied().unwrap_or(0.5);
-        let right_ai_confidence = network_output.get(1).copied().unwrap_or(0.5);
-        let certainty = network_output.get(3).copied().unwrap_or(0.5);
+        // 输出归一化处理
+        let network_output = self.main_network.normalize_output(&raw_output);
 
+        let left_ai_confidence = network_output.get(0).copied().unwrap_or(0.4);
+        let right_ai_confidence = network_output.get(1).copied().unwrap_or(0.4);
+        let certainty = network_output.get(3).copied().unwrap_or(0.6);
+
+        // 添加网络输出日志（改进后的值）
+       // println!("[AI决策] 线路{} 时间{:.2}s 位置({:.2},{:.2}) 网络输出: L:{:.3} R:{:.3} 确定性:{:.3}",
+        //         line_id, note.time, note.position.x, note.position.y,
+        //         left_ai_confidence, right_ai_confidence, certainty);
+
+        // 计算手指评分
         let mut finger_scores: Vec<(Finger, f32)> = self.finger_states.iter()
-            .map(|fs| (fs.finger, fs.calculate_assignment_score(note.position, note.time, note.difficulty, note.time, &note.kind, note.duration)))
+            .map(|fs| {
+                let score = fs.calculate_assignment_score(
+                    note.position, note.time, note.difficulty,
+                    note.time, &note.kind, note.duration
+                );
+                (fs.finger, score)
+            })
             .collect();
 
         finger_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
+       // println!("[手指评分] 线路{} 时间{:.2}s", line_id, note.time);
+        for (i, (finger, score)) in finger_scores.iter().enumerate() {
+            let state = self.finger_states.iter().find(|fs| fs.finger == *finger).unwrap();
+           // println!("  {}: {:?} 评分:{:.3} 位置({:.2},{:.2}) 疲劳:{:.2} 信心:{:.2} 繁忙:{}",
+             //        i, finger, score, state.position.x, state.position.y,
+            //         state.fatigue, state.confidence, state.is_busy);
+        }
+
         let best_finger = finger_scores[0].0;
         let best_score = finger_scores[0].1;
-
         let chosen_hand = best_finger.to_hand();
 
+        // 位置权重计算
         let position_weight = match chosen_hand {
-            Hand::Left => if note.position.x < -0.17 { 0.4 } else if note.position.x > -0.13 { -0.7 } else { -0.4 },
-            Hand::Right => if note.position.x > 0.07 { 0.6 } else if note.position.x < -0.11 { -0.5 } else { 0.07 },
+            Hand::Left => {
+                if note.position.x < -0.2 { 0.3 }
+                else if note.position.x > 0.1 { -0.4 }
+                else { -0.1 }
+            },
+            Hand::Right => {
+                if note.position.x > 0.1 { 0.35 }
+                else if note.position.x < -0.2 { -0.3 }
+                else { 0.05 }
+            },
         };
 
-        let ai_weight = (certainty * self.pattern_recognition_strength).clamp(0.2, 0.8);
+        // 动态权重分配
+        let base_certainty = certainty.clamp(0.3, 0.85);
+        let ai_weight = base_certainty * self.pattern_recognition_strength * 0.7;
         let heuristic_weight = 1.0 - ai_weight;
 
-        let hand_ai_confidence = if chosen_hand == Hand::Left { left_ai_confidence } else { right_ai_confidence };
+        let hand_ai_confidence = if chosen_hand == Hand::Left {
+            left_ai_confidence
+        } else {
+            right_ai_confidence
+        };
 
-        let final_confidence = (hand_ai_confidence * ai_weight +
-            (best_score * 0.5 + 0.5) * heuristic_weight +
-            position_weight).clamp(0.0, 1.0);
+        // 最终信心计算
+        let final_confidence = (
+            hand_ai_confidence * ai_weight +
+                best_score * heuristic_weight +
+                position_weight * 0.1
+        ).clamp(0.2, 0.92);
 
-        if let Some(last_hand) = self.last_assigned_hand {
-            if chosen_hand != last_hand {
-                self.hand_switch_count += 1;
-            }
-        }
-
-        self.recent_assignments.push_back((chosen_hand, note.time, final_confidence));
-        if self.recent_assignments.len() > 50 {
-            self.recent_assignments.pop_front();
-        }
-        self.last_assigned_hand = Some(chosen_hand);
-
-        let adjusted_exploration = self.exploration_rate * (1.0 - self.stability_factor);
+        // 探索性决策（降低探索率）
+        let adjusted_exploration = self.exploration_rate * 0.6;
         let final_hand = if fastrand::f32() < adjusted_exploration {
             if fastrand::bool() { Hand::Left } else { Hand::Right }
         } else {
             chosen_hand
         };
 
-        (final_hand, final_confidence)
+        //println!("[最终决策] 线路{} 时间{:.2}s 选择:{:?} 信心:{:.3} 探索:{:.3}",
+               //  line_id, note.time, final_hand, final_confidence, adjusted_exploration);
+
+        (final_hand, final_confidence, best_finger)
     }
 
     fn record_experience(&mut self, features: &[f32], note: &ProcessedNote, chosen_hand: Hand, confidence: f32) {
         let reward = self.calculate_reward(note, chosen_hand, confidence);
+        let feature_diversity = features.iter().map(|&x| (x - 0.5).abs()).sum::<f32>() / features.len() as f32;
+        let priority = if feature_diversity > 0.3 { 2.0 } else { 1.0 };
 
         let experience = Experience {
             state: features.to_vec(),
             action: if chosen_hand == Hand::Left { 0 } else { 1 },
-            reward,
+            reward: reward * priority,
             next_state: features.to_vec(),
             done: false,
             timestamp: note.time,
@@ -2656,15 +2780,28 @@ impl PhiTKAdvancedAI {
     }
 
     fn calculate_reward(&self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
-        let mut reward = confidence * 2.0;
-        let position_bonus = if note.position.x < 0.0 {
-            if chosen_hand == Hand::Left { 0.7 } else { -0.5 }
-        } else {
-            if chosen_hand == Hand::Right { 0.6 } else { -0.5 }
-        };
-        reward += position_bonus;
+        let mut reward = 0.0;
 
-        reward.clamp(-3.0, 3.0)
+        let position_reward = if note.position.x < -0.1 {
+            if chosen_hand == Hand::Left { 1.0 } else { -0.6 }
+        } else if note.position.x > 0.1 {
+            if chosen_hand == Hand::Right { 1.0 } else { -0.6 }
+        } else {
+            if chosen_hand == Hand::Right { 0.2 } else { 0.0 }
+        };
+        reward += position_reward;
+
+        if confidence > 0.9 {
+            reward -= (confidence - 0.9) * 2.0; // 高信心惩罚
+        }
+
+        let difficulty_bonus = (note.difficulty - 1.0) * 0.3;
+        reward += difficulty_bonus;
+
+        let noise = (fastrand::f32() - 0.5) * 0.2;
+        reward += noise;
+
+        reward.clamp(-2.0, 2.0)
     }
 
     fn smooth_hand_transitions(&self, notes: &mut [ProcessedNote]) {
@@ -3029,7 +3166,6 @@ impl PhiTKAdvancedAI {
         let batch_size = 32.min(self.experience_replay.len());
         let experiences = self.experience_replay.sample(batch_size);
 
-        // 准备训练数据
         let mut training_data = Vec::new();
 
         for exp in &experiences {
