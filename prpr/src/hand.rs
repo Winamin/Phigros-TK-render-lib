@@ -18,6 +18,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 use wgpu;
 use wgpu::util::DeviceExt;
+use std::panic;
 
 pub struct HandConfig {
     pub config: Config,
@@ -50,12 +51,12 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
 
     let mut ai = ai_mutex.lock().unwrap();
 
-    if now.duration_since(*last_light_update) >= Duration::from_millis(1) {
+    if now.duration_since(*last_light_update) >= Duration::from_millis(16) {
         *last_light_update = now;
         ai.light_update_hand_states(notes);
     }
 
-    if now.duration_since(*last_full_update) >= Duration::from_millis(5) {
+    if now.duration_since(*last_full_update) >= Duration::from_millis(33) {
         *last_full_update = now;
 
         ai.rotation = rotation;
@@ -368,16 +369,13 @@ impl FingerState {
                 score *= 0.6;
             }
         }
-
-        // 性能调整
+        
         let performance_factor = 0.5 + self.performance_score * 0.5;
         score *= performance_factor;
 
-        // 难度适应
         let difficulty_factor = 1.0 - (note_difficulty - 1.0).max(0.0) * (1.0 - self.confidence) * 0.15;
         score *= difficulty_factor;
 
-        // 添加小量随机性，避免完全确定性
         let randomness = (fastrand::f32() - 0.5) * 0.05;
         score += randomness;
 
@@ -414,6 +412,14 @@ struct DeepNeuralNetwork {
     activation_pipelines: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
     #[serde(skip)]
     activation_bind_group_layouts: StdHashMap<ActivationFunction, wgpu::BindGroupLayout>,
+    #[serde(skip)]
+    gpu_initialized: bool,
+    #[serde(skip)]
+    batch_size_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    initialization_attempted: bool,
+    #[serde(skip)]
+    initialization_failed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -444,6 +450,10 @@ struct NetworkLayer {
     biases_buffer: Option<wgpu::Buffer>,
     #[serde(skip)]
     activations_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    batch_activations_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    batch_activations: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -522,6 +532,7 @@ impl DeepNeuralNetwork {
         }
     }
 
+
     pub fn validate(&self) -> bool {
         for layer in &self.layers {
             for weights in &layer.weights {
@@ -585,8 +596,17 @@ impl DeepNeuralNetwork {
         if self.device.is_some() {
             return self.gpu_forward(input);
         }
+
+        println!("[GPU/CPU SWITCH] Checking for GPU...");
+        if self.device.is_some() {
+            println!("[GPU/CPU SWITCH] Using GPU for forward.");
+            return self.gpu_forward(input);
+        }
+        println!("[GPU/CPU SWITCH] Falling back to CPU for forward.");
+
         let mut current_input = input.to_vec();
-        let mut layer_outputs: Vec<Vec<f32>> = Vec::new();
+        use std::collections::VecDeque;
+        let mut layer_outputs: VecDeque<Vec<f32>> = VecDeque::with_capacity(3);
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             match layer.layer_type {
@@ -600,29 +620,23 @@ impl DeepNeuralNetwork {
                     current_input = Self::attention_forward(layer, &current_input);
                 }
                 LayerType::Residual => {
-                    // TODO：residual 通常需要一个较早层的输出作为 residual 输入（这里 forward 中使用了 layer_idx-2 的策略）
-                    let residual_input = layer_outputs
-                        .get(layer_idx.saturating_sub(2))
-                        .unwrap_or(&current_input)
-                        .clone();
+                    // residual 取倒数第2个（对应 layer_idx-2）
+                    let residual_input = if layer_outputs.len() >= 2 {
+                        layer_outputs.get(layer_outputs.len().saturating_sub(2)).unwrap().clone()
+                    } else {
+                        current_input.clone()
+                    };
                     current_input = Self::residual_forward(layer, &current_input, &residual_input);
                 }
             }
-            layer_outputs.push(current_input.clone());
-            #[cfg(debug_assertions)]
-            {
-                if current_input.iter().any(|v| !v.is_finite()) {
-                    eprintln!(
-                        "[light_forward DEBUG] layer {} produced non-finite values (first few): {:?}",
-                        layer_idx,
-                        &current_input[..current_input.len().min(4)]
-                    );
-                }
-            }
+            // 仅保存最近的 3 个层输出以减少内存分配与拷贝开销
+            layer_outputs.push_back(current_input.clone());
+            if layer_outputs.len() > 3 { layer_outputs.pop_front(); }
         }
 
         current_input
     }
+
 
 
     fn new() -> Self {
@@ -631,7 +645,7 @@ impl DeepNeuralNetwork {
             learning_rate: 0.001,
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size: 32,
+            batch_size: 64,
             epoch_count: 0,
             device: None,
             queue: None,
@@ -639,40 +653,106 @@ impl DeepNeuralNetwork {
             matmul_bind_group_layout: None,
             activation_pipelines: StdHashMap::new(),
             activation_bind_group_layouts: StdHashMap::new(),
+            gpu_initialized: false,
+            batch_size_buffer: None,
+            initialization_attempted: false,
+            initialization_failed: false,
         };
 
         network.build_architecture();
-        block_on(network.init_gpu());
+        network.init_gpu_sync();
         network
     }
 
-    async fn init_gpu(&mut self) {
-        if self.device.is_none() || self.queue.is_none() {
+    pub fn init_gpu_sync(&mut self) {
+        // 如果已标记为初始化，直接返回
+        if self.gpu_initialized {
             return;
         }
+
+        // 如果初始化已尝试且失败，不再尝试
+        if self.initialization_attempted && self.initialization_failed {
+            return;
+        }
+
+        // 检查GPU资源是否已存在
+        if self.device.is_some() && self.queue.is_some() && self.matmul_pipeline.is_some() {
+            self.gpu_initialized = true;
+            println!("[GPU/CPU SWITCH] GPU already initialized and ready.");
+            return;
+        }
+
+        self.initialization_attempted = true;
+
+        // 创建临时Runtime并执行 init
+        let rt = tokio::runtime::Runtime::new()
+            .expect("Failed to create Tokio runtime for GPU initialization");
+
+        let init_result = rt.block_on(async {
+            self.init_gpu().await
+        });
+
+        // 根据初始化结果设置状态
+        println!("[GPU/CPU SWITCH] GPU initialization completed (init_result = {} ).", init_result);
+
+        // 根据初始化结果设置状态
+        if init_result {
+            self.gpu_initialized = true;
+            self.initialization_failed = false;
+        } else {
+            self.initialization_failed = true;
+            println!("[GPU/CPU SWITCH] GPU initialization marked failed.");
+            // 清理可能已部分初始化的资源
+            self.device = None;
+            self.queue = None;
+            self.matmul_pipeline = None;
+            self.activation_pipelines.clear();
+            self.activation_bind_group_layouts.clear();
+        }
+    }
+
+    async fn init_gpu(&mut self) -> bool {
+        if self.gpu_initialized {
+            return true;
+        }
+
         let instance_desc = wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN, // use vulkan backend
+            backends: wgpu::Backends::VULKAN,
             ..Default::default()
         };
         let instance = wgpu::Instance::new(&instance_desc);
 
+        // 请求适配器
         let adapter = match instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: None,
         }).await {
             Ok(adapter) => adapter,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("Failed to request GPU adapter: {:?}", e);
+                return false;
+            }
         };
 
+        // 请求设备
         let (device, queue) = match adapter.request_device(&wgpu::DeviceDescriptor::default()).await {
             Ok((d, q)) => (d, q),
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("Failed to request GPU device: {:?}", e);
+                return false;
+            }
         };
 
-        self.device = Some(device.clone());
-        self.queue = Some(queue);
+        // 创建批量大小缓冲区
+        let batch_size_data = [self.batch_size as u32];
+        let batch_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Batch Size Buffer"),
+            contents: bytemuck::cast_slice(&batch_size_data),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
 
+        // 创建矩阵乘法绑定组布局 - 直接调用，不需要匹配Result
         let matmul_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -715,6 +795,17 @@ impl DeepNeuralNetwork {
                     },
                     count: None,
                 },
+                // 添加绑定4（批量大小）
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
             label: None,
         });
@@ -725,10 +816,13 @@ impl DeepNeuralNetwork {
             push_constant_ranges: &[],
         });
 
-        let matmul_shader = self.device.as_ref().unwrap().create_shader_module(wgpu::ShaderModuleDescriptor {
+        // 创建矩阵乘法着色器
+        let matmul_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(MATMUL_WGSL.into()),
         });
+
+        // 创建矩阵乘法计算管道
         let matmul_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: None,
             layout: Some(&matmul_pipeline_layout),
@@ -737,23 +831,36 @@ impl DeepNeuralNetwork {
             cache: None,
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         });
-        self.matmul_pipeline = Some(matmul_pipeline);
-        self.matmul_bind_group_layout = Some(matmul_bind_group_layout);
 
-        // Create activation pipelines
-        for func in [ActivationFunction::ReLU, ActivationFunction::Sigmoid, ActivationFunction::Tanh, ActivationFunction::Swish, ActivationFunction::GELU] {
+        // 创建激活函数管道
+        let mut activation_pipelines = StdHashMap::new();
+        let mut activation_bind_group_layouts = StdHashMap::new();
+
+        for func in [ActivationFunction::ReLU, ActivationFunction::Sigmoid,
+            ActivationFunction::Tanh, ActivationFunction::Swish, ActivationFunction::GELU] {
+            // 创建激活函数绑定组布局 - 直接调用，不需要匹配Result
             let activation_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false }, // this false
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
                         count: None,
-                    }
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
                 label: Some(&format!("{:?} Activation Layout", func)),
             });
@@ -764,11 +871,14 @@ impl DeepNeuralNetwork {
                 push_constant_ranges: &[],
             });
 
+            // 创建激活函数着色器
             let shader_src = self.get_activation_shader(&func);
             let activation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: None,
                 source: wgpu::ShaderSource::Wgsl(shader_src.into()),
             });
+
+            // 创建激活函数计算管道
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: None,
                 layout: Some(&activation_pipeline_layout),
@@ -777,15 +887,13 @@ impl DeepNeuralNetwork {
                 cache: None,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             });
-            self.activation_pipelines.insert(func.clone(), pipeline);
-            self.activation_bind_group_layouts.insert(func, activation_bind_group_layout);
+
+            activation_pipelines.insert(func.clone(), pipeline);
+            activation_bind_group_layouts.insert(func, activation_bind_group_layout);
         }
 
-        // Upload weights to GPU
+        // 上传权重到GPU
         for layer in &mut self.layers {
-            let device = self.device.as_ref().unwrap();
-            let queue = self.queue.as_ref().unwrap();
-
             let weights_flat = layer.weights.iter().flatten().cloned().collect::<Vec<f32>>();
             layer.weights_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
@@ -806,6 +914,18 @@ impl DeepNeuralNetwork {
                 mapped_at_creation: false,
             }));
         }
+
+        // 所有步骤成功，设置字段
+        self.device = Some(device);
+        self.queue = Some(queue);
+        self.matmul_pipeline = Some(matmul_pipeline);
+        self.matmul_bind_group_layout = Some(matmul_bind_group_layout);
+        self.activation_pipelines = activation_pipelines;
+        self.activation_bind_group_layouts = activation_bind_group_layouts;
+        self.batch_size_buffer = Some(batch_size_buffer);
+
+        true // 初始化成功
+        //println!("Success");
     }
 
     fn get_activation_shader(&self, func: &ActivationFunction) -> String {
@@ -817,29 +937,46 @@ impl DeepNeuralNetwork {
             ActivationFunction::GELU => "return 0.5 * val * (1.0 + tanh(val * 0.7978845608 * (1.0 + 0.044715 * val * val)));",
         };
 
-        format!(
-            r#"
-@group(0) @binding(0) var<storage, read_write> data: array<f32>;
+        format!(r#"
+    struct BatchSize {{
+        size: u32,
+    }};
 
-fn activate(val: f32) -> f32 {{
-    {fn_body}
-}}
+    @group(0) @binding(0) var<storage, read_write> data: array<f32>;
+    @group(0) @binding(1) var<storage, read> batch_size: BatchSize;
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
-    let idx = id.x;
-    if (idx >= arrayLength(&data)) {{ return; }}
-    data[idx] = activate(data[idx]);
-}}
-"#
-        )
+    fn activate(val: f32) -> f32 {{
+        {fn_body}
+    }}
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
+        let idx = id.x;
+        if (idx >= arrayLength(&data)) {{
+            return;
+        }}
+        data[idx] = activate(data[idx]);
+    }}
+"#)
     }
 
     fn gpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
+        // 确保GPU已初始化
+        if !self.gpu_initialized {
+            println!("GPU");
+            self.init_gpu_sync();
+        }
+
+        if self.initialization_failed || self.device.is_none() {
+            println!("CPU");
+            return self.light_forward(input);
+        }
+
         let device = match self.device.as_ref() {
             Some(d) => d,
             None => return self.light_forward(input),
         };
+
         let queue = self.queue.as_ref().unwrap();
 
         let mut current_input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -921,7 +1058,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).unwrap();
         });
-        device.poll(wgpu::PollType::Wait);
+        device.poll(wgpu::PollType::wait());
         //rx.recv().unwrap().unwrap();
         match rx.recv() {
             Ok(result) => match result {
@@ -948,30 +1085,244 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
         result
     }
 
-    fn create_matmul_bind_group(&self, layer: &NetworkLayer, input: &wgpu::Buffer, output: &wgpu::Buffer) -> wgpu::BindGroup {
+    fn create_matmul_bind_group(
+        &self,
+        layer: &NetworkLayer,
+        input_buffer: &wgpu::Buffer,
+        output_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
         let device = self.device.as_ref().unwrap();
+        let bind_group_layout = self.matmul_bind_group_layout.as_ref().unwrap();
+
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: self.matmul_bind_group_layout.as_ref().unwrap(),
+            layout: bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: input.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: output.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding()
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding()
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: output_buffer.as_entire_binding()
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding()
+                },
+                // 新增：批量大小参数
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: self.batch_size_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: None,
+                    }),
+                },
             ],
             label: None,
         })
     }
 
-    fn create_activation_bind_group(&self, layer: &NetworkLayer, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+    fn create_activation_bind_group(
+        &self,
+        layer: &NetworkLayer,
+        buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
         let device = self.device.as_ref().unwrap();
         let layout = self.activation_bind_group_layouts.get(&layer.activation_func).unwrap();
+
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding()
+                },
+                // 新增：批量大小参数
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: self.batch_size_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: None,
+                    }),
+                },
             ],
             label: None,
         })
+    }
+
+    fn gpu_forward_batch(&mut self, inputs: &[&[f32]], actual_batch_size: usize) -> Vec<Vec<f32>> {
+        // 检查GPU是否已初始化
+        if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
+            return inputs.iter().map(|input| self.light_forward(input)).collect();
+        }
+
+        let device = self.device.as_ref().unwrap();
+        let queue = self.queue.as_ref().unwrap();
+
+        // 准备输入缓冲区
+        let input_size = inputs[0].len();
+        let total_input_size = input_size * actual_batch_size;
+
+        // 创建批量输入数据
+        let mut batch_input_data = Vec::with_capacity(total_input_size);
+        for input in inputs {
+            batch_input_data.extend_from_slice(input);
+        }
+
+        // 创建批量输入缓冲区
+        let batch_input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Batch Input Buffer"),
+            contents: bytemuck::cast_slice(&batch_input_data),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // 为每层准备批量激活缓冲区
+        let mut current_input_buffer = batch_input_buffer;
+        let mut layer_output_buffers = Vec::new();
+
+        for i in 0..self.layers.len() {
+            let layer = &self.layers[i]; // 不可变借用
+            let output_size = layer.weights.len() as u32;
+            let total_output_size = output_size * (actual_batch_size as u32);
+
+            let activation_buffer = match layer.activations_buffer.as_ref() {
+                Some(b) => b,
+                None => panic!("Activation buffer for layer {} is not initialized.", i),
+            };
+
+
+
+            // 创建批量输出缓冲区
+            let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Batch Output Buffer for Layer {}", layer_output_buffers.len())),
+                size: (total_output_size * (std::mem::size_of::<f32>()) as u32) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+
+            // 执行批量矩阵乘法
+            let matmul_bind_group = self.create_matmul_bind_group(layer, &current_input_buffer, activation_buffer);
+
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Batch Matmul Encoder")
+            });
+
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Batch Matmul Pass"),
+                    timestamp_writes: None,
+                });
+
+                cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
+                cpass.set_bind_group(0, &matmul_bind_group, &[]);
+                // 调整工作组大小以处理批量数据
+                cpass.dispatch_workgroups(
+                    ((output_size as u32 * actual_batch_size as u32) + 7) / 8,
+                    1,
+                    1
+                );
+            }
+
+            queue.submit(Some(encoder.finish()));
+
+            // 执行批量激活函数
+            let activation_bind_group = self.create_activation_bind_group(
+                layer,
+                &output_buffer,
+            );
+
+            let activation_pipeline = self.activation_pipelines
+                .get(&layer.activation_func)
+                .expect("Activation pipeline not initialized");
+
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Batch Activation Encoder")
+            });
+
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Batch Activation Pass"),
+                    timestamp_writes: None,
+                });
+
+                cpass.set_pipeline(activation_pipeline);
+                cpass.set_bind_group(0, &activation_bind_group, &[]);
+                cpass.dispatch_workgroups(
+                    ((output_size as u32 * actual_batch_size as u32) + 63) / 64,
+                    1,
+                    1
+                );
+            }
+
+            queue.submit(Some(encoder.finish()));
+
+            current_input_buffer = output_buffer.clone();
+            layer_output_buffers.push(output_buffer);
+        }
+
+        // 读取最终结果
+        let last_layer_output = layer_output_buffers.last().unwrap();
+        let last_layer = self.layers.last().unwrap();
+        let output_size = last_layer.weights.len();
+        let total_output_size = output_size * actual_batch_size;
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Batch Staging Buffer"),
+            size: (total_output_size * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Batch Readback Encoder")
+        });
+
+        encoder.copy_buffer_to_buffer(
+            last_layer_output,
+            0,
+            &staging_buffer,
+            0,
+            (total_output_size * std::mem::size_of::<f32>()) as u64
+        );
+
+        queue.submit(Some(encoder.finish()));
+
+        // 映射并获取结果
+        let buffer_slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+
+        device.poll(wgpu::PollType::wait());
+
+        match rx.recv() {
+            Ok(Ok(())) => {},
+            _ => return inputs.iter().map(|input| self.light_forward(input)).collect(),
+        }
+
+        let data = buffer_slice.get_mapped_range();
+        let batch_results: &[f32] = bytemuck::cast_slice(&data);
+
+        // 将批量结果分割为单个样本结果
+        let mut results = Vec::with_capacity(actual_batch_size);
+        for i in 0..actual_batch_size {
+            let start = i * output_size;
+            let end = start + output_size;
+            results.push(batch_results[start..end].to_vec());
+        }
+
+        drop(data);
+        staging_buffer.unmap();
+
+        results
     }
 
     fn build_architecture(&mut self) {
@@ -1036,6 +1387,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             weights_buffer: None,
             biases_buffer: None,
             activations_buffer: None,
+            batch_activations_buffer: None,
+            batch_activations: Vec::new(),
         };
 
         self.layers.push(layer);
@@ -1058,6 +1411,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             weights_buffer: None,
             biases_buffer: None,
             activations_buffer: None,
+            batch_activations_buffer: None,
+            batch_activations: Vec::new(),
         };
         self.layers.push(layer);
     }
@@ -1077,6 +1432,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             weights_buffer: None,
             biases_buffer: None,
             activations_buffer: None,
+            batch_activations_buffer: None,
+            batch_activations: Vec::new(),
         };
 
         self.layers.push(layer);
@@ -1097,6 +1454,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             weights_buffer: None,
             biases_buffer: None,
             activations_buffer: None,
+            batch_activations_buffer: None,
+            batch_activations: Vec::new(),
         };
 
         self.layers.push(layer);
@@ -1287,27 +1646,40 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
     fn train(&mut self, training_data: &[(Vec<f32>, Vec<f32>)]) {
         let batch_count = (training_data.len() + self.batch_size - 1) / self.batch_size;
-
         for batch_idx in 0..batch_count {
             let start_idx = batch_idx * self.batch_size;
             let end_idx = start_idx + self.batch_size.min(training_data.len() - start_idx);
             let batch = &training_data[start_idx..end_idx];
-
             self.train_batch(batch);
         }
-
         self.epoch_count += 1;
-
         if self.epoch_count % 100 == 0 {
             self.learning_rate *= 0.95;
         }
     }
 
+
     fn train_batch(&mut self, batch: &[(Vec<f32>, Vec<f32>)]) {
+        let batch_size = batch.len();
+
+        // 准备批量输入和目标
+        let mut inputs: Vec<&[f32]> = Vec::with_capacity(batch_size);
+        let mut targets: Vec<&[f32]> = Vec::with_capacity(batch_size);
+
+        for (input, target) in batch {
+            inputs.push(input);
+            targets.push(target);
+        }
+
+        // 使用批量前向传播
+        let outputs = self.gpu_forward_batch(&inputs, batch_size);
+
+        // 计算批量梯度
         let mut total_gradients: Vec<Vec<Vec<f32>>> = vec![vec![vec![0.0; 0]; 0]; self.layers.len()];
         let mut total_bias_gradients: Vec<Vec<f32>> = vec![vec![0.0; 0]; self.layers.len()];
 
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
+        for layer_idx in 0..self.layers.len() {
+            let layer = &self.layers[layer_idx];
             if !layer.weights.is_empty() {
                 total_gradients[layer_idx] = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
             } else {
@@ -1316,12 +1688,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             total_bias_gradients[layer_idx] = vec![0.0; layer.biases.len()];
         }
 
-        for (input, target) in batch {
-            let output = self.forward(input);
-            self.backward(&output, target, &mut total_gradients, &mut total_bias_gradients);
+        // 计算批量梯度
+        for i in 0..batch_size {
+            self.backward(
+                &outputs[i],
+                targets[i],
+                &mut total_gradients,
+                &mut total_bias_gradients
+            );
         }
 
-        self.apply_gradients(&total_gradients, &total_bias_gradients, batch.len());
+        // 应用批量梯度
+        self.apply_gradients(&total_gradients, &total_bias_gradients, batch_size);
     }
 
     fn backward(&mut self, output: &[f32], target: &[f32],
@@ -2237,16 +2615,42 @@ impl PhiTKAdvancedAI {
                 if ai.validate_for_serialization() {
                     ai.rotation = rotation;
                     ai.update_hand_positions();
-                    /*
-                    * wtf bro?
-                     */
-                    //block_on(ai.main_network.init_gpu());
-                    //block_on(ai.target_network.init_gpu());
+
+                    ai.main_network.initialization_attempted = true; // 标记为已尝试，防止 reentry
+                    ai.main_network.initialization_failed = false;
+                    ai.main_network.gpu_initialized = false;
+                    println!("[GPU/CPU SWITCH] Beginning GPU init for main_network...");
+                    let res = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        ai.main_network.init_gpu_sync();
+                    }));
+                    if res.is_err() || !ai.main_network.gpu_initialized {
+                        ai.main_network.initialization_failed = true;
+                        println!("[GPU/CPU SWITCH] main_network GPU init failed or panicked — will use CPU.");
+                    } else {
+                        println!("[GPU/CPU SWITCH] main_network GPU initialized successfully.");
+                    }
+
+                    // --- safer GPU init for target_network ---
+                    ai.target_network.initialization_attempted = true;
+                    ai.target_network.initialization_failed = false;
+                    ai.target_network.gpu_initialized = false;
+                    println!("[GPU/CPU SWITCH] Beginning GPU init for target_network...");
+                    let res2 = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        ai.target_network.init_gpu_sync();
+                    }));
+                    if res2.is_err() || !ai.target_network.gpu_initialized {
+                        ai.target_network.initialization_failed = true;
+                        println!("[GPU/CPU SWITCH] target_network GPU init failed or panicked — will use CPU.");
+                    } else {
+                        println!("[GPU/CPU SWITCH] target_network GPU initialized successfully.");
+                    }
+
                     return ai;
                 }
             }
         }
 
+        // 新建实例（文件不存在或反序列化失败）
         let mut ai = Self::new(rotation);
         ai.save_model(filepath);
         ai
@@ -3103,30 +3507,20 @@ impl PhiTKAdvancedAI {
     }
 
     fn train_network(&mut self) {
-        if self.training_episodes % 10 != 0 {
-            return;
-        }
-        if self.experience_replay.len() < 8 {
-            return;
-        }
-
-        let batch_size = 32.min(self.experience_replay.len());
+        let batch_size = 64;  // 从32增加到64
         let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
-        //let experiences = self.experience_replay.sample(batch_size);
 
-        let mut training_data = Vec::new();
-
+        let mut training_data = Vec::with_capacity(batch_size);
         for exp in &experiences {
             let target_value = exp.reward + self.discount_factor * self.estimate_future_value(&exp.next_state);
-
             let mut target_output = vec![0.5, 0.5, 1.0, exp.reward.abs()];
             if exp.action < target_output.len() {
                 target_output[exp.action] = target_value.clamp(0.0, 1.0);
             }
-
             training_data.push((exp.state.clone(), target_output));
         }
 
+        // 使用批量训练
         self.main_network.train(&training_data);
     }
 
@@ -3222,24 +3616,36 @@ impl fastrand {
  */
 
 const MATMUL_WGSL: &str = r#"
+struct BatchSize {
+    size: u32,
+};
+
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read> weights: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 @group(0) @binding(3) var<storage, read> biases: array<f32>;
+@group(0) @binding(4) var<storage, read> batch_size: BatchSize;
 
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let row = id.x;
-    let col = id.y;
-    let input_size = 16u; // Adjust dynamically if possible, or set per layer
-    let output_size = 128u; // Adjust per layer
+    let output_size = arrayLength(&biases);
+    let input_size = arrayLength(&input) / batch_size.size;
+    let global_id = id.x;
 
-    if (row >= output_size || col >= output_size) { return; } // Defensive
-
-    var sum = 0.0;
-    for (var k = 0u; k < input_size; k = k + 1u) {
-        sum += input[row * input_size + k] * weights[k * output_size + col];
+    if (global_id >= output_size * batch_size.size) {
+        return;
     }
-    output[row * output_size + col] = sum + biases[col];
+
+    let batch_idx = global_id / output_size;
+    let output_idx = global_id % output_size;
+
+    var sum = biases[output_idx];
+    for (var i = 0u; i < input_size; i++) {
+        let input_val = input[batch_idx * input_size + i];
+        let weight_idx = output_idx * input_size + i;
+        sum += weights[weight_idx] * input_val;
+    }
+
+    output[batch_idx * output_size + output_idx] = sum;
 }
 "#;
