@@ -11,14 +11,15 @@ use std::path::Path;
 use crate::core::BpmList;
 use crate::judge::JudgeStatus;
 use fastrand;
-use futures::executor::block_on;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap as StdHashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use wgpu;
 use wgpu::util::DeviceExt;
 use std::panic;
+use std::sync::Arc;
+use rayon::ThreadPool;
 
 pub struct HandConfig {
     pub config: Config,
@@ -29,43 +30,37 @@ static LAST_FULL_UPDATE: OnceCell<Mutex<Instant>> = OnceCell::new();
 static LAST_LIGHT_UPDATE: OnceCell<Mutex<Instant>> = OnceCell::new();
 
 pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotation: f32, bpm_list: &BpmList) {
-
     if notes.is_empty() {
         return;
     }
 
     let now = Instant::now();
+    let last_light_update = LAST_LIGHT_UPDATE.get_or_init(|| Mutex::new(Instant::now()));
+    let do_light_update = now.duration_since(*last_light_update.lock().unwrap()) >= Duration::from_millis(16);
+    let last_full_update = LAST_FULL_UPDATE.get_or_init(|| Mutex::new(Instant::now()));
+    let do_full_update = now.duration_since(*last_full_update.lock().unwrap()) >= Duration::from_millis(100); // 降低频率
 
-    // 初始化全局计时器
-    let last_full_update_mutex = LAST_FULL_UPDATE.get_or_init(|| Mutex::new(now));
-    let last_light_update_mutex = LAST_LIGHT_UPDATE.get_or_init(|| Mutex::new(now));
-
-    let mut last_full_update = last_full_update_mutex.lock().unwrap();
-    let mut last_light_update = last_light_update_mutex.lock().unwrap();
-
-    // 全局单例，首次调用时加载模型，后续复用
-    let ai_mutex = AI_SYSTEM.get_or_init(|| {
-        let ai = PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", rotation);
-        Mutex::new(ai)
+    let ai_system = AI_SYSTEM.get_or_init(|| {
+        Mutex::new(PhiTKAdvancedAI::new(rotation))
     });
+    let mut ai = ai_system.lock().unwrap();
 
-    let mut ai = ai_mutex.lock().unwrap();
-
-    if now.duration_since(*last_light_update) >= Duration::from_millis(16) {
-        *last_light_update = now;
+    if do_light_update {
+        *last_light_update.lock().unwrap() = now;
         ai.light_update_hand_states(notes);
     }
 
-    if now.duration_since(*last_full_update) >= Duration::from_millis(33) {
-        *last_full_update = now;
+    if do_full_update {
+        *last_full_update.lock().unwrap() = now;
 
         ai.rotation = rotation;
+        ai.update_hand_positions();
         ai.reset_for_new_chart();
         ai.line_rotations.insert(line_id, rotation);
         ai.analyze_and_assign(notes, config, bpm_list, line_id);
 
-        const SAVE_EVERY_EPISODES: u64 = 10000;
-        if ai.training_episodes % SAVE_EVERY_EPISODES == 0 {
+        if ai.training_episodes % 10000 == 0 {
+            println!("Training done");
             ai.save_model("phitk_ai_model.bin");
         }
     }
@@ -711,7 +706,7 @@ impl DeepNeuralNetwork {
         }
     }
 
-    async fn init_gpu(&mut self) -> bool {
+    pub async fn init_gpu(&mut self) -> bool {
         if self.gpu_initialized {
             return true;
         }
@@ -915,7 +910,6 @@ impl DeepNeuralNetwork {
             }));
         }
 
-        // 所有步骤成功，设置字段
         self.device = Some(device);
         self.queue = Some(queue);
         self.matmul_pipeline = Some(matmul_pipeline);
@@ -2444,6 +2438,9 @@ struct PerformanceMetrics {
 struct PhiTKAdvancedAI {
     main_network: DeepNeuralNetwork,
     target_network: DeepNeuralNetwork,
+    #[serde(skip)]
+    #[serde(default)]
+    thread_pool: Option<Arc<ThreadPool>>,
     feature_extractor: AdvancedFeatureExtractor,
     experience_replay: ExperienceReplay,
     left_hand_state: HandState,
@@ -2562,6 +2559,10 @@ impl PhiTKAdvancedAI {
     }
 
     fn new(rotation: f32) -> Self {
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4) // 限制线程数，避免过度占用
+            .build()
+            .ok();
         let rad = rotation.to_radians();
         let game_mode = GameMode::TwoFinger;
         let finger_states = Self::init_finger_states(game_mode, rad);
@@ -2569,6 +2570,7 @@ impl PhiTKAdvancedAI {
         let mut ai = Self {
             main_network: DeepNeuralNetwork::new(),
             target_network: DeepNeuralNetwork::new(),
+            thread_pool: None,
             feature_extractor: AdvancedFeatureExtractor::new(),
             experience_replay: ExperienceReplay::new(10000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad)),
@@ -3519,6 +3521,12 @@ impl PhiTKAdvancedAI {
             }
             training_data.push((exp.state.clone(), target_output));
         }
+
+        println!("网络训练完成: Epoch {}, 学习率: {:.6}, 探索率: {:.3}, 准确率: {:.3}",
+                 self.main_network.epoch_count,
+                 self.main_network.learning_rate,
+                 self.exploration_rate,
+                 self.average_reward);
 
         // 使用批量训练
         self.main_network.train(&training_data);
