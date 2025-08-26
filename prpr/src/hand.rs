@@ -20,6 +20,9 @@ use wgpu::util::DeviceExt;
 use std::panic;
 use std::sync::Arc;
 use rayon::ThreadPool;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
+use rayon::prelude::*;
 
 pub struct HandConfig {
     pub config: Config,
@@ -38,10 +41,11 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
     let last_light_update = LAST_LIGHT_UPDATE.get_or_init(|| Mutex::new(Instant::now()));
     let do_light_update = now.duration_since(*last_light_update.lock().unwrap()) >= Duration::from_millis(16);
     let last_full_update = LAST_FULL_UPDATE.get_or_init(|| Mutex::new(Instant::now()));
-    let do_full_update = now.duration_since(*last_full_update.lock().unwrap()) >= Duration::from_millis(100); // 降低频率
+    let do_full_update = now.duration_since(*last_full_update.lock().unwrap()) >= Duration::from_millis(20);
 
+    // 确保AI系统只初始化一次
     let ai_system = AI_SYSTEM.get_or_init(|| {
-        Mutex::new(PhiTKAdvancedAI::new(rotation))
+        Mutex::new(PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", rotation))
     });
     let mut ai = ai_system.lock().unwrap();
 
@@ -53,14 +57,17 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
     if do_full_update {
         *last_full_update.lock().unwrap() = now;
 
-        ai.rotation = rotation;
-        ai.update_hand_positions();
-        ai.reset_for_new_chart();
+        // 更新旋转角度，但不重置训练状态
+        if ai.rotation != rotation {
+            ai.rotation = rotation;
+            ai.update_hand_positions();
+        }
+
         ai.line_rotations.insert(line_id, rotation);
         ai.analyze_and_assign(notes, config, bpm_list, line_id);
 
-        if ai.training_episodes % 10000 == 0 {
-            println!("Training done");
+        if ai.training_episodes % 1000 == 0 {
+            println!("[Training] 训练完成 {} 回合，保存模型", ai.training_episodes);
             ai.save_model("phitk_ai_model.bin");
         }
     }
@@ -364,7 +371,7 @@ impl FingerState {
                 score *= 0.6;
             }
         }
-        
+
         let performance_factor = 0.5 + self.performance_score * 0.5;
         score *= performance_factor;
 
@@ -383,6 +390,7 @@ impl FingerState {
         }
     }
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeepNeuralNetwork {
@@ -587,18 +595,6 @@ impl DeepNeuralNetwork {
     }
 
     pub fn light_forward(&mut self, input: &[f32]) -> Vec<f32> {
-        // 这里会优先走 GPU 路径，如果不行再走 CPU 路径
-        if self.device.is_some() {
-            return self.gpu_forward(input);
-        }
-
-        println!("[GPU/CPU SWITCH] Checking for GPU...");
-        if self.device.is_some() {
-            println!("[GPU/CPU SWITCH] Using GPU for forward.");
-            return self.gpu_forward(input);
-        }
-        println!("[GPU/CPU SWITCH] Falling back to CPU for forward.");
-
         let mut current_input = input.to_vec();
         use std::collections::VecDeque;
         let mut layer_outputs: VecDeque<Vec<f32>> = VecDeque::with_capacity(3);
@@ -955,6 +951,10 @@ impl DeepNeuralNetwork {
     }
 
     fn gpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
+        if self.initialization_failed {
+            return self.light_forward(input);
+        }
+
         // 确保GPU已初始化
         if !self.gpu_initialized {
             println!("GPU");
@@ -1190,8 +1190,6 @@ impl DeepNeuralNetwork {
                 None => panic!("Activation buffer for layer {} is not initialized.", i),
             };
 
-
-
             // 创建批量输出缓冲区
             let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Batch Output Buffer for Layer {}", layer_output_buffers.len())),
@@ -1215,7 +1213,7 @@ impl DeepNeuralNetwork {
 
                 cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
                 cpass.set_bind_group(0, &matmul_bind_group, &[]);
-                // 调整工作组大小以处理批量数据
+                // 这里需要调整工作组大小以处理批量数据
                 cpass.dispatch_workgroups(
                     ((output_size as u32 * actual_batch_size as u32) + 7) / 8,
                     1,
@@ -1891,24 +1889,16 @@ impl AdvancedFeatureExtractor {
         }
     }
 
-    fn extract_features(&mut self, notes: &[ProcessedNote], window_size: usize, bpm_list: &BpmList) -> Vec<f32> {
+    pub fn extract_features(&mut self, notes: &[ProcessedNote], window_size: usize, bpm_list: &BpmList) -> Vec<f32> {
         let mut features = Vec::new();
-        
-
         features.extend(self.extract_position_features(notes));
-
         features.extend(self.extract_temporal_features(notes, window_size, bpm_list.clone()));
-
         features.extend(self.extract_pattern_features(notes));
-
         features.extend(self.extract_difficulty_features(notes));
-
         features.extend(self.extract_velocity_features(notes));
-
         features.extend(self.extract_spatial_features(notes));
-
         //println!("[特征提取] 特征: {:?}", features);
-
+        //println!("[Token Usage] Feature Extraction - Notes: {}, Window: {}", notes.len(), window_size);
         features
         
     }
@@ -2441,6 +2431,9 @@ struct PhiTKAdvancedAI {
     #[serde(skip)]
     #[serde(default)]
     thread_pool: Option<Arc<ThreadPool>>,
+    #[serde(skip)]
+    #[serde(default)]
+    thread_count: usize,
     feature_extractor: AdvancedFeatureExtractor,
     experience_replay: ExperienceReplay,
     left_hand_state: HandState,
@@ -2560,9 +2553,10 @@ impl PhiTKAdvancedAI {
 
     fn new(rotation: f32) -> Self {
         let thread_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(4) // 限制线程数，避免过度占用
+            .num_threads(32) // 限制线程数，避免过度占用
             .build()
-            .ok();
+            .ok().map(Arc::new);
+
         let rad = rotation.to_radians();
         let game_mode = GameMode::TwoFinger;
         let finger_states = Self::init_finger_states(game_mode, rad);
@@ -2570,7 +2564,8 @@ impl PhiTKAdvancedAI {
         let mut ai = Self {
             main_network: DeepNeuralNetwork::new(),
             target_network: DeepNeuralNetwork::new(),
-            thread_pool: None,
+            thread_pool: thread_pool.clone(),
+            thread_count: if thread_pool.is_some() { 32 } else { 1 },
             feature_extractor: AdvancedFeatureExtractor::new(),
             experience_replay: ExperienceReplay::new(10000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad)),
@@ -2606,15 +2601,18 @@ impl PhiTKAdvancedAI {
         };
 
         ai.target_network = ai.main_network.clone();
+        //thread_pool: Option<rayon::ThreadPool>;
 
+        ai.warm_thread_pool();
         ai
     }
 
-    fn load_or_create(filepath: &str, rotation: f32) -> Self {
+    pub fn load_or_create(filepath: &str, rotation: f32) -> Self {
         let path = Path::new(filepath);
         if let Ok(bytes) = fs::read(path) {
             if let Ok(mut ai) = bincode::deserialize::<Self>(&bytes) {
                 if ai.validate_for_serialization() {
+                    println!("[Model] 从文件加载模型: {}, 训练回合数: {}", filepath, ai.training_episodes);
                     ai.rotation = rotation;
                     ai.update_hand_positions();
 
@@ -2659,14 +2657,23 @@ impl PhiTKAdvancedAI {
     }
 
     fn save_model(&mut self, filepath: &str) {
+        println!("[Model] 尝试保存模型到: {}", filepath);
+
         self.clean_model_data();
         if !self.validate_for_serialization() {
+            eprintln!("[Model Error] 模型验证失败，无法保存");
             return;
         }
 
         let path = Path::new(filepath);
         if let Ok(data) = bincode::serialize(self) {
-            fs::write(path, data).ok();
+            if let Err(e) = fs::write(path, data) {
+                eprintln!("[Model Error] 保存模型失败: {:?}", e);
+            } else {
+                println!("[Model] 模型保存成功: {}", filepath);
+            }
+        } else {
+            eprintln!("[Model Error] 模型序列化失败");
         }
     }
 
@@ -2764,7 +2771,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn analyze_and_assign(&mut self, notes: &mut [Note], config: &Config, bpm_list: &BpmList, line_id: usize) {
-                //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
+        //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
             return;
         }
@@ -2794,7 +2801,8 @@ impl PhiTKAdvancedAI {
         self.training_episodes += 1;
         self.last_save_episodes += 1;
 
-        if self.last_save_episodes >= 10000 {
+        if self.last_save_episodes >= 1000 {
+            println!("Saving episodes to {}", self.last_save_episodes);
             self.save_model("phitk_ai_model.bin");
             self.last_save_episodes = 0;
         }
@@ -3041,6 +3049,7 @@ impl PhiTKAdvancedAI {
         }
     }
 
+    //TODO: 这里需要多线程优化
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
 
@@ -3077,7 +3086,9 @@ impl PhiTKAdvancedAI {
         }
     }
 
+
     fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, line_id: usize) -> (Hand, f32, Finger) {
+        //println!("[Token Usage] AI Decision - Features: {}, Time: {:.2}", features.len(), note.time);
         for finger_state in &mut self.finger_states {
             finger_state.update_busy_status(note.time);
         }
@@ -3509,10 +3520,11 @@ impl PhiTKAdvancedAI {
     }
 
     fn train_network(&mut self) {
-        let batch_size = 64;  // 从32增加到64
+        let batch_size = 64;
         let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
-
         let mut training_data = Vec::with_capacity(batch_size);
+
+        // 串行处理，不需要并行
         for exp in &experiences {
             let target_value = exp.reward + self.discount_factor * self.estimate_future_value(&exp.next_state);
             let mut target_output = vec![0.5, 0.5, 1.0, exp.reward.abs()];
@@ -3521,6 +3533,7 @@ impl PhiTKAdvancedAI {
             }
             training_data.push((exp.state.clone(), target_output));
         }
+        //println!("[Token Usage] Network Training - Batch: {}, Experiences: {}", batch_size, self.experience_replay.len());
 
         println!("网络训练完成: Epoch {}, 学习率: {:.6}, 探索率: {:.3}, 准确率: {:.3}",
                  self.main_network.epoch_count,
@@ -3554,6 +3567,54 @@ impl PhiTKAdvancedAI {
         self.experience_replay = ExperienceReplay::new(50000);
 
         self.performance_history.clear();
+    }
+
+    /// 初始化或重设线程池（运行时调用）
+    pub fn init_thread_pool(&mut self, num_threads: usize) {
+        if num_threads <= 1 {
+            self.thread_pool = None;
+            self.thread_count = 1;
+            return;
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .ok()
+            .map(Arc::new);
+        self.thread_pool = pool;
+        self.thread_count = num_threads;
+    }
+
+    /// 轻量级 warm-up，确保线程池被读取并初始化 worker（也避免编译器警告）
+    pub fn warm_thread_pool(&self) {
+        if let Some(pool) = &self.thread_pool {
+            pool.install(|| {
+                // 运行一个微任务以唤醒线程；无需影响主状态
+                let _ : Vec<u8> = (0..1).into_par_iter().map(|x| (x*2) as u8).collect();
+            });
+        }
+    }
+
+    /// 并行执行一系列索引化任务（兼容没有线程池的回退）
+    pub fn parallel_tasks<F>(&self, tasks_count: usize, job: F)
+    where
+        F: Fn(usize) + Sync + Send,
+    {
+        if tasks_count == 0 {
+            return;
+        }
+        if let Some(pool) = &self.thread_pool {
+            let job_ref = &job;
+            pool.install(|| {
+                (0..tasks_count).into_par_iter().for_each(|i| {
+                    job_ref(i);
+                });
+            });
+        } else {
+            for i in 0..tasks_count {
+                job(i);
+            }
+        }
     }
 }
 /*
