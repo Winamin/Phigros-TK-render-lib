@@ -395,34 +395,21 @@ impl FingerState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeepNeuralNetwork {
     layers: Vec<NetworkLayer>,
-    #[serde(default)]
-    learning_rate: f32,
-    #[serde(default)]
-    momentum: f32,
-    #[serde(default)]
-    dropout_rate: f32,
+    #[serde(default)]learning_rate: f32,
+    #[serde(default)]momentum: f32,
+    #[serde(default)]dropout_rate: f32,
     batch_size: usize,
     epoch_count: u64,
-    #[serde(skip)]
-    device: Option<wgpu::Device>,
-    #[serde(skip)]
-    queue: Option<wgpu::Queue>,
-    #[serde(skip)]
-    matmul_pipeline: Option<wgpu::ComputePipeline>,
-    #[serde(skip)]
-    matmul_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    #[serde(skip)]
-    activation_pipelines: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
-    #[serde(skip)]
-    activation_bind_group_layouts: StdHashMap<ActivationFunction, wgpu::BindGroupLayout>,
-    #[serde(skip)]
-    gpu_initialized: bool,
-    #[serde(skip)]
-    batch_size_buffer: Option<wgpu::Buffer>,
-    #[serde(skip)]
-    initialization_attempted: bool,
-    #[serde(skip)]
-    initialization_failed: bool,
+    #[serde(skip)]device: Option<wgpu::Device>,
+    #[serde(skip)]queue: Option<wgpu::Queue>,
+    #[serde(skip)]matmul_pipeline: Option<wgpu::ComputePipeline>,
+    #[serde(skip)]matmul_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    #[serde(skip)]activation_pipelines: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
+    #[serde(skip)]activation_bind_group_layouts: StdHashMap<ActivationFunction, wgpu::BindGroupLayout>,
+    #[serde(skip)]gpu_initialized: bool,
+    #[serde(skip)]batch_size_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]initialization_attempted: bool,
+    #[serde(skip)]initialization_failed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -636,7 +623,7 @@ impl DeepNeuralNetwork {
             learning_rate: 0.001,
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size: 64,
+            batch_size: 16384,
             epoch_count: 0,
             device: None,
             queue: None,
@@ -672,7 +659,6 @@ impl DeepNeuralNetwork {
             println!("[GPU/CPU SWITCH] GPU already initialized and ready.");
             return;
         }
-
         self.initialization_attempted = true;
 
         // 创建临时Runtime并执行 init
@@ -951,19 +937,11 @@ impl DeepNeuralNetwork {
     }
 
     fn gpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
-        if self.initialization_failed {
-            return self.light_forward(input);
-        }
-
-        // 确保GPU已初始化
         if !self.gpu_initialized {
-            println!("GPU");
             self.init_gpu_sync();
-        }
-
-        if self.initialization_failed || self.device.is_none() {
-            println!("CPU");
-            return self.light_forward(input);
+            if !self.gpu_initialized {
+                return self.light_forward(input);
+            }
         }
 
         let device = match self.device.as_ref() {
@@ -2623,6 +2601,7 @@ impl PhiTKAdvancedAI {
                     let res = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                         ai.main_network.init_gpu_sync();
                     }));
+
                     if res.is_err() || !ai.main_network.gpu_initialized {
                         ai.main_network.initialization_failed = true;
                         println!("[GPU/CPU SWITCH] main_network GPU init failed or panicked — will use CPU.");
@@ -2635,9 +2614,12 @@ impl PhiTKAdvancedAI {
                     ai.target_network.initialization_failed = false;
                     ai.target_network.gpu_initialized = false;
                     println!("[GPU/CPU SWITCH] Beginning GPU init for target_network...");
+
                     let res2 = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                         ai.target_network.init_gpu_sync();
                     }));
+
+
                     if res2.is_err() || !ai.target_network.gpu_initialized {
                         ai.target_network.initialization_failed = true;
                         println!("[GPU/CPU SWITCH] target_network GPU init failed or panicked — will use CPU.");
