@@ -12,21 +12,17 @@ use crate::core::BpmList;
 use crate::judge::JudgeStatus;
 use fastrand;
 use once_cell::sync::OnceCell;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
+use rayon::prelude::*;
+use rayon::ThreadPool;
 use std::collections::HashMap as StdHashMap;
+use std::panic;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use wgpu;
 use wgpu::util::DeviceExt;
-use std::panic;
-use std::sync::Arc;
-use rayon::ThreadPool;
-use rayon::iter::IntoParallelRefIterator;
-use rayon::iter::ParallelIterator;
-use rayon::prelude::*;
-
-pub struct HandConfig {
-    pub config: Config,
-}
 
 static AI_SYSTEM: OnceCell<Mutex<PhiTKAdvancedAI>> = OnceCell::new();
 static LAST_FULL_UPDATE: OnceCell<Mutex<Instant>> = OnceCell::new();
@@ -43,7 +39,6 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
     let last_full_update = LAST_FULL_UPDATE.get_or_init(|| Mutex::new(Instant::now()));
     let do_full_update = now.duration_since(*last_full_update.lock().unwrap()) >= Duration::from_millis(20);
 
-    // 确保AI系统只初始化一次
     let ai_system = AI_SYSTEM.get_or_init(|| {
         Mutex::new(PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", rotation))
     });
@@ -56,16 +51,12 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
 
     if do_full_update {
         *last_full_update.lock().unwrap() = now;
-
-        // 更新旋转角度，但不重置训练状态
         if ai.rotation != rotation {
             ai.rotation = rotation;
             ai.update_hand_positions();
         }
-
         ai.line_rotations.insert(line_id, rotation);
         ai.analyze_and_assign(notes, config, bpm_list, line_id);
-
         if ai.training_episodes % 1000 == 0 {
             println!("[Training] 训练完成 {} 回合，保存模型", ai.training_episodes);
             ai.save_model("phitk_ai_model.bin");
@@ -77,6 +68,270 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
 struct Vector2 {
     x: f32,
     y: f32,
+}
+
+pub struct HandConfig {
+    pub config: Config,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PerformanceMetrics {
+    timestamp: f32,
+    accuracy: f32,
+    speed: f32,
+    consistency: f32,
+    difficulty_handled: f32,
+    patterns_recognized: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PhiTKAdvancedAI {
+    main_network: DeepNeuralNetwork,
+    target_network: DeepNeuralNetwork,
+    #[serde(skip)]
+    #[serde(default)]
+    thread_pool: Option<Arc<ThreadPool>>,
+    #[serde(skip)]
+    #[serde(default)]
+    thread_count: usize,
+    feature_extractor: AdvancedFeatureExtractor,
+    experience_replay: ExperienceReplay,
+    left_hand_state: HandState,
+    right_hand_state: HandState,
+    rotation: f32,
+    exploration_rate: f32,
+    discount_factor: f32,
+    target_update_frequency: u32,
+    total_notes_processed: u64,
+    correct_predictions: u64,
+    training_episodes: u64,
+    average_reward: f32,
+    difficulty_adaptation: f32,
+    learning_momentum: f32,
+    confidence_threshold: f32,
+    pattern_memory: BTreeMap<String, f32>,
+    performance_history: VecDeque<PerformanceMetrics>,
+    version: u32,
+    last_save_episodes: u64,
+    last_update_time: f32,
+    line_rotations: HashMap<usize, f32>,
+    game_mode: GameMode,
+    finger_states: Vec<FingerState>,
+    stability_factor: f32,
+    hand_switch_penalty: f32,
+    consistency_bonus: f32,
+    adaptive_learning_rate: f32,
+    pattern_recognition_strength: f32,
+    memory_consolidation_rate: f32,
+    recent_assignments: VecDeque<(Hand, f32, f32)>,
+    hand_switch_count: u32,
+    last_assigned_hand: Option<Hand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProcessedNote {
+    index: usize,
+    position: Vector2,
+    time: f32,
+    kind: NoteKind,
+    assigned_hand: Option<Hand>,
+    confidence: f32,
+    features: Vec<f32>,
+    judge: JudgeStatus,
+    difficulty: f32,
+    duration: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Experience {
+    state: Vec<f32>,
+    action: usize,
+    reward: f32,
+    next_state: Vec<f32>,
+    done: bool,
+    timestamp: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExperienceReplay {
+    buffer: VecDeque<Experience>,
+    capacity: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum GameMode {
+    TwoFinger,
+    FourFinger,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum Finger {
+    LeftIndex,
+    LeftMiddle,
+    RightIndex,
+    RightMiddle,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FingerState {
+    finger: Finger,
+    position: Vector2,
+    velocity: Vector2,
+    #[serde(default)]
+    last_time: f32,
+    #[serde(default)]
+    fatigue: f32,
+    #[serde(default)]
+    confidence: f32,
+    success_streak: u32,
+    total_actions: u32,
+    #[serde(default)]
+    performance_score: f32,
+    #[serde(default)]
+    is_busy: bool,
+    #[serde(default)]
+    busy_until: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeepNeuralNetwork {
+    layers: Vec<NetworkLayer>,
+    #[serde(default)]learning_rate: f32,
+    #[serde(default)]momentum: f32,
+    #[serde(default)]dropout_rate: f32,
+    batch_size: usize,
+    epoch_count: u64,
+    #[serde(skip)]device: Option<wgpu::Device>,
+    #[serde(skip)]queue: Option<wgpu::Queue>,
+    #[serde(skip)]matmul_pipeline: Option<wgpu::ComputePipeline>,
+    #[serde(skip)]matmul_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    #[serde(skip)]activation_pipelines: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
+    #[serde(
+        skip
+    )]activation_bind_group_layouts: StdHashMap<ActivationFunction, wgpu::BindGroupLayout>,
+    #[serde(skip)]gpu_initialized: bool,
+    #[serde(skip)]batch_size_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]initialization_attempted: bool,
+    #[serde(skip)]initialization_failed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NetworkLayer {
+    #[serde(default)]
+    weights: Vec<Vec<f32>>,
+    #[serde(default)]
+    biases: Vec<f32>,
+    #[serde(default)]
+    activations: Vec<f32>,
+    #[serde(default)]
+    gradients: Vec<f32>,
+    #[serde(default)]
+    momentum_weights: Vec<Vec<f32>>,
+    #[serde(default)]
+    momentum_biases: Vec<f32>,
+
+    #[serde(default)]
+    bidirectional: bool,
+    #[serde(default)]
+    seq_len: usize,
+
+    layer_type: LayerType,
+    activation_func: ActivationFunction,
+    #[serde(skip)]
+    weights_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    biases_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    activations_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    batch_activations_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    batch_activations: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum LayerType {
+    Dense,
+    LSTM,
+    Attention,
+    Residual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+enum ActivationFunction {
+    ReLU,
+    Sigmoid,
+    Tanh,
+    Swish,
+    GELU,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvancedFeatureExtractor {
+    pattern_library: HashMap<String, PatternSignature>,
+    temporal_patterns: VecDeque<TemporalFeature>,
+    spatial_patterns: Vec<SpatialFeature>,
+    difficulty_estimator: DifficultyEstimator,
+    #[serde(skip)]
+    last_logged_bpm: Option<f32>,
+    #[serde(skip)]
+    last_logged_time: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PatternSignature {
+    name: String,
+    #[serde(default)]
+    features: Vec<f32>,
+    #[serde(default)]
+    difficulty_multiplier: f32,
+    optimal_strategy: HandStrategy,
+    #[serde(default)]
+    success_rate: f32,
+    adaptation_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TemporalFeature {
+    #[serde(default)]
+    time_window: f32,
+    #[serde(default)]
+    note_density: f32,
+    #[serde(default)]
+    velocity_profile: Vec<f32>,
+    #[serde(default)]
+    rhythm_complexity: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpatialFeature {
+    position_cluster: Vector2,
+    #[serde(default)]
+    spread_radius: f32,
+    note_count: usize,
+    dominant_direction: Vector2,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum HandStrategy {
+    Alternating,
+    SameHand,
+    Optimal,
+    Stream,
+    Chord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DifficultyEstimator {
+    #[serde(default)]
+    base_difficulty: f32,
+    #[serde(default)]
+    pattern_difficulty: HashMap<String, f32>,
+    #[serde(default)]
+    speed_difficulty: f32,
+    #[serde(default)]
+    coordination_difficulty: f32,
 }
 
 impl Vector2 {
@@ -143,20 +398,6 @@ impl std::ops::Mul<f32> for Vector2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum GameMode {
-    TwoFinger,
-    FourFinger,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum Finger {
-    LeftIndex,
-    LeftMiddle,
-    RightIndex,
-    RightMiddle,
-}
-
 impl Finger {
     pub fn to_hand(&self) -> Hand {
         match self {
@@ -168,27 +409,6 @@ impl Finger {
     pub fn is_index(&self) -> bool {
         matches!(self, Finger::LeftIndex | Finger::RightIndex)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FingerState {
-    finger: Finger,
-    position: Vector2,
-    velocity: Vector2,
-    #[serde(default)]
-    last_time: f32,
-    #[serde(default)]
-    fatigue: f32,
-    #[serde(default)]
-    confidence: f32,
-    success_streak: u32,
-    total_actions: u32,
-    #[serde(default)]
-    performance_score: f32,
-    #[serde(default)]
-    is_busy: bool,
-    #[serde(default)]
-    busy_until: f32,
 }
 
 impl FingerState {
@@ -296,8 +516,7 @@ impl FingerState {
         self.last_time = time;
     }
 
-    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32,
-                                  current_time: f32, note_kind: &NoteKind, note_duration: f32) -> f32 {
+    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32, current_time: f32, note_kind: &NoteKind, note_duration: f32) -> f32 {
         // 繁忙状态检查
         let is_available = current_time >= self.busy_until;
         let distance = target_pos.distance_to(&self.position);
@@ -391,78 +610,6 @@ impl FingerState {
     }
 }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DeepNeuralNetwork {
-    layers: Vec<NetworkLayer>,
-    #[serde(default)]learning_rate: f32,
-    #[serde(default)]momentum: f32,
-    #[serde(default)]dropout_rate: f32,
-    batch_size: usize,
-    epoch_count: u64,
-    #[serde(skip)]device: Option<wgpu::Device>,
-    #[serde(skip)]queue: Option<wgpu::Queue>,
-    #[serde(skip)]matmul_pipeline: Option<wgpu::ComputePipeline>,
-    #[serde(skip)]matmul_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    #[serde(skip)]activation_pipelines: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
-    #[serde(skip)]activation_bind_group_layouts: StdHashMap<ActivationFunction, wgpu::BindGroupLayout>,
-    #[serde(skip)]gpu_initialized: bool,
-    #[serde(skip)]batch_size_buffer: Option<wgpu::Buffer>,
-    #[serde(skip)]initialization_attempted: bool,
-    #[serde(skip)]initialization_failed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct NetworkLayer {
-    #[serde(default)]
-    weights: Vec<Vec<f32>>,
-    #[serde(default)]
-    biases: Vec<f32>,
-    #[serde(default)]
-    activations: Vec<f32>,
-    #[serde(default)]
-    gradients: Vec<f32>,
-    #[serde(default)]
-    momentum_weights: Vec<Vec<f32>>,
-    #[serde(default)]
-    momentum_biases: Vec<f32>,
-
-    #[serde(default)]
-    bidirectional: bool,
-    #[serde(default)]
-    seq_len: usize,
-
-    layer_type: LayerType,
-    activation_func: ActivationFunction,
-    #[serde(skip)]
-    weights_buffer: Option<wgpu::Buffer>,
-    #[serde(skip)]
-    biases_buffer: Option<wgpu::Buffer>,
-    #[serde(skip)]
-    activations_buffer: Option<wgpu::Buffer>,
-    #[serde(skip)]
-    batch_activations_buffer: Option<wgpu::Buffer>,
-    #[serde(skip)]
-    batch_activations: Vec<f32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum LayerType {
-    Dense,
-    LSTM,
-    Attention,
-    Residual,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
-enum ActivationFunction {
-    ReLU,
-    Sigmoid,
-    Tanh,
-    Swish,
-    GELU,
-}
-
 impl DeepNeuralNetwork {
     pub fn clean(&mut self) {
         for layer in &mut self.layers {
@@ -511,15 +658,9 @@ impl DeepNeuralNetwork {
             }
         }
 
-        if !self.learning_rate.is_finite() {
-            self.learning_rate = 0.001;
-        }
-        if !self.momentum.is_finite() {
-            self.momentum = 0.9;
-        }
-        if !self.dropout_rate.is_finite() {
-            self.dropout_rate = 0.1;
-        }
+        if !self.learning_rate.is_finite() {self.learning_rate = 0.001; }
+        if !self.momentum.is_finite() { self.momentum = 0.9; }
+        if !self.dropout_rate.is_finite() { self.dropout_rate = 0.1; }
     }
 
 
@@ -615,8 +756,6 @@ impl DeepNeuralNetwork {
         current_input
     }
 
-
-
     fn new() -> Self {
         let mut network = Self {
             layers: Vec::new(),
@@ -643,17 +782,14 @@ impl DeepNeuralNetwork {
     }
 
     pub fn init_gpu_sync(&mut self) {
-        // 如果已标记为初始化，直接返回
         if self.gpu_initialized {
             return;
         }
 
-        // 如果初始化已尝试且失败，不再尝试
         if self.initialization_attempted && self.initialization_failed {
             return;
         }
 
-        // 检查GPU资源是否已存在
         if self.device.is_some() && self.queue.is_some() && self.matmul_pipeline.is_some() {
             self.gpu_initialized = true;
             println!("[GPU/CPU SWITCH] GPU already initialized and ready.");
@@ -661,7 +797,6 @@ impl DeepNeuralNetwork {
         }
         self.initialization_attempted = true;
 
-        // 创建临时Runtime并执行 init
         let rt = tokio::runtime::Runtime::new()
             .expect("Failed to create Tokio runtime for GPU initialization");
 
@@ -669,7 +804,6 @@ impl DeepNeuralNetwork {
             self.init_gpu().await
         });
 
-        // 根据初始化结果设置状态
         println!("[GPU/CPU SWITCH] GPU initialization completed (init_result = {} ).", init_result);
 
         // 根据初始化结果设置状态
@@ -679,7 +813,6 @@ impl DeepNeuralNetwork {
         } else {
             self.initialization_failed = true;
             println!("[GPU/CPU SWITCH] GPU initialization marked failed.");
-            // 清理可能已部分初始化的资源
             self.device = None;
             self.queue = None;
             self.matmul_pipeline = None;
@@ -699,7 +832,6 @@ impl DeepNeuralNetwork {
         };
         let instance = wgpu::Instance::new(&instance_desc);
 
-        // 请求适配器
         let adapter = match instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
@@ -712,7 +844,6 @@ impl DeepNeuralNetwork {
             }
         };
 
-        // 请求设备
         let (device, queue) = match adapter.request_device(&wgpu::DeviceDescriptor::default()).await {
             Ok((d, q)) => (d, q),
             Err(e) => {
@@ -721,7 +852,6 @@ impl DeepNeuralNetwork {
             }
         };
 
-        // 创建批量大小缓冲区
         let batch_size_data = [self.batch_size as u32];
         let batch_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Batch Size Buffer"),
@@ -729,7 +859,6 @@ impl DeepNeuralNetwork {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
-        // 创建矩阵乘法绑定组布局 - 直接调用，不需要匹配Result
         let matmul_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -793,13 +922,11 @@ impl DeepNeuralNetwork {
             push_constant_ranges: &[],
         });
 
-        // 创建矩阵乘法着色器
         let matmul_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(MATMUL_WGSL.into()),
         });
 
-        // 创建矩阵乘法计算管道
         let matmul_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: None,
             layout: Some(&matmul_pipeline_layout),
@@ -809,13 +936,11 @@ impl DeepNeuralNetwork {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         });
 
-        // 创建激活函数管道
         let mut activation_pipelines = StdHashMap::new();
         let mut activation_bind_group_layouts = StdHashMap::new();
 
         for func in [ActivationFunction::ReLU, ActivationFunction::Sigmoid,
             ActivationFunction::Tanh, ActivationFunction::Swish, ActivationFunction::GELU] {
-            // 创建激活函数绑定组布局 - 直接调用，不需要匹配Result
             let activation_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
@@ -848,14 +973,12 @@ impl DeepNeuralNetwork {
                 push_constant_ranges: &[],
             });
 
-            // 创建激活函数着色器
             let shader_src = self.get_activation_shader(&func);
             let activation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: None,
                 source: wgpu::ShaderSource::Wgsl(shader_src.into()),
             });
 
-            // 创建激活函数计算管道
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: None,
                 layout: Some(&activation_pipeline_layout),
@@ -869,7 +992,6 @@ impl DeepNeuralNetwork {
             activation_bind_group_layouts.insert(func, activation_bind_group_layout);
         }
 
-        // 上传权重到GPU
         for layer in &mut self.layers {
             let weights_flat = layer.weights.iter().flatten().cloned().collect::<Vec<f32>>();
             layer.weights_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -900,7 +1022,7 @@ impl DeepNeuralNetwork {
         self.activation_bind_group_layouts = activation_bind_group_layouts;
         self.batch_size_buffer = Some(batch_size_buffer);
 
-        true // 初始化成功
+        true
         //println!("Success");
     }
 
@@ -1034,7 +1156,7 @@ impl DeepNeuralNetwork {
         //rx.recv().unwrap().unwrap();
         match rx.recv() {
             Ok(result) => match result {
-                Ok(()) => {}, // success
+                Ok(()) => {},
                 Err(e) => {
                     eprintln!("GPU buffer mapping failed: {:?}", e);
                     return self.light_forward(input);
@@ -1085,7 +1207,6 @@ impl DeepNeuralNetwork {
                     binding: 3,
                     resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding()
                 },
-                // 新增：批量大小参数
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -1114,7 +1235,6 @@ impl DeepNeuralNetwork {
                     binding: 0,
                     resource: buffer.as_entire_binding()
                 },
-                // 新增：批量大小参数
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -1129,37 +1249,27 @@ impl DeepNeuralNetwork {
     }
 
     fn gpu_forward_batch(&mut self, inputs: &[&[f32]], actual_batch_size: usize) -> Vec<Vec<f32>> {
-        // 检查GPU是否已初始化
         if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
             return inputs.iter().map(|input| self.light_forward(input)).collect();
         }
 
         let device = self.device.as_ref().unwrap();
         let queue = self.queue.as_ref().unwrap();
-
-        // 准备输入缓冲区
         let input_size = inputs[0].len();
         let total_input_size = input_size * actual_batch_size;
-
-        // 创建批量输入数据
         let mut batch_input_data = Vec::with_capacity(total_input_size);
         for input in inputs {
             batch_input_data.extend_from_slice(input);
         }
-
-        // 创建批量输入缓冲区
         let batch_input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Batch Input Buffer"),
             contents: bytemuck::cast_slice(&batch_input_data),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
-
-        // 为每层准备批量激活缓冲区
         let mut current_input_buffer = batch_input_buffer;
         let mut layer_output_buffers = Vec::new();
-
         for i in 0..self.layers.len() {
-            let layer = &self.layers[i]; // 不可变借用
+            let layer = &self.layers[i];
             let output_size = layer.weights.len() as u32;
             let total_output_size = output_size * (actual_batch_size as u32);
 
@@ -1168,7 +1278,6 @@ impl DeepNeuralNetwork {
                 None => panic!("Activation buffer for layer {} is not initialized.", i),
             };
 
-            // 创建批量输出缓冲区
             let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Batch Output Buffer for Layer {}", layer_output_buffers.len())),
                 size: (total_output_size * (std::mem::size_of::<f32>()) as u32) as u64,
@@ -1176,9 +1285,7 @@ impl DeepNeuralNetwork {
                 mapped_at_creation: false,
             });
 
-            // 执行批量矩阵乘法
             let matmul_bind_group = self.create_matmul_bind_group(layer, &current_input_buffer, activation_buffer);
-
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Batch Matmul Encoder")
             });
@@ -1191,30 +1298,24 @@ impl DeepNeuralNetwork {
 
                 cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
                 cpass.set_bind_group(0, &matmul_bind_group, &[]);
-                // 这里需要调整工作组大小以处理批量数据
                 cpass.dispatch_workgroups(
                     ((output_size as u32 * actual_batch_size as u32) + 7) / 8,
                     1,
                     1
                 );
             }
-
             queue.submit(Some(encoder.finish()));
 
-            // 执行批量激活函数
             let activation_bind_group = self.create_activation_bind_group(
                 layer,
                 &output_buffer,
             );
-
             let activation_pipeline = self.activation_pipelines
                 .get(&layer.activation_func)
                 .expect("Activation pipeline not initialized");
-
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Batch Activation Encoder")
             });
-
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Batch Activation Pass"),
@@ -1229,7 +1330,6 @@ impl DeepNeuralNetwork {
                     1
                 );
             }
-
             queue.submit(Some(encoder.finish()));
 
             current_input_buffer = output_buffer.clone();
@@ -1263,7 +1363,6 @@ impl DeepNeuralNetwork {
 
         queue.submit(Some(encoder.finish()));
 
-        // 映射并获取结果
         let buffer_slice = staging_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -1281,7 +1380,6 @@ impl DeepNeuralNetwork {
         let data = buffer_slice.get_mapped_range();
         let batch_results: &[f32] = bytemuck::cast_slice(&data);
 
-        // 将批量结果分割为单个样本结果
         let mut results = Vec::with_capacity(actual_batch_size);
         for i in 0..actual_batch_size {
             let start = i * output_size;
@@ -1295,6 +1393,9 @@ impl DeepNeuralNetwork {
         results
     }
 
+    /*
+    * 构建神经网络架构
+     */
     fn build_architecture(&mut self) {
         self.add_dense_layer(16, 128, ActivationFunction::ReLU);
         self.add_attention_layer(128, 128);
@@ -1306,6 +1407,7 @@ impl DeepNeuralNetwork {
         self.add_dense_layer(256, 4, ActivationFunction::Tanh);
     }
 
+    //TODO: 归一化输出
     fn normalize_output(&self, raw_output: &[f32]) -> Vec<f32> {
         let mut normalized = raw_output.to_vec();
         if normalized.len() >= 2 {
@@ -1364,6 +1466,7 @@ impl DeepNeuralNetwork {
         self.layers.push(layer);
     }
 
+    // 双向 LSTM 层 (支持单向)
     fn add_lstm_layer_bi(&mut self, input_size: usize, output_size: usize, bidirectional: bool, seq_len: usize) {
         let dir_mul = if bidirectional { 2 } else { 1 };
         let rows = output_size * 4 * dir_mul;
@@ -1556,6 +1659,7 @@ impl DeepNeuralNetwork {
         }
     }
 
+    // TODO: 更复杂的注意力机制
     fn attention_forward(layer: &mut NetworkLayer, input: &[f32]) -> Vec<f32> {
         let output_size = layer.activations.len();
         let mut output = vec![0.0; output_size];
@@ -1583,12 +1687,7 @@ impl DeepNeuralNetwork {
         layer.activations = output.clone();
         output
     }
-
-    fn residual_forward(
-        layer: &mut NetworkLayer,
-        input: &[f32],
-        residual: &[f32],
-    ) -> Vec<f32> {
+    fn residual_forward(layer: &mut NetworkLayer, input: &[f32], residual: &[f32]) -> Vec<f32> {
         let dense_output = Self::dense_forward_static(&layer.weights, &layer.biases, input, &layer.activation_func);
         let mut output = vec![0.0; dense_output.len()];
         for i in 0..output.len() {
@@ -1597,12 +1696,7 @@ impl DeepNeuralNetwork {
         output
     }
 
-    fn dense_forward_static(
-        weights: &[Vec<f32>],
-        biases: &[f32],
-        input: &[f32],
-        activation: &ActivationFunction,
-    ) -> Vec<f32> {
+    fn dense_forward_static(weights: &[Vec<f32>], biases: &[f32], input: &[f32], activation: &ActivationFunction) -> Vec<f32> {
         let mut output = vec![0.0; weights.len()];
         for (i, (weight_row, bias)) in weights.iter().zip(biases.iter()).enumerate() {
             let mut sum = *bias;
@@ -1628,7 +1722,7 @@ impl DeepNeuralNetwork {
         }
     }
 
-
+    //TODO: 优化批量训练
     fn train_batch(&mut self, batch: &[(Vec<f32>, Vec<f32>)]) {
         let batch_size = batch.len();
 
@@ -1672,9 +1766,7 @@ impl DeepNeuralNetwork {
         self.apply_gradients(&total_gradients, &total_bias_gradients, batch_size);
     }
 
-    fn backward(&mut self, output: &[f32], target: &[f32],
-                total_gradients: &mut [Vec<Vec<f32>>],
-                total_bias_gradients: &mut [Vec<f32>]) {
+    fn backward(&mut self, output: &[f32], target: &[f32], total_gradients: &mut [Vec<Vec<f32>>], total_bias_gradients: &mut [Vec<f32>]) {
         let mut layer_errors = vec![vec![0.0; 0]; self.layers.len()];
 
         if let Some(last_layer_idx) = self.layers.len().checked_sub(1) {
@@ -1706,8 +1798,7 @@ impl DeepNeuralNetwork {
         }
     }
 
-    fn calculate_layer_gradients(&self, layer_idx: usize, errors: &[f32],
-                                 gradients: &mut [Vec<f32>], bias_gradients: &mut [f32]) {
+    fn calculate_layer_gradients(&self, layer_idx: usize, errors: &[f32], gradients: &mut [Vec<f32>], bias_gradients: &mut [f32]) {
         let layer = &self.layers[layer_idx];
         let prev_activations = if layer_idx > 0 {
             &self.layers[layer_idx - 1].activations
@@ -1771,7 +1862,6 @@ impl DeepNeuralNetwork {
         if self.device.is_none() || self.queue.is_none() {
             return;
         }
-        // Update GPU buffers with new weights/biases
         for layer in &mut self.layers {
             let queue = self.queue.as_ref().expect("GPU queue not initialized — call init_gpu() before calling this method");
             let weights_buf = layer.weights_buffer.as_ref().expect("weights_buffer not created for layer");
@@ -1781,73 +1871,6 @@ impl DeepNeuralNetwork {
             queue.write_buffer(biases_buf, 0, bytemuck::cast_slice(&layer.biases));
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AdvancedFeatureExtractor {
-    pattern_library: HashMap<String, PatternSignature>,
-    temporal_patterns: VecDeque<TemporalFeature>,
-    spatial_patterns: Vec<SpatialFeature>,
-    difficulty_estimator: DifficultyEstimator,
-    #[serde(skip)]
-    last_logged_bpm: Option<f32>,
-    #[serde(skip)]
-    last_logged_time: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PatternSignature {
-    name: String,
-    #[serde(default)]
-    features: Vec<f32>,
-    #[serde(default)]
-    difficulty_multiplier: f32,
-    optimal_strategy: HandStrategy,
-    #[serde(default)]
-    success_rate: f32,
-    adaptation_count: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TemporalFeature {
-    #[serde(default)]
-    time_window: f32,
-    #[serde(default)]
-    note_density: f32,
-    #[serde(default)]
-    velocity_profile: Vec<f32>,
-    #[serde(default)]
-    rhythm_complexity: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SpatialFeature {
-    position_cluster: Vector2,
-    #[serde(default)]
-    spread_radius: f32,
-    note_count: usize,
-    dominant_direction: Vector2,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum HandStrategy {
-    Alternating,
-    SameHand,
-    Optimal,
-    Stream,
-    Chord,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DifficultyEstimator {
-    #[serde(default)]
-    base_difficulty: f32,
-    #[serde(default)]
-    pattern_difficulty: HashMap<String, f32>,
-    #[serde(default)]
-    speed_difficulty: f32,
-    #[serde(default)]
-    coordination_difficulty: f32,
 }
 
 impl AdvancedFeatureExtractor {
@@ -1876,7 +1899,6 @@ impl AdvancedFeatureExtractor {
         features.extend(self.extract_velocity_features(notes));
         features.extend(self.extract_spatial_features(notes));
         //println!("[特征提取] 特征: {:?}", features);
-        //println!("[Token Usage] Feature Extraction - Notes: {}, Window: {}", notes.len(), window_size);
         features
         
     }
@@ -2333,36 +2355,6 @@ impl HandState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProcessedNote {
-    index: usize,
-    position: Vector2,
-    time: f32,
-    kind: NoteKind,
-    assigned_hand: Option<Hand>,
-    confidence: f32,
-    features: Vec<f32>,
-    judge: JudgeStatus,
-    difficulty: f32,
-    duration: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Experience {
-    state: Vec<f32>,
-    action: usize,
-    reward: f32,
-    next_state: Vec<f32>,
-    done: bool,
-    timestamp: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ExperienceReplay {
-    buffer: VecDeque<Experience>,
-    capacity: usize,
-}
-
 impl ExperienceReplay {
     fn new(capacity: usize) -> Self {
         Self {
@@ -2392,111 +2384,28 @@ impl ExperienceReplay {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PerformanceMetrics {
-    timestamp: f32,
-    accuracy: f32,
-    speed: f32,
-    consistency: f32,
-    difficulty_handled: f32,
-    patterns_recognized: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PhiTKAdvancedAI {
-    main_network: DeepNeuralNetwork,
-    target_network: DeepNeuralNetwork,
-    #[serde(skip)]
-    #[serde(default)]
-    thread_pool: Option<Arc<ThreadPool>>,
-    #[serde(skip)]
-    #[serde(default)]
-    thread_count: usize,
-    feature_extractor: AdvancedFeatureExtractor,
-    experience_replay: ExperienceReplay,
-    left_hand_state: HandState,
-    right_hand_state: HandState,
-    rotation: f32,
-    exploration_rate: f32,
-    discount_factor: f32,
-    target_update_frequency: u32,
-    total_notes_processed: u64,
-    correct_predictions: u64,
-    training_episodes: u64,
-    average_reward: f32,
-    difficulty_adaptation: f32,
-    learning_momentum: f32,
-    confidence_threshold: f32,
-    pattern_memory: BTreeMap<String, f32>,
-    performance_history: VecDeque<PerformanceMetrics>,
-    version: u32,
-    last_save_episodes: u64,
-    last_update_time: f32,
-    line_rotations: HashMap<usize, f32>,
-    game_mode: GameMode,
-    finger_states: Vec<FingerState>,
-    stability_factor: f32,
-    hand_switch_penalty: f32,
-    consistency_bonus: f32,
-    adaptive_learning_rate: f32,
-    pattern_recognition_strength: f32,
-    memory_consolidation_rate: f32,
-    recent_assignments: VecDeque<(Hand, f32, f32)>,
-    hand_switch_count: u32,
-    last_assigned_hand: Option<Hand>,
-}
-
 impl PhiTKAdvancedAI {
     const CURRENT_VERSION: u32 = 1;
 
     fn clean_model_data(&mut self) {
+        let default = Self::new(self.rotation);
         self.main_network.clean();
         self.target_network.clean();
-
         self.left_hand_state.clean();
         self.right_hand_state.clean();
-
-        let default = Self::new(self.rotation);
-        if !self.exploration_rate.is_finite() {
-            self.exploration_rate = default.exploration_rate;
-        }
-        if !self.discount_factor.is_finite() {
-            self.discount_factor = default.discount_factor;
-        }
-        if !self.average_reward.is_finite() {
-            self.average_reward = default.average_reward;
-        }
-        if !self.difficulty_adaptation.is_finite() {
-            self.difficulty_adaptation = default.difficulty_adaptation;
-        }
-        if !self.learning_momentum.is_finite() {
-            self.learning_momentum = default.learning_momentum;
-        }
-        if !self.confidence_threshold.is_finite() {
-            self.confidence_threshold = default.confidence_threshold;
-        }
-
-        if !self.stability_factor.is_finite() {
-            self.stability_factor = 0.85;
-        }
-        if !self.hand_switch_penalty.is_finite() {
-            self.hand_switch_penalty = 0.4;
-        }
-        if !self.consistency_bonus.is_finite() {
-            self.consistency_bonus = 0.3;
-        }
-        if !self.adaptive_learning_rate.is_finite() {
-            self.adaptive_learning_rate = 0.001;
-        }
-        if !self.pattern_recognition_strength.is_finite() {
-            self.pattern_recognition_strength = 1.0;
-        }
-        if !self.memory_consolidation_rate.is_finite() {
-            self.memory_consolidation_rate = 0.1;
-        }
-
-        self.feature_extractor.difficulty_estimator.base_difficulty =
-            self.feature_extractor.difficulty_estimator.base_difficulty.max(0.0).min(10.0);
+        if !self.exploration_rate.is_finite() { self.exploration_rate = default.exploration_rate; }
+        if !self.discount_factor.is_finite() { self.discount_factor = default.discount_factor; }
+        if !self.average_reward.is_finite() { self.average_reward = default.average_reward; }
+        if !self.difficulty_adaptation.is_finite() { self.difficulty_adaptation = default.difficulty_adaptation; }
+        if !self.learning_momentum.is_finite() { self.learning_momentum = default.learning_momentum; }
+        if !self.confidence_threshold.is_finite() { self.confidence_threshold = default.confidence_threshold; }
+        if !self.stability_factor.is_finite() { self.stability_factor = 0.85; }
+        if !self.hand_switch_penalty.is_finite() { self.hand_switch_penalty = 0.4; }
+        if !self.consistency_bonus.is_finite() { self.consistency_bonus = 0.3; }
+        if !self.adaptive_learning_rate.is_finite() { self.adaptive_learning_rate = 0.001; }
+        if !self.pattern_recognition_strength.is_finite() { self.pattern_recognition_strength = 1.0; }
+        if !self.memory_consolidation_rate.is_finite() { self.memory_consolidation_rate = 0.1; }
+        self.feature_extractor.difficulty_estimator.base_difficulty = self.feature_extractor.difficulty_estimator.base_difficulty.max(0.0).min(10.0);
         //GPU
         self.main_network.device = None;
         self.main_network.queue = None;
@@ -2531,7 +2440,7 @@ impl PhiTKAdvancedAI {
 
     fn new(rotation: f32) -> Self {
         let thread_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(32) // 限制线程数，避免过度占用
+            .num_threads(32)
             .build()
             .ok().map(Arc::new);
 
@@ -3454,18 +3363,10 @@ impl PhiTKAdvancedAI {
     fn get_recognized_patterns(&self, notes: &[ProcessedNote]) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        if self.feature_extractor.detect_alternating_pattern(notes) > 0.6 {
-            patterns.push("alternating".to_string());
-        }
-        if self.feature_extractor.detect_stream_pattern(notes) > 0.6 {
-            patterns.push("stream".to_string());
-        }
-        if self.feature_extractor.detect_chord_pattern(notes) > 0.5 {
-            patterns.push("chord".to_string());
-        }
-        if self.feature_extractor.detect_jack_pattern(notes) > 0.5 {
-            patterns.push("jack".to_string());
-        }
+        if self.feature_extractor.detect_alternating_pattern(notes) > 0.6 { patterns.push("alternating".to_string()); }
+        if self.feature_extractor.detect_stream_pattern(notes) > 0.6 { patterns.push("stream".to_string()); }
+        if self.feature_extractor.detect_chord_pattern(notes) > 0.5 { patterns.push("chord".to_string()); }
+        if self.feature_extractor.detect_jack_pattern(notes) > 0.5 { patterns.push("jack".to_string()); }
 
         patterns
     }
@@ -3506,7 +3407,6 @@ impl PhiTKAdvancedAI {
         let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
         let mut training_data = Vec::with_capacity(batch_size);
 
-        // 串行处理，不需要并行
         for exp in &experiences {
             let target_value = exp.reward + self.discount_factor * self.estimate_future_value(&exp.next_state);
             let mut target_output = vec![0.5, 0.5, 1.0, exp.reward.abs()];
@@ -3515,7 +3415,6 @@ impl PhiTKAdvancedAI {
             }
             training_data.push((exp.state.clone(), target_output));
         }
-        //println!("[Token Usage] Network Training - Batch: {}, Experiences: {}", batch_size, self.experience_replay.len());
 
         println!("网络训练完成: Epoch {}, 学习率: {:.6}, 探索率: {:.3}, 准确率: {:.3}",
                  self.main_network.epoch_count,
@@ -3523,7 +3422,6 @@ impl PhiTKAdvancedAI {
                  self.exploration_rate,
                  self.average_reward);
 
-        // 使用批量训练
         self.main_network.train(&training_data);
     }
 
@@ -3534,24 +3432,18 @@ impl PhiTKAdvancedAI {
 
     fn reset_for_new_chart(&mut self) {
         let rad = self.rotation.to_radians();
-
         self.finger_states = Self::init_finger_states(self.game_mode, rad);
-
         self.recent_assignments.clear();
         self.hand_switch_count = 0;
         self.last_assigned_hand = None;
         self.left_hand_state = HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad));
         self.right_hand_state = HandState::new(Hand::Right, Vector2::new(0.3, 0.0).rotate(rad));
-
         self.feature_extractor.temporal_patterns.clear();
         self.feature_extractor.spatial_patterns.clear();
-
         self.experience_replay = ExperienceReplay::new(50000);
-
         self.performance_history.clear();
     }
 
-    /// 初始化或重设线程池（运行时调用）
     pub fn init_thread_pool(&mut self, num_threads: usize) {
         if num_threads <= 1 {
             self.thread_pool = None;
@@ -3567,17 +3459,14 @@ impl PhiTKAdvancedAI {
         self.thread_count = num_threads;
     }
 
-    /// 轻量级 warm-up，确保线程池被读取并初始化 worker（也避免编译器警告）
     pub fn warm_thread_pool(&self) {
         if let Some(pool) = &self.thread_pool {
             pool.install(|| {
-                // 运行一个微任务以唤醒线程；无需影响主状态
                 let _ : Vec<u8> = (0..1).into_par_iter().map(|x| (x*2) as u8).collect();
             });
         }
     }
 
-    /// 并行执行一系列索引化任务（兼容没有线程池的回退）
     pub fn parallel_tasks<F>(&self, tasks_count: usize, job: F)
     where
         F: Fn(usize) + Sync + Send,
@@ -3599,72 +3488,6 @@ impl PhiTKAdvancedAI {
         }
     }
 }
-/*
-    fn train_network(&mut self) {
-        if self.training_episodes % 10 != 0 {
-            return;
-        }
-        if self.experience_replay.len() < 8 {
-            return;
-        }
-
-        let batch_size = 32.min(self.experience_replay.len());
-        let experiences = self.experience_replay.sample(batch_size);
-
-        let mut training_data = Vec::new();
-
-        for exp in &experiences {
-            // 计算目标值
-            let target_value = exp.reward + self.discount_factor *
-                self.estimate_future_value(&exp.next_state);
-
-            // 创建目标输出
-            let mut target_output = vec![0.5, 0.5, 1.0, exp.reward.abs()];
-
-            // 更新对应动作的值
-            if exp.action < target_output.len() {
-                target_output[exp.action] = target_value.clamp(0.0, 1.0);
-            }
-
-            training_data.push((exp.state.clone(), target_output));
-        }
-
-        // 训练网络
-        self.main_network.train(&training_data);
-
-        println!("网络训练完成: Epoch {}, 学习率: {:.6}, 探索率: {:.3}, 准确率: {:.3}",
-                 self.main_network.epoch_count,
-                 self.main_network.learning_rate,
-                 self.exploration_rate,
-                 self.average_reward);
-        //io::stdout().flush().unwrap();
-    }
-
-    fn estimate_future_value(&mut self, state: &[f32]) -> f32 {
-        let output = self.target_network.forward(state);
-        output.iter().fold(0.0, |a, &b| a.max(b))
-    }
-}
-
-     */
-
-
-/*
-impl fastrand {
-    pub fn f32() -> f32 {
-        fastrand::f32()
-    }
-
-    pub fn bool() -> bool {
-        fastrand::bool()
-    }
-
-    pub fn usize(max: usize) -> usize {
-        if max == 0 { 0 } else { fastrand::usize(0..max) }
-    }
-}
-
- */
 
 const MATMUL_WGSL: &str = r#"
 struct BatchSize {
