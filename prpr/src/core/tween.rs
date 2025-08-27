@@ -1,6 +1,7 @@
 use macroquad::prelude::{vec2, Color, Rect, Vec2};
 use once_cell::sync::Lazy;
 use std::{any::Any, ops::Range, rc::Rc};
+use std::sync::Arc;
 
 pub type TweenId = u8;
 
@@ -119,7 +120,7 @@ thread_local! {
     });
 }
 
-pub trait TweenFunction {
+pub trait TweenFunction: Send + Sync {
     fn y(&self, x: f32) -> f32;
     fn as_any(&self) -> &dyn Any;
 }
@@ -136,8 +137,8 @@ impl TweenFunction for StaticTween {
 }
 
 impl StaticTween {
-    pub fn get_rc(tween: TweenId) -> Rc<dyn TweenFunction> {
-        TWEEN_FUNCTION_RCS.with(|rcs| Rc::clone(&rcs[tween as usize]))
+    pub fn get_arc(id: TweenId) -> Arc<dyn TweenFunction> {
+        Arc::new(StaticTween(id))
     }
 }
 

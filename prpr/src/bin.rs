@@ -16,6 +16,7 @@ use std::{
     rc::Rc,
 };
 use crate::core::note::Hand;
+use std::sync::Arc;
 
 pub trait BinaryData: Sized {
     fn read_binary<R: Read>(r: &mut BinaryReader<R>) -> Result<Self>;
@@ -186,9 +187,9 @@ impl<T: BinaryData> BinaryData for Keyframe<T> {
             tween: {
                 let b = r.read::<u8>()?;
                 match b & 0xC0 {
-                    0 => StaticTween::get_rc(b),
-                    0x80 => Rc::new(ClampedTween::new(b & 0x7f, r.read()?..r.read()?)),
-                    0xC0 => Rc::new(BezierTween::new((r.read()?, r.read()?), (r.read()?, r.read()?))),
+                    0 => StaticTween::get_arc(b),
+                    0x80 => Arc::new(ClampedTween::new(b & 0x7f, r.read()?..r.read()?)),
+                    0xC0 => Arc::new(BezierTween::new((r.read()?, r.read()?), (r.read()?, r.read()?))),
                     _ => panic!("invalid tween"),
                 }
             },

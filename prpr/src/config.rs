@@ -2,6 +2,9 @@ use bitflags::bitflags;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
+unsafe impl Send for Config {}
+unsafe impl Sync for Config {}
+
 pub static TIPS: Lazy<Vec<String>> = Lazy::new(|| 
     include_str!("tips.txt").split('\n')
     //.map(str::to_owned)

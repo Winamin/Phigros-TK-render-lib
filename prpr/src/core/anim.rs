@@ -1,11 +1,12 @@
 use super::{StaticTween, TweenFunction, TweenId, Tweenable, Vector};
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Keyframe<T> {
     pub time: f32,
     pub value: T,
-    pub tween: Rc<dyn TweenFunction>,
+    pub tween: Arc<dyn TweenFunction>,
 }
 
 impl<T> Keyframe<T> {
@@ -13,7 +14,7 @@ impl<T> Keyframe<T> {
         Self {
             time,
             value,
-            tween: StaticTween::get_rc(tween),
+            tween: Arc::new(StaticTween(tween))
         }
     }
 }
@@ -140,7 +141,7 @@ impl<T: Tweenable + Default> Anim<T> {
 }
 
 pub type AnimFloat = Anim<f32>;
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AnimVector(pub AnimFloat, pub AnimFloat);
 
 impl AnimVector {

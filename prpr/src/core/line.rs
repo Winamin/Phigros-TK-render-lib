@@ -13,13 +13,14 @@ use nalgebra::Rotation2;
 use serde::Deserialize;
 use std::{cell::RefCell, rc::Rc};
 use once_cell::sync::OnceCell;
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc, RwLock};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use crate::config::Config;
 
-static TEXTURE_CACHE: Lazy<Mutex<HashMap<usize, Texture2D>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
+// 只对纹理缓存进行线程安全优化
+static TEXTURE_CACHE: Lazy<RwLock<HashMap<usize, Texture2D>>> = Lazy::new(|| {
+    RwLock::new(HashMap::new())
 });
 
 #[derive(Clone, Copy, Deserialize)]
@@ -57,7 +58,7 @@ pub enum JudgeLineKind {
     Texture(SafeTexture, String),
     Text(Anim<String>),
     Paint(Anim<f32>, RefCell<(Option<RenderPass>, bool)>),
-    TextureGif(Anim<f32>, GifFrames, String), //add gif frames
+    TextureGif(Anim<f32>, GifFrames, String),
 }
 
 #[derive(Clone)]
@@ -330,15 +331,7 @@ impl JudgeLine {
 
 
     pub fn now_transform(&self, res: &Resource, lines: &[JudgeLine]) -> Matrix {
-        /*if let Some(parent) = self.parent {
-            let po = &lines[parent].object;
-            let mut tr = Rotation2::new(po.rotation.now().to_radians()) * self.object.now_translation(res);
-            tr += po.now_translation(res);
-            self.object.now_rotation().append_translation(&tr)
-        } else {
-            self.object.now(res)
-        }*/
-            self.object.now_rotation().append_translation(&Self::fetch_pos(self, res, lines))
+        self.object.now_rotation().append_translation(&Self::fetch_pos(self, res, lines))
     }
 
     pub fn render(&self, mut ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
@@ -394,9 +387,18 @@ impl JudgeLine {
                             };
                             let key = texture.get_tex() as *const Texture2D as usize;
                             let texture_2d = {
-                                let mut cache = TEXTURE_CACHE.lock().unwrap();
-                                cache.entry(key).or_insert_with(|| texture.get_tex().clone()).clone()
+                                {
+                                    let cache = TEXTURE_CACHE.read().unwrap();
+                                    if let Some(tex) = cache.get(&key) {
+                                        tex.clone()
+                                    } else {
+                                        drop(cache);
+                                        let mut cache = TEXTURE_CACHE.write().unwrap();
+                                        cache.entry(key).or_insert_with(|| texture.get_tex().clone()).clone()
+                                    }
+                                }
                             };
+
                             let hf = vec2(texture_2d.width(), texture_2d.height());
                             draw_texture_ex(
                                 texture_2d,
@@ -479,7 +481,6 @@ impl JudgeLine {
                         );
                     }
                 }
-                // guard 会在这里被 drop
             }
             let mut config = RenderConfig {
                 settings,
@@ -510,8 +511,6 @@ impl JudgeLine {
                         config.appear_before = (w as f32 - 100.) / 10.;
                     }
                     w if (1000..2000).contains(&w) => {
-                        // TODO unsupported
-                        //Link: The implementation is to set the invisible time of the note, which is calculated as (w - 1000) / 10 seconds
                         config.invisible_time = (w as f32 - 1000.) / 10.;
                     }
                     _ => {}
@@ -606,17 +605,14 @@ impl JudgeLine {
                 };
 
                 let text_color = Color::new(1.0, 1.0, 1.0, text_alpha);
-                //let height = self.height.now();
                 let judged_count = self.notes.iter().filter(|n| matches!(n.judge, JudgeStatus::Judged)).count();
                 let total_notes = self.notes.len();
 
                 let mut parent_info = String::new();
                 let mut current_parent = self.parent;
-                let mut valid_parents = Vec::new(); // 存储有效的父线索引
+                let mut valid_parents = Vec::new();
 
-                // 使用循环收集父线信息
                 while let Some(parent_index) = current_parent {
-                    // 检查索引是否有效
                     if parent_index < lines.len() {
                         valid_parents.push(parent_index);
                         current_parent = lines[parent_index].parent;
@@ -634,25 +630,24 @@ impl JudgeLine {
                         .join(" -> ");
                 }
                 res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
-                res.apply_model(|_| {
-                    ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).color(text_color).size(0.5).draw();
-                    let state_str = format!(
-                        "P({:.3},{:.3})   R{:.1}°  N{}/{}   {}",
-                        pos.x, pos.y,
-                        rotation,
-                        //height,
-                        judged_count,
-                        total_notes,
-                        parent_info
-                    );
+                    res.apply_model(|_| {
+                        ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).color(text_color).size(0.5).draw();
+                        let state_str = format!(
+                            "P({:.3},{:.3})   R{:.1}°  N{}/{}   {}",
+                            pos.x, pos.y,
+                            rotation,
+                            judged_count,
+                            total_notes,
+                            parent_info
+                        );
 
-                    ui.text(&state_str)
-                        .pos(0., -0.05)
-                        .anchor(0.5, 1.)
-                        .size(0.35)
-                        .color(text_color)
-                        .draw();
-                });
+                        ui.text(&state_str)
+                            .pos(0., -0.05)
+                            .anchor(0.5, 1.)
+                            .size(0.35)
+                            .color(text_color)
+                            .draw();
+                    });
                 });
             }
         });

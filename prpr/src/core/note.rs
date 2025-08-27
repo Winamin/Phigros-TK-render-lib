@@ -40,6 +40,7 @@ impl NoteKind {
     }
 }
 
+#[derive(Clone)]
 pub struct Note {
     pub time: f32,
     pub kind: NoteKind,

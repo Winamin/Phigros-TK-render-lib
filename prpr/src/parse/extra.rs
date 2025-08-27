@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use macroquad::prelude::{Color, Vec2};
 use serde::Deserialize;
 use std::{collections::HashMap, rc::Rc};
+use std::sync::Arc;
 
 // serde is weird...
 fn f32_zero() -> f32 {
@@ -65,9 +66,9 @@ impl<V> ExtAnim<V> {
                         tween: {
                             let tween = RPE_TWEEN_MAP.get(e.easing_type.max(1) as usize).copied().unwrap_or(RPE_TWEEN_MAP[0]);
                             if e.easing_left.abs() < EPS && (e.easing_right - 1.0).abs() < EPS {
-                                StaticTween::get_rc(tween)
+                                Arc::new(StaticTween(tween))
                             } else {
-                                Rc::new(ClampedTween::new(tween, e.easing_left..e.easing_right))
+                                Arc::new(ClampedTween::new(tween, e.easing_left..e.easing_right))
                             }
                         },
                     });

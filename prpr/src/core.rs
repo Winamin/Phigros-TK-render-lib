@@ -69,6 +69,9 @@ impl Triple {
     }
 }
 
+unsafe impl Send for BpmList {}
+unsafe impl Sync for BpmList {}
+
 #[derive(Default, Clone)] // the default is a dummy
 pub struct BpmList {
     elements: Vec<(f32, f32, f32)>, // (beats, time, bpm)

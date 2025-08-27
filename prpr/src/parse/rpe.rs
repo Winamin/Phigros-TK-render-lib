@@ -20,6 +20,7 @@ use crate::ext::SafeTexture;
 use crate::core::note::Hand;
 use crate::hand::assign_hands;
 use crate::config::Config;
+use std::sync::Arc;
 
 pub const RPE_WIDTH: f32 = 1350.;
 pub const RPE_HEIGHT: f32 = 900.;
@@ -173,7 +174,7 @@ struct RPEChart {
     judge_line_list: Vec<RPEJudgeLine>,
 }
 
-type BezierMap = HashMap<(u16, i16, i16), Rc<dyn TweenFunction>>;
+type BezierMap = HashMap<(u16, i16, i16), Arc<dyn TweenFunction>>;
 
 fn bezier_key<T>(event: &RPEEvent<T>) -> (u16, i16, i16) {
     let p = &event.bezier_points;
@@ -202,11 +203,12 @@ fn parse_events<T: Tweenable, V: Clone + Into<T>>(
             tween: {
                 let tween = RPE_TWEEN_MAP.get(e.easing_type.max(1) as usize).copied().unwrap_or(RPE_TWEEN_MAP[0]);
                 if e.bezier != 0 {
-                    Rc::clone(&bezier_map[&bezier_key(e)])
+                    //Arc::clone(&bezier_map[&bezier_key(e)])
+                    bezier_map[&bezier_key(e)].clone()
                 } else if e.easing_left.abs() < EPS && (e.easing_right - 1.0).abs() < EPS {
-                    StaticTween::get_rc(tween)
+                    Arc::new(StaticTween(tween))
                 } else {
-                    Rc::new(ClampedTween::new(tween, e.easing_left..e.easing_right))
+                    Arc::new(ClampedTween::new(tween, e.easing_left..e.easing_right))
                 }
             },
         });
@@ -589,7 +591,7 @@ fn add_bezier<T>(map: &mut BezierMap, event: &RPEEvent<T>) {
         let p = &event.bezier_points;
         let int = |p: f32| (p * 100.).round() as i16;
         map.entry(((int(p[0]) * 100 + int(p[1])) as u16, int(p[2]), int(p[3])))
-            .or_insert_with(|| Rc::new(BezierTween::new((p[0], p[1]), (p[2], p[3]))));
+            .or_insert_with(|| Arc::new(BezierTween::new((p[0], p[1]), (p[2], p[3]))));
     }
 }
 
