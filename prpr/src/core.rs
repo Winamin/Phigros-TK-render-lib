@@ -135,17 +135,19 @@ impl BpmList {
         beats + (time - start_time) / (60. / bpm)
     }
 
-    pub fn now_bpm(&mut self, time: f32) -> f32 {
-        while let Some(kf) = self.elements.get(self.cursor + 1) {
+    pub fn now_bpm(&self, time: f32) -> f32 {
+        let mut cursor = self.cursor;
+
+        while let Some(kf) = self.elements.get(cursor + 1) {
             if kf.1 > time {
                 break;
             }
-            self.cursor += 1;
+            cursor += 1;
         }
-        while self.cursor != 0 && self.elements[self.cursor].1 > time {
-            self.cursor -= 1;
+        while cursor != 0 && self.elements[cursor].1 > time {
+            cursor -= 1;
         }
-        let (_, _, bpm) = &self.elements[self.cursor];
+        let (_, _, bpm) = &self.elements[cursor];
         *bpm
     }
 }

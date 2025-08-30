@@ -28,6 +28,15 @@ pub enum Hand {
     Right,
 }
 
+impl Hand {
+    pub fn sign(&self) -> f32 {
+        match self {
+            Hand::Left => -1.0,
+            Hand::Right => 1.0,
+        }
+    }
+}
+
 impl NoteKind {
     #[inline]
     pub fn order(&self) -> i8 {

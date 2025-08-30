@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use macroquad::prelude::Color;
 use serde::Deserialize;
 use image::{codecs::gif, AnimationDecoder, DynamicImage};
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, time::Duration};
 use crate::ext::SafeTexture;
 use crate::core::note::Hand;
 use crate::hand::assign_hands;
