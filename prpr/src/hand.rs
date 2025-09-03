@@ -4248,7 +4248,6 @@ impl PhiTKAdvancedAI {
         if self.feature_extractor.detect_stream_pattern(notes) > 0.6 { patterns.push("stream".to_string()); }
         if self.feature_extractor.detect_chord_pattern(notes) > 0.5 { patterns.push("chord".to_string()); }
         if self.feature_extractor.detect_jack_pattern(notes) > 0.5 { patterns.push("jack".to_string()); }
-        if self.feature_extractor.detect_crossing_pattern(notes) > 0.5 { patterns.push("crossing".to_string()); }
 
         patterns
     }
