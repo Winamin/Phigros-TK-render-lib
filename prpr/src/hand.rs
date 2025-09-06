@@ -1126,6 +1126,17 @@ impl DeepNeuralNetwork {
         network
     }
 
+    pub fn gpu_forward_with_profile(&mut self, input: &[f32]) -> Vec<f32> {
+        let start_time = Instant::now();
+        let result = self.gpu_forward(input);
+        let duration = start_time.elapsed();
+
+        println!("[GPU Profile] Forward pass: {:.2}μs, input size: {}",
+                 duration.as_micros(), input.len());
+
+        result
+    }
+
     pub fn init_gpu_sync(&mut self) {
         if self.gpu_initialized {
             return;
@@ -1135,33 +1146,29 @@ impl DeepNeuralNetwork {
             return;
         }
 
-        if self.device.is_some() && self.queue.is_some() && self.matmul_pipeline.is_some() {
+        // 如果是第一次初始化，强制使用 GPU，失败则 panic
+        if !self.initialization_attempted {
+            self.initialization_attempted = true;
+
+            let rt = tokio::runtime::Runtime::new()
+                .expect("Failed to create Tokio runtime for GPU initialization");
+
+            let init_result = rt.block_on(async {
+                self.init_gpu().await
+            });
+
+            if init_result {
+                self.gpu_initialized = true;
+                self.initialization_failed = false;
+                println!("[GPU] GPU initialization successful on first attempt");
+            } else {
+                self.initialization_failed = true;
+                panic!("[GPU] GPU initialization failed on first attempt - panic as requested");
+            }
+        } else if self.device.is_some() && self.queue.is_some() && self.matmul_pipeline.is_some() {
+            // 非第一次初始化，但有可用的 GPU 资源
             self.gpu_initialized = true;
-            println!("[GPU/CPU SWITCH] GPU already initialized and ready.");
-            return;
-        }
-        self.initialization_attempted = true;
-
-        let rt = tokio::runtime::Runtime::new()
-            .expect("Failed to create Tokio runtime for GPU initialization");
-
-        let init_result = rt.block_on(async {
-            self.init_gpu().await
-        });
-
-        println!("[GPU/CPU SWITCH] GPU initialization completed (init_result = {} ).", init_result);
-
-        if init_result {
-            self.gpu_initialized = true;
-            self.initialization_failed = false;
-        } else {
-            self.initialization_failed = true;
-            println!("[GPU/CPU SWITCH] GPU initialization marked failed.");
-            self.device = None;
-            self.queue = None;
-            self.matmul_pipeline = None;
-            self.activation_pipelines.clear();
-            self.activation_bind_group_layouts.clear();
+            println!("[GPU] GPU already initialized and ready");
         }
     }
 
@@ -3233,13 +3240,18 @@ impl PhiTKAdvancedAI {
         };
 
         ai.target_network = ai.main_network.clone();
-        //thread_pool: Option<rayon::ThreadPool>;
+
+        // 新创建时也初始化 GPU
+        println!("[GPU/CPU SWITCH] Beginning GPU init for newly created AI...");
+        ai.main_network.init_gpu_sync();
+        ai.target_network.init_gpu_sync();
+        println!("[GPU/CPU SWITCH] New AI GPU initialized successfully.");
 
         ai.warm_thread_pool();
         ai
     }
 
-    pub fn load_or_create(filepath: &str, rotation: f32) -> Self {
+    fn load_or_create(filepath: &str, rotation: f32) -> Self {
         let path = Path::new(filepath);
         if let Ok(bytes) = fs::read(path) {
             if let Ok(mut ai) = bincode::deserialize::<Self>(&bytes) {
@@ -3248,45 +3260,38 @@ impl PhiTKAdvancedAI {
                     ai.rotation = rotation;
                     ai.update_hand_positions();
 
-                    ai.main_network.initialization_attempted = true; // 标记为已尝试，防止 reentry
+                    ai.main_network.initialization_attempted = true;
                     ai.main_network.initialization_failed = false;
                     ai.main_network.gpu_initialized = false;
                     println!("[GPU/CPU SWITCH] Beginning GPU init for main_network...");
-                    let res = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                        ai.main_network.init_gpu_sync();
-                    }));
 
-                    if res.is_err() || !ai.main_network.gpu_initialized {
-                        ai.main_network.initialization_failed = true;
-                        println!("[GPU/CPU SWITCH] main_network GPU init failed or panicked — will use CPU.");
-                    } else {
-                        println!("[GPU/CPU SWITCH] main_network GPU initialized successfully.");
-                    }
+                    // 第一次初始化强制使用 GPU，失败则 panic
+                    ai.main_network.init_gpu_sync();
+                    println!("[GPU/CPU SWITCH] main_network GPU initialized successfully.");
 
-                    // --- safer GPU init for target_network ---
+                    // target_network 也强制使用 GPU
                     ai.target_network.initialization_attempted = true;
                     ai.target_network.initialization_failed = false;
                     ai.target_network.gpu_initialized = false;
                     println!("[GPU/CPU SWITCH] Beginning GPU init for target_network...");
 
-                    let res2 = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                        ai.target_network.init_gpu_sync();
-                    }));
-
-
-                    if res2.is_err() || !ai.target_network.gpu_initialized {
-                        ai.target_network.initialization_failed = true;
-                        println!("[GPU/CPU SWITCH] target_network GPU init failed or panicked — will use CPU.");
-                    } else {
-                        println!("[GPU/CPU SWITCH] target_network GPU initialized successfully.");
-                    }
+                    ai.target_network.init_gpu_sync();
+                    println!("[GPU/CPU SWITCH] target_network GPU initialized successfully.");
 
                     return ai;
                 }
             }
         }
 
+        // 创建新模型时也强制使用 GPU
         let mut ai = Self::new(rotation);
+
+        // 初始化 GPU
+        println!("[GPU/CPU SWITCH] Beginning GPU init for new model...");
+        ai.main_network.init_gpu_sync();
+        ai.target_network.init_gpu_sync();
+        println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
+
         ai.save_model(filepath);
         ai
     }
