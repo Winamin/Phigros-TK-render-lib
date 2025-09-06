@@ -581,6 +581,8 @@ struct NetworkLayer {
     biases_buffer: Option<wgpu::Buffer>,
     #[serde(skip)]
     activations_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    inputs: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -598,6 +600,7 @@ enum ActivationFunction {
     Tanh,
     Swish,
     GELU,
+    BSiLU,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1052,7 +1055,14 @@ impl DeepNeuralNetwork {
             ActivationFunction::Sigmoid => 1.0 / (1.0 + (-x).exp()),
             ActivationFunction::Tanh => x.tanh(),
             ActivationFunction::Swish => x * (1.0 / (1.0 + (-x).exp())),
-            ActivationFunction::GELU => 0.5 * x * (1.0 + (x * 0.7978845608 * (1.0 + 0.044715 * x * x)).tanh()),
+            ActivationFunction::GELU => {
+                0.5 * x * (1.0 + (x * 0.7978845608 * (1.0 + 0.044715 * x * x)).tanh())
+            }
+            ActivationFunction::BSiLU => {
+                let sigmoid = 1.0 / (1.0 + (-x).exp());
+                let silu = x * sigmoid;
+                silu / (1.0 + silu.abs()) // B-SiLU: bounded between (-1, 1)
+            }
         }
     }
 
@@ -1094,7 +1104,7 @@ impl DeepNeuralNetwork {
             momentum: 0.9,
             dropout_rate: 0.1,
             batch_size: 16384,
-            max_grad_norm: 5.0,
+            max_grad_norm: 10.0,
             weight_decay: 0.0001,
             last_loss: f32::INFINITY,
             bad_epochs: 0,
@@ -1273,7 +1283,7 @@ impl DeepNeuralNetwork {
         let mut activation_bind_group_layouts = StdHashMap::new();
 
         for func in [ActivationFunction::ReLU, ActivationFunction::Sigmoid,
-            ActivationFunction::Tanh, ActivationFunction::Swish, ActivationFunction::GELU] {
+            ActivationFunction::Tanh, ActivationFunction::Swish, ActivationFunction::GELU, ActivationFunction::BSiLU] {
             let activation_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
@@ -1360,36 +1370,47 @@ impl DeepNeuralNetwork {
     }
 
     fn get_activation_shader(&self, func: &ActivationFunction) -> String {
+        // 先用 &str 写所有分支，match 结束后再统一 to_string()
         let fn_body = match func {
             ActivationFunction::ReLU => "return max(val, 0.0);",
             ActivationFunction::Sigmoid => "return 1.0 / (1.0 + exp(-val));",
             ActivationFunction::Tanh => "return tanh(val);",
             ActivationFunction::Swish => "return val * (1.0 / (1.0 + exp(-val)));",
             ActivationFunction::GELU => "return 0.5 * val * (1.0 + tanh(val * 0.7978845608 * (1.0 + 0.044715 * val * val)));",
-        };
+            ActivationFunction::BSiLU => {
+                r#"let sigmoid = 1.0 / (1.0 + exp(-val));
+let silu = val * sigmoid;
+return silu / (1.0 + abs(silu));"#
+            }
+        }.to_string();
 
-        format!(r#"
-    struct BatchSize {{
-        size: u32,
-    }};
+        let shader = format!(r#"
+struct BatchSize {{
+    size: u32,
+}}
 
-    @group(0) @binding(0) var<storage, read_write> data: array<f32>;
-    @group(0) @binding(1) var<storage, read> batch_size: BatchSize;
+@group(0) @binding(0) var<storage, read_write> data: array<f32>;
+@group(0) @binding(1) var<storage, read> batch_size: BatchSize;
 
-    fn activate(val: f32) -> f32 {{
-        {fn_body}
+fn activate(val: f32) -> f32 {{
+    {fn_body}
+}}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
+    let idx: u32 = id.x;
+    if (idx >= arrayLength(&data)) {{
+        return;
     }}
+    data[idx] = activate(data[idx]);
+}}
+"#,
+                             fn_body = fn_body);
+        // println!("Activation shader:\\n{}", shader);
 
-    @compute @workgroup_size(64)
-    fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
-        let idx = id.x;
-        if (idx >= arrayLength(&data)) {{
-            return;
-        }}
-        data[idx] = activate(data[idx]);
-    }}
-"#)
+        shader
     }
+
 
     fn gpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
         if !self.gpu_initialized {
@@ -1780,16 +1801,15 @@ impl DeepNeuralNetwork {
     }
 
     /*
-    * 构建神经网络架构
+    * 构建神经网络架构 4 层全连接层，输入 28 维，输出 4 维
+    * 前两维为左右手决策，第三维为手指
      */
     fn build_architecture(&mut self) {
-        self.add_dense_layer(28, 128, ActivationFunction::GELU);
-        self.add_dense_layer(128, 256, ActivationFunction::GELU);
-        self.add_dense_layer(256, 256, ActivationFunction::GELU);
-        self.add_dense_layer(256, 4, ActivationFunction::GELU);
-
+        self.add_dense_layer(28, 128, ActivationFunction::BSiLU);
+        self.add_dense_layer(128, 256, ActivationFunction::BSiLU);
+        self.add_dense_layer(256, 256, ActivationFunction::BSiLU);
+        self.add_dense_layer(256, 4, ActivationFunction::BSiLU);
         println!("Network architecture built with {} layers", self.layers.len());
-        println!("Input size: 28 features");
         println!("Output size: 4 (L/R decision, finger assignment, confidence)");
     }
 
@@ -1827,7 +1847,7 @@ impl DeepNeuralNetwork {
         let mut momentum_weights = Vec::with_capacity(output_size);
 
         let std_dev = match activation {
-            ActivationFunction::ReLU | ActivationFunction::GELU | ActivationFunction::Swish => {
+            ActivationFunction::ReLU | ActivationFunction::GELU | ActivationFunction::Swish | ActivationFunction::BSiLU => {
                 (2.0 / input_size as f32).sqrt()
             }
             ActivationFunction::Sigmoid | ActivationFunction::Tanh => {
@@ -1864,6 +1884,7 @@ impl DeepNeuralNetwork {
             weights_buffer: None,
             biases_buffer: None,
             activations_buffer: None,
+            inputs: vec![0.0; output_size],
         };
 
         self.layers.push(layer);
@@ -1887,6 +1908,7 @@ impl DeepNeuralNetwork {
             weights_buffer: None,
             biases_buffer: None,
             activations_buffer: None,
+            inputs: vec![0.0; output_size * dir_mul],
         };
         self.layers.push(layer);
     }
@@ -1906,6 +1928,7 @@ impl DeepNeuralNetwork {
             weights_buffer: None,
             biases_buffer: None,
             activations_buffer: None,
+            inputs: vec![0.0; output_size],
         };
 
         self.layers.push(layer);
@@ -1926,6 +1949,7 @@ impl DeepNeuralNetwork {
             weights_buffer: None,
             biases_buffer: None,
             activations_buffer: None,
+            inputs: vec![0.0; output_size],
         };
 
         self.layers.push(layer);
@@ -1965,13 +1989,47 @@ impl DeepNeuralNetwork {
         }
     }
 
+    fn activate_derivative(x: f32, func: &ActivationFunction) -> f32 {
+        match func {
+            ActivationFunction::ReLU => {
+                if x > 0.0 { 1.0 } else { 0.0 }
+            }
+            ActivationFunction::Sigmoid => {
+                let sigmoid = 1.0 / (1.0 + (-x).exp());
+                sigmoid * (1.0 - sigmoid)
+            }
+            ActivationFunction::Tanh => {
+                1.0 - x.tanh().powi(2)
+            }
+            ActivationFunction::Swish => {
+                let sigmoid = 1.0 / (1.0 + (-x).exp());
+                sigmoid + x * sigmoid * (1.0 - sigmoid)
+            }
+            ActivationFunction::GELU => {
+                // 近似导数
+                let cdf = 0.5 * (1.0 + (x / (2.0f32.sqrt())).tanh());
+                let pdf = (-0.5 * x * x).exp() / (2.0 * std::f32::consts::PI).sqrt();
+                cdf + x * pdf
+            }
+            ActivationFunction::BSiLU => {
+                let sigmoid = 1.0 / (1.0 + (-x).exp());
+                let silu = x * sigmoid;
+                let derivative = sigmoid * (1.0 + x * (1.0 - sigmoid));
+                derivative / (1.0 + silu.abs()).powi(2)
+            }
+        }
+    }
+
     fn dense_forward(layer: &mut NetworkLayer, input: &[f32]) -> Vec<f32> {
         let mut output = vec![0.0; layer.weights.len()];
+        layer.inputs = vec![0.0; layer.weights.len()];
+
         for (i, (weights, bias)) in layer.weights.iter().zip(layer.biases.iter()).enumerate() {
             let mut sum = *bias;
             for (w, x) in weights.iter().zip(input.iter()) {
                 sum += w * x;
             }
+            layer.inputs[i] = sum;
             output[i] = DeepNeuralNetwork::activate(sum, &layer.activation_func);
         }
         layer.activations = output.clone();
@@ -2341,29 +2399,48 @@ impl DeepNeuralNetwork {
     fn backward(&mut self, output: &[f32], target: &[f32], total_gradients: &mut [Vec<Vec<f32>>], total_bias_gradients: &mut [Vec<f32>]) {
         let mut layer_errors = vec![vec![0.0; 0]; self.layers.len()];
 
+        // 计算输出层误差
         if let Some(last_layer_idx) = self.layers.len().checked_sub(1) {
             let output_errors: Vec<f32> = output.iter()
                 .zip(target.iter())
                 .map(|(o, t)| 2.0 * (o - t))
                 .collect();
-            layer_errors[last_layer_idx] = output_errors;
+
+            let last_layer = &self.layers[last_layer_idx];
+            let derivatives: Vec<f32> = last_layer.inputs.iter()
+                .map(|&x| DeepNeuralNetwork::activate_derivative(x, &last_layer.activation_func))
+                .collect();
+
+            let output_layer_errors: Vec<f32> = output_errors.iter()
+                .zip(derivatives.iter())
+                .map(|(e, d)| e * d)
+                .collect();
+
+            layer_errors[last_layer_idx] = output_layer_errors;
         }
 
-        for layer_idx in (0..self.layers.len()).rev() {
-            if layer_idx < self.layers.len() - 1 {
-                let next_layer = &self.layers[layer_idx + 1];
-                let mut current_errors = vec![0.0; self.layers[layer_idx].activations.len()];
+        // 反向传播误差
+        for layer_idx in (0..self.layers.len() - 1).rev() {
+            let layer = &self.layers[layer_idx];
+            let next_layer = &self.layers[layer_idx + 1];
+            let derivatives: Vec<f32> = layer.inputs.iter()
+                .map(|&x| DeepNeuralNetwork::activate_derivative(x, &layer.activation_func))
+                .collect();
 
-                for i in 0..current_errors.len() {
-                    for (j, error) in layer_errors[layer_idx + 1].iter().enumerate() {
-                        if j < next_layer.weights.len() && i < next_layer.weights[j].len() {
-                            current_errors[i] += error * next_layer.weights[j][i];
-                        }
+            let mut current_errors = vec![0.0; layer.activations.len()];
+            for i in 0..current_errors.len() {
+                for (j, error) in layer_errors[layer_idx + 1].iter().enumerate() {
+                    if j < next_layer.weights.len() && i < next_layer.weights[j].len() {
+                        current_errors[i] += error * next_layer.weights[j][i];
                     }
                 }
-                layer_errors[layer_idx] = current_errors;
+                current_errors[i] *= derivatives[i];
             }
+            layer_errors[layer_idx] = current_errors;
+        }
 
+        // 计算梯度
+        for layer_idx in 0..self.layers.len() {
             self.calculate_layer_gradients(layer_idx, &layer_errors[layer_idx],
                                            &mut total_gradients[layer_idx],
                                            &mut total_bias_gradients[layer_idx]);
@@ -2394,7 +2471,7 @@ impl DeepNeuralNetwork {
 
     fn apply_gradients(&mut self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_size: usize) {
         let batch_size_f = batch_size as f32;
-        const MAX_GRAD: f32 = 5.0;
+        const MAX_GRAD: f32 = 10.0;
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             for (i, weight_row) in layer.weights.iter_mut().enumerate() {
@@ -2508,11 +2585,11 @@ impl AdvancedFeatureExtractor {
         } else {
             0.0
         };
-        println!("Features extracted: len={}, min={:.3}, max={:.3}, mean={:.3}",
-                 features.len(),
-                 features.iter().cloned().fold(f32::INFINITY, f32::min),
-                 features.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
-                 mean);
+        //println!("Features extracted: len={}, min={:.3}, max={:.3}, mean={:.3}",
+        //        features.len(),
+        //        features.iter().cloned().fold(f32::INFINITY, f32::min),
+        //        features.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        //        mean);
 
         features
     }
@@ -2871,7 +2948,7 @@ impl AdvancedFeatureExtractor {
 
         x_positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
         y_positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         let x_range = if x_positions.is_empty() {
             0.0
         } else {
@@ -3329,7 +3406,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize) {
-        println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
+        //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
             return;
         }
@@ -3350,7 +3427,7 @@ impl PhiTKAdvancedAI {
         }
         self.training_episodes += 1;
         self.last_save_episodes += 1;
-        if self.last_save_episodes >= 50 {
+        if self.last_save_episodes >= 500 {
             println!("Saving episodes to {}", self.last_save_episodes);
             println!("训练回合数，已保存: {}", self.training_episodes);
             self.save_model("phitk_ai_model.bin");
@@ -3709,6 +3786,18 @@ impl PhiTKAdvancedAI {
 
     fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, line_id: usize) -> (Hand, f32, Finger) {
         //println!("[Token Usage] AI Decision - Features: {}, Time: {:.2}", features.len(), note.time);
+        if self.finger_states.is_empty() {
+            eprintln!("警告: finger_states 为空，重新初始化");
+            self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
+        }
+
+        //println!("[调试] 游戏模式: {:?}, 手指状态数量: {}", self.game_mode, self.finger_states.len());
+        /*
+        for (i, state) in self.finger_states.iter().enumerate() {
+            println!("[调试] 手指 {}: {:?}", i, state.finger);
+        }
+
+         */
         let token = TOTAL_TOKENS_USED.fetch_add(1, Ordering::Relaxed);
         if token % 1000 == 0 {
             println!("Token: {}", token + 1);
@@ -3735,7 +3824,7 @@ impl PhiTKAdvancedAI {
 
         // 网络前向传播
         let raw_output = self.main_network.forward(features_to_use);
-        println!("Raw network output: {:?}", raw_output);
+        //println!("Raw network output: {:?}", raw_output);
 
         // 输出归一化处理
         let network_output = self.main_network.normalize_output(&raw_output);
@@ -3744,10 +3833,9 @@ impl PhiTKAdvancedAI {
         let right_ai_confidence = network_output.get(1).copied().unwrap_or(0.5);
         let certainty = network_output.get(3).copied().unwrap_or(0.6);
 
-        // 添加网络输出日志（改进后的值）
-         println!("[AI决策] 线路{} 时间{:.2}s 位置({:.2},{:.2}) 网络输出: L:{:.3} R:{:.3} 确定性:{:.3}",
-                 line_id, note.time, note.position.x, note.position.y,
-                 left_ai_confidence, right_ai_confidence, certainty);
+        //println!("[AI决策] 线路{} 时间{:.2}s 位置({:.2},{:.2}) 网络输出: L:{:.3} R:{:.3} 确定性:{:.3}",
+        //        line_id, note.time, note.position.x, note.position.y,
+        //        left_ai_confidence, right_ai_confidence, certainty);
 
         // 计算手指评分
         let mut finger_scores: Vec<(Finger, f32)> = self.finger_states.iter()
@@ -3763,7 +3851,12 @@ impl PhiTKAdvancedAI {
         finger_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
         for (i, (finger, score)) in finger_scores.iter().enumerate() {
-            let state = self.finger_states.iter().find(|fs| fs.finger == *finger).unwrap();
+            let state = self.finger_states.iter().find(|fs| fs.finger == *finger)
+                .unwrap_or_else(|| {
+                    eprintln!("错误: 未找到手指状态: {:?}", finger);
+                    // 返回第一个手指状态作为备用
+                    &self.finger_states[0]
+                });
             //println!("  {}: {:?} 评分:{:.3} 位置({:.2},{:.2}) 疲劳:{:.2} 信心:{:.2} 繁忙:{}",
             //         i, finger, score, state.position.x, state.position.y,
             //         state.fatigue, state.confidence, state.is_busy);
@@ -3774,16 +3867,17 @@ impl PhiTKAdvancedAI {
         let chosen_hand = best_finger.to_hand();
         let position_weight = match chosen_hand {
             Hand::Left => {
-                if note.position.x < -0.2 { 0.3 }
-                else if note.position.x > 0.1 { -0.4 }
+                if note.position.x < -0.3 { 0.3 }
+                else if note.position.x > -0.1 { -0.4 }
                 else { -0.1 }
             },
             Hand::Right => {
-                if note.position.x > 0.1 { 0.35 }
-                else if note.position.x < -0.2 { -0.3 }
-                else { 0.05 }
+                if note.position.x > 0.3 { 0.35 }
+                else if note.position.x < -0.14 { -0.3 }
+                else { 0.5 }
             },
         };
+        /*
         let initial_hand = best_finger.to_hand();
         let mut final_hand = initial_hand;
 
@@ -3828,6 +3922,8 @@ impl PhiTKAdvancedAI {
             }
         }
 
+         */
+
         let base_certainty = certainty.clamp(0.3, 0.85);
         let ai_weight = base_certainty * self.pattern_recognition_strength * 0.7;
         let heuristic_weight = 1.0 - ai_weight;
@@ -3852,7 +3948,7 @@ impl PhiTKAdvancedAI {
         };
 
         //println!("[最终决策] 线路{} 时间{:.2}s 选择:{:?} 信心:{:.3} 探索:{:.3}",
-               //  line_id, note.time, final_hand, final_confidence, adjusted_exploration);
+        //  line_id, note.time, final_hand, final_confidence, adjusted_exploration);
 
         (final_hand, final_confidence, best_finger)
     }
