@@ -22,6 +22,8 @@ use rayon::ThreadPool;
 use std::hash::{Hash, Hasher};
 
 type StdHashMap<K, V> = HashMap<K, V>;
+type MatmulKey = (usize, usize, usize, usize, usize, usize); // (layer_idx, input_ptr, output_ptr, input_size, output_size, batch_size)
+type ActivationKey = (usize, usize, usize); // (layer_idx, buffer_ptr, batch_size)
 
 #[derive(Clone)]
 struct AiRequest {
@@ -535,10 +537,11 @@ struct DeepNeuralNetwork {
     #[serde(skip)]
     weight_decay: f32,
     #[serde(default)]
-    last_loss: f32,          // 用于学习率调整
+    last_loss: f32,
     #[serde(default)]
-    bad_epochs: usize,       // 用于学习率调整
+    bad_epochs: usize,
     epoch_count: u64,
+    //GPU >
     #[serde(skip)]device: Option<wgpu::Device>,
     #[serde(skip)]queue: Option<wgpu::Queue>,
     #[serde(skip)]matmul_pipeline: Option<wgpu::ComputePipeline>,
@@ -551,6 +554,29 @@ struct DeepNeuralNetwork {
     #[serde(skip)]batch_size_buffer: Option<wgpu::Buffer>,
     #[serde(skip)]initialization_attempted: bool,
     #[serde(skip)]initialization_failed: bool,
+    #[serde(skip)]
+    matmul_bind_groups: StdHashMap<MatmulKey, (u64, wgpu::BindGroup)>,
+    #[serde(skip)]
+    activation_bind_groups: StdHashMap<ActivationKey, (u64, wgpu::BindGroup)>,
+    #[serde(skip)]
+    buffer_pool: Option<BufferPool>,
+    #[serde(skip)]
+    frame_counter: u64,
+    #[serde(skip)]
+    pre_allocated_input_buffers: Vec<Option<(wgpu::Buffer, usize, wgpu::BufferUsages)>>,
+    #[serde(skip)]
+    pre_allocated_output_buffers: Vec<Option<(wgpu::Buffer, usize, wgpu::BufferUsages)>>,
+    #[serde(skip)]
+    pre_allocated_staging_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    last_batch_size: usize,
+    #[serde(skip)]
+    buffer_cleanup_interval: Option<Instant>,  // 改为 Option<Instant>
+    #[serde(skip)]
+    last_used_buffers: StdHashMap<wgpu::Buffer, (Option<Instant>, usize, wgpu::BufferUsages)>, // 改为 Option<Instant>
+    #[serde(skip)]
+    reusable_buffers: StdHashMap<(usize, wgpu::BufferUsages), Vec<wgpu::Buffer>>,
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -670,6 +696,48 @@ struct DifficultyEstimator {
     coordination_difficulty: f32,
 }
 
+struct BufferPool {
+    buffers: Vec<(wgpu::Buffer, usize, wgpu::BufferUsages)>,
+    device: Arc<wgpu::Device>,
+    max_pool_size: usize,
+}
+
+impl BufferPool {
+    fn new(device: Arc<wgpu::Device>) -> Self {
+        Self {
+            buffers: Vec::new(),
+            device,
+            max_pool_size: 100,
+        }
+    }
+
+    fn get_buffer(&mut self, size: usize, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        for i in 0..self.buffers.len() {
+            let (ref buffer, buffer_size, buffer_usage) = self.buffers[i];
+            if buffer_size >= size && buffer_usage.contains(usage) {
+                return self.buffers.remove(i).0;
+            }
+        }
+        let actual_size = (size * 3 / 2).max(32768);
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: actual_size as u64,
+            usage,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn return_buffer(&mut self, buffer: wgpu::Buffer, size: usize, usage: wgpu::BufferUsages) {
+        if self.buffers.len() < self.max_pool_size {
+            self.buffers.push((buffer, size, usage));
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buffers.clear();
+    }
+}
+
 impl Vector2 {
     fn new(x: f32, y: f32) -> Self { Self { x, y } }
 
@@ -731,6 +799,25 @@ impl std::ops::Mul<f32> for Vector2 {
     type Output = Vector2;
     fn mul(self, scalar: f32) -> Vector2 {
         Vector2::new(self.x * scalar, self.y * scalar)
+    }
+}
+
+impl std::fmt::Debug for BufferPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BufferPool")
+            .field("buffers", &self.buffers.len())
+            .field("device", &"Arc<Device>")
+            .finish()
+    }
+}
+
+impl Clone for BufferPool {
+    fn clone(&self) -> Self {
+        Self {
+            buffers: Vec::new(),
+            device: self.device.clone(),
+            max_pool_size: self.max_pool_size,
+        }
     }
 }
 
@@ -1119,22 +1206,309 @@ impl DeepNeuralNetwork {
             batch_size_buffer: None,
             initialization_attempted: false,
             initialization_failed: false,
+            matmul_bind_groups: StdHashMap::new(),
+            activation_bind_groups: StdHashMap::new(),
+            //buffer_pool: Some(BufferPool::default()),
+            buffer_pool: None,
+            frame_counter: 0,
+            pre_allocated_input_buffers: Vec::new(),
+            pre_allocated_output_buffers: Vec::new(),
+            pre_allocated_staging_buffer: None,
+            last_batch_size: 0,
+            reusable_buffers: StdHashMap::new(),
+            last_used_buffers: StdHashMap::new(),
+            buffer_cleanup_interval: Some(Instant::now()),
         };
 
         network.build_architecture();
         network.init_gpu_sync();
+        if network.gpu_initialized {
+            network.pre_allocate_buffers(64, 256);
+        }
         network
     }
 
-    pub fn gpu_forward_with_profile(&mut self, input: &[f32]) -> Vec<f32> {
-        let start_time = Instant::now();
-        let result = self.gpu_forward(input);
-        let duration = start_time.elapsed();
+    fn pre_allocate_buffers(&mut self, max_batch_size: usize, input_size: usize) {
+        if !self.gpu_initialized {
+            return;
+        }
 
-        println!("[GPU Profile] Forward pass: {:.2}μs, input size: {}",
-                 duration.as_micros(), input.len());
+        let device = self.device.as_ref().unwrap();
 
-        result
+        // 清理旧的预分配缓冲区
+        self.pre_allocated_input_buffers.clear();
+        self.pre_allocated_output_buffers.clear();
+
+        let mut current_size = input_size;
+
+        // 为每一层预分配输入和输出缓冲区
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            let output_size = layer.weights.len();
+
+            // 输入缓冲区
+            let input_buffer_size = current_size * max_batch_size * std::mem::size_of::<f32>();
+            let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Pre-allocated Input Buffer Layer {}", layer_idx)),
+                size: input_buffer_size as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.pre_allocated_input_buffers.push(Some((input_buffer, input_buffer_size, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST)));
+
+            // 输出缓冲区
+            let output_buffer_size = output_size * max_batch_size * std::mem::size_of::<f32>();
+            let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Pre-allocated Output Buffer Layer {}", layer_idx)),
+                size: output_buffer_size as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            self.pre_allocated_output_buffers.push(Some((output_buffer, output_buffer_size, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC)));
+
+            current_size = output_size;
+        }
+
+        // 预分配staging buffer
+        let final_output_size = self.layers.last().unwrap().weights.len();
+        let staging_buffer_size = final_output_size * max_batch_size * std::mem::size_of::<f32>();
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pre-allocated Staging Buffer"),
+            size: staging_buffer_size as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.pre_allocated_staging_buffer = Some(staging_buffer);
+
+        self.last_batch_size = max_batch_size;
+    }
+
+    fn cleanup_expired_buffers(&mut self) {
+        let now = Instant::now();
+        let mut to_remove = Vec::new();
+
+        for (buffer, (last_used, size, usage)) in &self.last_used_buffers {
+            if let Some(last_used) = last_used {
+                if now.duration_since(*last_used) > Duration::from_secs(60) {
+                    to_remove.push(buffer.clone());
+                }
+            }
+        }
+
+        for buffer in to_remove {
+            if let Some((last_used, size, usage)) = self.last_used_buffers.remove(&buffer) {
+                let key = (size, usage);
+                self.reusable_buffers.entry(key).or_insert_with(Vec::new).push(buffer);
+            }
+        }
+    }
+
+
+    fn get_or_create_buffer(&mut self, size: usize, usage: wgpu::BufferUsages, label: &str) -> wgpu::Buffer {
+        // 定期清理过期缓冲区
+        let now = Instant::now();
+        if now.duration_since(self.buffer_cleanup_interval.expect("buffer_cleanup_interval was None")) > Duration::from_secs(30) {
+            self.cleanup_expired_buffers();
+            self.buffer_cleanup_interval = Some(now);
+        }
+        // 首先尝试从可复用缓冲区中获取
+        let key = (size, usage);
+        if let Some(buffers) = self.reusable_buffers.get_mut(&key) {
+            if let Some(buffer) = buffers.pop() {
+                //self.last_used_buffers.insert(buffer.clone(), (now, size, usage));
+                self.last_used_buffers.insert(buffer.clone(), (Some(now), size, usage));
+                return buffer;
+            }
+        }
+
+        // 然后检查预分配缓冲区
+        for buffer_option in &self.pre_allocated_input_buffers {
+            if let Some((ref prealloc_buffer, prealloc_size, prealloc_usage)) = buffer_option {
+                if *prealloc_size >= size && prealloc_usage.contains(usage) {
+                    self.last_used_buffers.insert(prealloc_buffer.clone(), (Some(now), size, usage));
+                    return prealloc_buffer.clone();
+                }
+            }
+        }
+        for buffer_option in &self.pre_allocated_output_buffers {
+            if let Some((ref prealloc_buffer, prealloc_size, prealloc_usage)) = buffer_option {
+                if *prealloc_size >= size && prealloc_usage.contains(usage) {
+                    self.last_used_buffers.insert(prealloc_buffer.clone(), (Some(now), size, usage));
+                    return prealloc_buffer.clone();
+                }
+            }
+        }
+        let buffer = self.device.as_ref().unwrap().create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: size as u64,
+            usage,
+            mapped_at_creation: false,
+        });
+
+        self.last_used_buffers.insert(buffer.clone(), (Some(now), size, usage));
+        buffer
+    }
+
+
+    fn pre_allocate_common_buffers(&mut self) {
+        if let Some(ref mut pool) = self.buffer_pool {
+            // 预分配常用大小的缓冲区
+            let common_sizes = [1024, 2048, 4096, 8192, 16384, 32768];
+            for &size in &common_sizes {
+                for &usage in &[
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                ] {
+                    let buffer = self.device.as_ref().unwrap().create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("Pre-allocated buffer"),
+                        size: size as u64,
+                        usage,
+                        mapped_at_creation: false,
+                    });
+                    pool.return_buffer(buffer, size, usage);
+                }
+            }
+        }
+    }
+
+    fn return_buffer_to_pool(&mut self, buffer: wgpu::Buffer, size: usize, usage: wgpu::BufferUsages) {
+        let now = Instant::now();
+        //self.last_used_buffers.insert(buffer.clone(), (now, size, usage));
+        self.last_used_buffers.insert(buffer.clone(), (Some(now), size, usage));
+        let key = (size, usage);
+        self.reusable_buffers.entry(key).or_insert_with(Vec::new).push(buffer);
+    }
+
+    fn get_matmul_bind_group(
+        &mut self,
+        layer_idx: usize,
+        input_buffer: &wgpu::Buffer,
+        output_buffer: &wgpu::Buffer,
+        input_size: usize,
+        output_size: usize,
+        batch_size: usize
+    ) -> wgpu::BindGroup {
+        let key = (
+            layer_idx,
+            input_buffer as *const _ as usize,
+            output_buffer as *const _ as usize,
+            input_size,
+            output_size,
+            batch_size
+        );
+
+        self.update_batch_size(batch_size);
+
+        use std::collections::hash_map::Entry;
+
+        match self.matmul_bind_groups.entry(key) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().0 = self.frame_counter;
+                let bind_group = entry.get().1.clone();
+                bind_group
+            }
+            Entry::Vacant(entry) => {
+                let device = self.device.as_ref().unwrap();
+                let bind_group_layout = self.matmul_bind_group_layout.as_ref().unwrap();
+
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: input_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.layers[layer_idx].weights_buffer.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: output_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.layers[layer_idx].biases_buffer.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.batch_size_buffer.as_ref().unwrap().as_entire_binding(),
+                        },
+                    ],
+                    label: Some(&format!("Matmul Bind Group Layer {}", layer_idx)),
+                });
+
+                let cloned_bind_group = bind_group.clone();
+                entry.insert((self.frame_counter, bind_group));
+                cloned_bind_group
+            }
+        }
+    }
+
+    fn get_activation_bind_group(
+        &mut self,
+        layer_idx: usize,
+        buffer: &wgpu::Buffer,
+        batch_size: usize
+    ) -> wgpu::BindGroup {
+        let layer = &self.layers[layer_idx];
+        let key = (
+            layer_idx,
+            buffer as *const _ as usize,
+            batch_size
+        );
+
+        self.update_batch_size(batch_size);
+
+        use std::collections::hash_map::Entry;
+
+        match self.activation_bind_groups.entry(key) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().0 = self.frame_counter;
+                let bind_group = entry.get().1.clone();
+                bind_group
+            }
+            Entry::Vacant(entry) => {
+                let device = self.device.as_ref().unwrap();
+                let layout = self.activation_bind_group_layouts
+                    .get(&layer.activation_func)
+                    .unwrap();
+
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: self.batch_size_buffer.as_ref().unwrap(),
+                                offset: 0,
+                                size: None,
+                            }),
+                        },
+                    ],
+                    label: Some(&format!("Activation Bind Group Layer {}", layer_idx)),
+                });
+
+                let cloned_bind_group = bind_group.clone();
+                entry.insert((self.frame_counter, bind_group));
+                cloned_bind_group
+            }
+        }
+    }
+
+    fn cleanup_old_bind_groups(&mut self, max_age: u64) {
+        let current_frame = self.frame_counter;
+        self.matmul_bind_groups.retain(|_, (last_used, _)| {
+            current_frame - *last_used <= max_age
+        });
+        self.activation_bind_groups.retain(|_, (last_used, _)| {
+            current_frame - *last_used <= max_age
+        });
+        self.frame_counter += 1;
     }
 
     pub fn init_gpu_sync(&mut self) {
@@ -1146,7 +1520,6 @@ impl DeepNeuralNetwork {
             return;
         }
 
-        // 如果是第一次初始化，强制使用 GPU，失败则 panic
         if !self.initialization_attempted {
             self.initialization_attempted = true;
 
@@ -1166,7 +1539,6 @@ impl DeepNeuralNetwork {
                 panic!("[GPU] GPU initialization failed on first attempt - panic as requested");
             }
         } else if self.device.is_some() && self.queue.is_some() && self.matmul_pipeline.is_some() {
-            // 非第一次初始化，但有可用的 GPU 资源
             self.gpu_initialized = true;
             println!("[GPU] GPU already initialized and ready");
         }
@@ -1289,8 +1661,14 @@ impl DeepNeuralNetwork {
         let mut activation_pipelines = StdHashMap::new();
         let mut activation_bind_group_layouts = StdHashMap::new();
 
-        for func in [ActivationFunction::ReLU, ActivationFunction::Sigmoid,
-            ActivationFunction::Tanh, ActivationFunction::Swish, ActivationFunction::GELU, ActivationFunction::BSiLU] {
+        for func in [
+            ActivationFunction::ReLU,
+            ActivationFunction::Sigmoid,
+            ActivationFunction::Tanh,
+            ActivationFunction::Swish,
+            ActivationFunction::GELU,
+            ActivationFunction::BSiLU
+        ] {
             let activation_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
@@ -1364,20 +1742,23 @@ impl DeepNeuralNetwork {
             }));
         }
 
-        self.device = Some(device);
+        self.device = Some(device.clone());
         self.queue = Some(queue);
         self.matmul_pipeline = Some(matmul_pipeline);
         self.matmul_bind_group_layout = Some(matmul_bind_group_layout);
         self.activation_pipelines = activation_pipelines;
         self.activation_bind_group_layouts = activation_bind_group_layouts;
+        self.buffer_pool = Some(BufferPool::new(Arc::new(device)));
         self.batch_size_buffer = Some(batch_size_buffer);
+        self.reusable_buffers = StdHashMap::new();
+        self.last_used_buffers = StdHashMap::new();
+        self.buffer_cleanup_interval = Some(Instant::now());
 
         true
         //println!("Success");
     }
 
     fn get_activation_shader(&self, func: &ActivationFunction) -> String {
-        // 先用 &str 写所有分支，match 结束后再统一 to_string()
         let fn_body = match func {
             ActivationFunction::ReLU => "return max(val, 0.0);",
             ActivationFunction::Sigmoid => "return 1.0 / (1.0 + exp(-val));",
@@ -1413,184 +1794,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 }}
 "#,
                              fn_body = fn_body);
-        // println!("Activation shader:\\n{}", shader);
+        println!("Activation shader:\\n{}", shader);
 
         shader
-    }
-
-
-    fn gpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
-        if !self.gpu_initialized {
-            self.init_gpu_sync();
-            if !self.gpu_initialized {
-                return self.light_forward(input);
-            }
-        }
-
-        let device = match self.device.as_ref() {
-            Some(d) => d,
-            None => return self.light_forward(input),
-        };
-
-        let queue = self.queue.as_ref().unwrap();
-
-        // 创建输入缓冲区
-        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Input Buffer"),
-            contents: bytemuck::cast_slice(input),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let mut current_input_buffer = input_buffer;
-        let mut current_input_size = input.len();
-
-        for i in 0..self.layers.len() {
-            let layer = &self.layers[i];
-            let output_size = layer.weights.len();
-
-            // 创建输出缓冲区
-            let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Output Buffer Layer {}", i)),
-                size: (output_size * std::mem::size_of::<f32>()) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
-            // 矩阵乘法
-            let matmul_bind_group = self.create_matmul_bind_group(
-                layer,
-                &current_input_buffer,
-                &output_buffer
-            );
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Matmul Encoder"),
-            });
-
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Matmul Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
-                cpass.set_bind_group(0, &matmul_bind_group, &[]);
-
-                // 正确计算工作组数量
-                let workgroup_count = ((output_size as u32) + 63) / 64;
-                cpass.dispatch_workgroups(workgroup_count, 1, 1);
-            }
-
-            queue.submit(Some(encoder.finish()));
-
-            // 激活函数
-            let activation_bind_group = self.create_activation_bind_group(
-                layer,
-                &output_buffer
-            );
-
-            let activation_pipeline = self.activation_pipelines
-                .get(&layer.activation_func)
-                .unwrap();
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Activation Encoder"),
-            });
-
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Activation Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(activation_pipeline);
-                cpass.set_bind_group(0, &activation_bind_group, &[]);
-
-                // 正确计算工作组数量
-                let workgroup_count = ((output_size as u32) + 63) / 64;
-                cpass.dispatch_workgroups(workgroup_count, 1, 1);
-            }
-
-            queue.submit(Some(encoder.finish()));
-
-            // 准备下一层的输入
-            if i < self.layers.len() - 1 {
-                let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(&format!("Input Buffer Layer {}", i + 1)),
-                    size: (output_size * std::mem::size_of::<f32>()) as u64,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Copy Encoder"),
-                });
-
-                encoder.copy_buffer_to_buffer(
-                    &output_buffer,
-                    0,
-                    &next_input_buffer,
-                    0,
-                    (output_size * std::mem::size_of::<f32>()) as u64
-                );
-
-                queue.submit(Some(encoder.finish()));
-                current_input_buffer = next_input_buffer;
-                current_input_size = output_size;
-            } else {
-                // 最后一层，直接使用输出缓冲区
-                current_input_buffer = output_buffer;
-            }
-        }
-
-        // 读取结果
-        let result_size = self.layers.last().unwrap().weights.len();
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Staging Buffer"),
-            size: (result_size * std::mem::size_of::<f32>()) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Readback Encoder"),
-        });
-
-        encoder.copy_buffer_to_buffer(
-            &current_input_buffer,
-            0,
-            &staging_buffer,
-            0,
-            (result_size * std::mem::size_of::<f32>()) as u64
-        );
-
-        queue.submit(Some(encoder.finish()));
-
-        // 映射缓冲区并读取数据
-        let buffer_slice = staging_buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
-        });
-
-        let _ = device.poll(wgpu::PollType::Wait);
-
-        match receiver.recv() {
-            Ok(Ok(())) => {
-                let data = buffer_slice.get_mapped_range();
-                let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
-
-                // 更新最后一层的激活值
-                if let Some(last_layer) = self.layers.last_mut() {
-                    last_layer.activations = result.clone();
-                }
-
-                result
-            }
-            _ => {
-                // 失败时回退到CPU
-                self.light_forward(input)
-            }
-        }
     }
 
     fn create_matmul_bind_group(
@@ -1607,47 +1813,59 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: input_buffer.as_entire_binding()
+                    resource: input_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding()
+                    resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: output_buffer.as_entire_binding()
+                    resource: output_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding()
+                    resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: self.batch_size_buffer.as_ref().unwrap(),
-                        offset: 0,
-                        size: None,
-                    }),
+                    resource: self.batch_size_buffer.as_ref().unwrap().as_entire_binding(), // 使用全局的batch_size_buffer
                 },
             ],
-            label: None,
+            label: Some("Matmul Bind Group"),
         })
     }
 
-    fn create_activation_bind_group(
+    // 添加更新批量大小的方法
+    fn update_batch_size(&self, batch_size: usize) {
+        if let (Some(device), Some(queue)) = (self.device.as_ref(), self.queue.as_ref()) {
+            let batch_size_data = [batch_size as u32];
+            queue.write_buffer(
+                self.batch_size_buffer.as_ref().unwrap(),
+                0,
+                bytemuck::cast_slice(&batch_size_data),
+            );
+        }
+    }
+
+    // 创建批量激活函数绑定组的辅助方法
+    fn create_batch_activation_bind_group(
         &self,
         layer: &NetworkLayer,
         buffer: &wgpu::Buffer,
+        batch_size: usize,
     ) -> wgpu::BindGroup {
         let device = self.device.as_ref().unwrap();
-        let layout = self.activation_bind_group_layouts.get(&layer.activation_func).unwrap();
+        let layout = self.activation_bind_group_layouts
+            .get(&layer.activation_func)
+            .unwrap();
 
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: buffer.as_entire_binding()
+                    resource: buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -1658,8 +1876,66 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                     }),
                 },
             ],
-            label: None,
+            label: Some(&format!("Batch Activation Bind Group")),
         })
+    }
+
+    fn create_batch_matmul_bind_group(
+        &self,
+        layer: &NetworkLayer,
+        input_buffer: &wgpu::Buffer,
+        output_buffer: &wgpu::Buffer,
+        _input_size: usize,
+        _output_size: usize,
+        batch_size: usize,
+    ) -> wgpu::BindGroup {
+        // 更新批量大小
+        self.update_batch_size(batch_size);
+
+        // 调用现有的创建绑定组方法
+        self.create_matmul_bind_group(layer, input_buffer, output_buffer)
+    }
+
+    fn is_buffer_preallocated(&self, buffer: &wgpu::Buffer) -> bool {
+        for preallocated in &self.pre_allocated_input_buffers {
+            if let Some((ref prealloc_buffer, _size, _usage)) = preallocated {
+                if std::ptr::eq(prealloc_buffer, buffer) {
+                    return true;
+                }
+            }
+        }
+
+        for preallocated in &self.pre_allocated_output_buffers {
+            if let Some((ref prealloc_buffer, _size, _usage)) = preallocated {
+                if std::ptr::eq(prealloc_buffer, buffer) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn gpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
+        if !self.gpu_initialized {
+            self.init_gpu_sync();
+        }
+        let batch_result = self.gpu_forward_batch(&[input], 1);
+        match batch_result.into_iter().next() {
+            Some(result) => result,
+            None => {
+                // 回退到 CPU
+                self.light_forward(input)
+            }
+        }
+    }
+
+    fn prepare_batch_input_data(&self, inputs: &[&[f32]], actual_batch_size: usize, input_size: usize) -> Vec<f32> {
+        let mut batch_input_data = Vec::with_capacity(input_size * actual_batch_size);
+        for input in inputs.iter().take(actual_batch_size) {
+            batch_input_data.extend_from_slice(input);
+        }
+        batch_input_data
     }
 
     fn gpu_forward_batch(&mut self, inputs: &[&[f32]], actual_batch_size: usize) -> Vec<Vec<f32>> {
@@ -1667,41 +1943,53 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             return inputs.iter().map(|input| self.light_forward(input)).collect();
         }
 
-        let device = self.device.as_ref().unwrap();
-        let queue = self.queue.as_ref().unwrap();
         let input_size = inputs[0].len();
-        let total_input_size = input_size * actual_batch_size;
-        let mut batch_input_data = Vec::with_capacity(total_input_size);
-        for input in inputs {
-            batch_input_data.extend_from_slice(input);
+
+        // 如果批量大小变化或首次运行，重新预分配缓冲区
+        if self.last_batch_size != actual_batch_size || self.pre_allocated_input_buffers.is_empty() {
+            self.pre_allocate_buffers(actual_batch_size.max(64), input_size);
         }
-        let batch_input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Batch Input Buffer"),
-            contents: bytemuck::cast_slice(&batch_input_data),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+
+        // 准备输入数据
+        let batch_input_data = self.prepare_batch_input_data(inputs, actual_batch_size, input_size);
+
+        // 获取输入缓冲区 - 使用新的复用机制
+        let batch_input_buffer = self.get_or_create_buffer(
+            batch_input_data.len() * std::mem::size_of::<f32>(),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            "Batch Input Buffer"
+        );
+
+        self.queue.as_ref().unwrap().write_buffer(&batch_input_buffer, 0, bytemuck::cast_slice(&batch_input_data));
+
         let mut current_input_buffer = batch_input_buffer;
-        let mut layer_output_buffers = Vec::new();
-        for i in 0..self.layers.len() {
-            let layer = &self.layers[i];
-            let output_size = layer.weights.len() as u32;
-            let total_output_size = output_size * (actual_batch_size as u32);
+        let mut current_input_size = input_size;
+        let mut buffers_to_return = Vec::new(); // 收集需要返还的缓冲区信息
 
-            let activation_buffer = match layer.activations_buffer.as_ref() {
-                Some(b) => b,
-                None => panic!("Activation buffer for layer {} is not initialized.", i),
-            };
+        // 逐层处理
+        for layer_idx in 0..self.layers.len() {
+            let output_size = self.layers[layer_idx].weights.len();
+            let total_output_size = output_size * actual_batch_size;
 
-            let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Batch Output Buffer for Layer {}", layer_output_buffers.len())),
-                size: (total_output_size * (std::mem::size_of::<f32>()) as u32) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
+            // 获取输出缓冲区
+            let output_buffer = self.get_or_create_buffer(
+                total_output_size * std::mem::size_of::<f32>(),
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                &format!("Output Buffer Layer {}", layer_idx)
+            );
 
-            let matmul_bind_group = self.create_matmul_bind_group(layer, &current_input_buffer, activation_buffer);
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Batch Matmul Encoder")
+            // 矩阵乘法计算
+            let matmul_bind_group = self.get_matmul_bind_group(
+                layer_idx,
+                &current_input_buffer,
+                &output_buffer,
+                current_input_size,
+                output_size,
+                actual_batch_size
+            );
+
+            let mut encoder = self.device.as_ref().unwrap().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Batch Matmul Encoder"),
             });
 
             {
@@ -1712,24 +2000,31 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
                 cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
                 cpass.set_bind_group(0, &matmul_bind_group, &[]);
-                cpass.dispatch_workgroups(
-                    ((output_size as u32 * actual_batch_size as u32) + 7) / 8,
-                    1,
-                    1
-                );
-            }
-            queue.submit(Some(encoder.finish()));
 
-            let activation_bind_group = self.create_activation_bind_group(
-                layer,
+                let total_elements = output_size * actual_batch_size;
+                let workgroup_count = (total_elements + 63) / 64;
+                cpass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+            }
+
+            self.queue.as_ref().unwrap().submit(Some(encoder.finish()));
+
+            // 激活函数计算
+            let activation_bind_group = self.get_activation_bind_group(
+                layer_idx,
                 &output_buffer,
+                actual_batch_size
             );
+
+            // 获取激活函数管道（避免借用冲突）
+            let activation_func = self.layers[layer_idx].activation_func.clone();
             let activation_pipeline = self.activation_pipelines
-                .get(&layer.activation_func)
+                .get(&activation_func)
                 .expect("Activation pipeline not initialized");
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Batch Activation Encoder")
+
+            let mut encoder = self.device.as_ref().unwrap().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Batch Activation Encoder"),
             });
+
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Batch Activation Pass"),
@@ -1738,45 +2033,58 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
                 cpass.set_pipeline(activation_pipeline);
                 cpass.set_bind_group(0, &activation_bind_group, &[]);
-                cpass.dispatch_workgroups(
-                    ((output_size as u32 * actual_batch_size as u32) + 63) / 64,
-                    1,
-                    1
-                );
-            }
-            queue.submit(Some(encoder.finish()));
 
-            current_input_buffer = output_buffer.clone();
-            layer_output_buffers.push(output_buffer);
+                let total_elements = output_size * actual_batch_size;
+                let workgroup_count = (total_elements + 63) / 64;
+                cpass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+            }
+
+            self.queue.as_ref().unwrap().submit(Some(encoder.finish()));
+
+            // 记录要返还的缓冲区信息
+            let buffer_size = if layer_idx == 0 {
+                input_size * actual_batch_size * std::mem::size_of::<f32>()
+            } else {
+                current_input_size * actual_batch_size * std::mem::size_of::<f32>()
+            };
+
+            buffers_to_return.push((
+                current_input_buffer,
+                buffer_size,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+            ));
+
+            // 准备下一层的输入
+            current_input_buffer = output_buffer;
+            current_input_size = output_size;
         }
 
         // 读取最终结果
-        let last_layer_output = layer_output_buffers.last().unwrap();
-        let last_layer = self.layers.last().unwrap();
-        let output_size = last_layer.weights.len();
-        let total_output_size = output_size * actual_batch_size;
+        let final_output_size = self.layers.last().unwrap().weights.len();
+        let total_final_size = final_output_size * actual_batch_size;
 
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Batch Staging Buffer"),
-            size: (total_output_size * std::mem::size_of::<f32>()) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let staging_buffer = self.get_or_create_buffer(
+            total_final_size * std::mem::size_of::<f32>(),
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            "Staging Buffer"
+        );
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Batch Readback Encoder")
+        // 将最终结果复制到staging buffer
+        let mut encoder = self.device.as_ref().unwrap().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Batch Readback Encoder"),
         });
 
         encoder.copy_buffer_to_buffer(
-            last_layer_output,
+            &current_input_buffer,
             0,
             &staging_buffer,
             0,
-            (total_output_size * std::mem::size_of::<f32>()) as u64
+            (total_final_size * std::mem::size_of::<f32>()) as u64,
         );
 
-        queue.submit(Some(encoder.finish()));
+        self.queue.as_ref().unwrap().submit(Some(encoder.finish()));
 
+        // 映射并读取结果
         let buffer_slice = staging_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -1784,25 +2092,40 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             tx.send(result).unwrap();
         });
 
-        let _ = device.poll(wgpu::PollType::wait());
+        let _ = self.device.as_ref().unwrap().poll(wgpu::PollType::Wait);
 
-        match rx.recv() {
-            Ok(Ok(())) => {},
-            _ => return inputs.iter().map(|input| self.light_forward(input)).collect(),
+        let results = match rx.recv() {
+            Ok(Ok(())) => {
+                let data = buffer_slice.get_mapped_range();
+                let batch_results: &[f32] = bytemuck::cast_slice(&data);
+
+                // 将批量结果分割成单独的向量
+                let mut results = Vec::with_capacity(actual_batch_size);
+                for i in 0..actual_batch_size {
+                    let start = i * final_output_size;
+                    let end = start + final_output_size;
+                    results.push(batch_results[start..end].to_vec());
+                }
+
+                drop(data);
+                staging_buffer.unmap();
+                results
+            }
+            _ => {
+                // GPU失败时回退到CPU处理
+                println!("GPU batch inference failed, falling back to CPU processing for batch of {} inputs", actual_batch_size);
+                inputs.iter().take(actual_batch_size).map(|input| self.light_forward(input)).collect()
+            }
+        };
+
+        for (buffer, size, usage) in buffers_to_return {
+            if !self.is_buffer_preallocated(&buffer) {
+                self.return_buffer_to_pool(buffer, size, usage);
+            }
         }
 
-        let data = buffer_slice.get_mapped_range();
-        let batch_results: &[f32] = bytemuck::cast_slice(&data);
-
-        let mut results = Vec::with_capacity(actual_batch_size);
-        for i in 0..actual_batch_size {
-            let start = i * output_size;
-            let end = start + output_size;
-            results.push(batch_results[start..end].to_vec());
-        }
-
-        drop(data);
-        staging_buffer.unmap();
+        // 定期清理绑定组缓存
+        self.cleanup_old_bind_groups(100);
 
         results
     }
@@ -3255,18 +3578,24 @@ impl PhiTKAdvancedAI {
         let path = Path::new(filepath);
         if let Ok(bytes) = fs::read(path) {
             if let Ok(mut ai) = bincode::deserialize::<Self>(&bytes) {
+                ai.main_network.buffer_cleanup_interval = Some(Instant::now());
+                ai.main_network.last_used_buffers = StdHashMap::new();
+                ai.main_network.reusable_buffers = StdHashMap::new();
+                // 同样处理 target_network
+                ai.target_network.buffer_cleanup_interval = Some(Instant::now());
+                ai.target_network.last_used_buffers = StdHashMap::new();
+                ai.target_network.reusable_buffers = StdHashMap::new();
                 if ai.validate_for_serialization() {
                     println!("[Model] 从文件加载模型: {}, 训练回合数: {}", filepath, ai.training_episodes);
                     ai.rotation = rotation;
                     ai.update_hand_positions();
 
+                    // 强制 GPU 初始化，失败则 panic
                     ai.main_network.initialization_attempted = true;
                     ai.main_network.initialization_failed = false;
                     ai.main_network.gpu_initialized = false;
                     println!("[GPU/CPU SWITCH] Beginning GPU init for main_network...");
-
-                    // 第一次初始化强制使用 GPU，失败则 panic
-                    ai.main_network.init_gpu_sync();
+                    ai.main_network.init_gpu_sync(); // 失败会 panic
                     println!("[GPU/CPU SWITCH] main_network GPU initialized successfully.");
 
                     // target_network 也强制使用 GPU
@@ -3274,8 +3603,7 @@ impl PhiTKAdvancedAI {
                     ai.target_network.initialization_failed = false;
                     ai.target_network.gpu_initialized = false;
                     println!("[GPU/CPU SWITCH] Beginning GPU init for target_network...");
-
-                    ai.target_network.init_gpu_sync();
+                    ai.target_network.init_gpu_sync(); // 失败会 panic
                     println!("[GPU/CPU SWITCH] target_network GPU initialized successfully.");
 
                     return ai;
@@ -3286,7 +3614,7 @@ impl PhiTKAdvancedAI {
         // 创建新模型时也强制使用 GPU
         let mut ai = Self::new(rotation);
 
-        // 初始化 GPU
+        // 初始化 GPU，失败则 panic
         println!("[GPU/CPU SWITCH] Beginning GPU init for new model...");
         ai.main_network.init_gpu_sync();
         ai.target_network.init_gpu_sync();
@@ -3710,12 +4038,9 @@ impl PhiTKAdvancedAI {
         const BATCH_SIZE: usize = 64;
 
         // 收集需要处理的音符索引
-        let mut unassigned_indices = Vec::new();
-        for i in 0..notes.len() {
-            if !assigned_indices.contains(&i) {
-                unassigned_indices.push(i);
-            }
-        }
+        let unassigned_indices: Vec<usize> = (0..notes.len())
+            .filter(|i| !assigned_indices.contains(i))
+            .collect();
 
         // 批量处理
         for batch_indices in unassigned_indices.chunks(BATCH_SIZE) {
@@ -3743,13 +4068,7 @@ impl PhiTKAdvancedAI {
 
             // 使用GPU批量推理
             let feature_slices: Vec<&[f32]> = features_batch.iter().map(|v| v.as_slice()).collect();
-            let outputs = if self.main_network.gpu_initialized {
-                self.main_network.gpu_forward_batch(&feature_slices, batch_indices.len())
-            } else {
-                features_batch.iter().map(|features| {
-                    self.main_network.forward(features)
-                }).collect()
-            };
+            let outputs = self.main_network.gpu_forward_batch(&feature_slices, batch_indices.len());
 
             // 处理批量输出
             for (i, output) in outputs.iter().enumerate() {
@@ -4434,7 +4753,7 @@ struct BatchSize {
 @group(0) @binding(3) var<storage, read> biases: array<f32>;
 @group(0) @binding(4) var<storage, read> batch_size: BatchSize;
 
-@compute @workgroup_size(8)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let output_size = arrayLength(&biases);
     let input_size = arrayLength(&input) / batch_size.size;

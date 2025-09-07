@@ -8,7 +8,7 @@ struct BatchSize {
 @group(0) @binding(3) var<storage, read> biases: array<f32>;
 @group(0) @binding(4) var<storage, read> batch_size: BatchSize;
 
-@compute @workgroup_size(8)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let output_size = arrayLength(&biases);
     let input_size = arrayLength(&input) / batch_size.size;
