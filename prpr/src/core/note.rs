@@ -22,6 +22,17 @@ pub enum NoteKind {
     Drag,
 }
 
+impl From<NoteKind> for u32 {
+    fn from(kind: NoteKind) -> u32 {
+        match kind {
+            NoteKind::Click => 0,
+            NoteKind::Hold { .. } => 1,
+            NoteKind::Flick => 2,
+            NoteKind::Drag => 3,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hand {
     Left,

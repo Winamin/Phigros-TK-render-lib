@@ -466,6 +466,7 @@ struct ProcessedNote {
     time: f32,
     kind: NoteKind,
     assigned_hand: Option<Hand>,
+    assigned_finger: Option<Finger>,
     confidence: f32,
     features: Vec<f32>,
     judge: JudgeStatus,
@@ -571,12 +572,11 @@ struct DeepNeuralNetwork {
     #[serde(skip)]
     last_batch_size: usize,
     #[serde(skip)]
-    buffer_cleanup_interval: Option<Instant>,  // 改为 Option<Instant>
+    buffer_cleanup_interval: Option<Instant>,
     #[serde(skip)]
-    last_used_buffers: StdHashMap<wgpu::Buffer, (Option<Instant>, usize, wgpu::BufferUsages)>, // 改为 Option<Instant>
+    last_used_buffers: StdHashMap<wgpu::Buffer, (Option<Instant>, usize, wgpu::BufferUsages)>,
     #[serde(skip)]
     reusable_buffers: StdHashMap<(usize, wgpu::BufferUsages), Vec<wgpu::Buffer>>,
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -639,6 +639,24 @@ struct AdvancedFeatureExtractor {
     last_logged_bpm: Option<f32>,
     #[serde(skip)]
     last_logged_time: f32,
+    #[serde(skip)]
+    feature_extraction_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    #[serde(skip)]
+    feature_extraction_pipeline: Option<wgpu::ComputePipeline>,
+    #[serde(skip)]
+    note_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    bpm_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    params_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    feature_buffer: Option<wgpu::Buffer>,
+    #[serde(skip)]
+    device: Option<wgpu::Device>, // 添加 device 字段
+    #[serde(skip)]
+    feature_count: usize,         // 添加 feature_count 字段
+    #[serde(skip)]
+    context_window: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -819,6 +837,58 @@ impl Clone for BufferPool {
             max_pool_size: self.max_pool_size,
         }
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+struct GpuNote {
+    position_x: f32,
+    position_y: f32,
+    time: f32,
+    kind: u32,
+    judge: u32,
+    duration: f32,
+    difficulty: f32,
+}
+
+impl From<&ProcessedNote> for GpuNote {
+    fn from(note: &ProcessedNote) -> Self {
+        GpuNote {
+            position_x: note.position.x,
+            position_y: note.position.y,
+            time: note.time,
+            kind: u32::from(note.kind.clone()),
+            judge: u32::from(note.judge.clone()),
+            duration: note.duration,
+            difficulty: note.difficulty,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+struct GpuBpmPoint {
+    time: f32,
+    bpm: f32,
+}
+
+impl From<&(f32, f32, f32)> for GpuBpmPoint {
+    fn from(point: &(f32, f32, f32)) -> Self {
+        // point 是 (beats, time, bpm)
+        Self {
+            time: point.1,  // time
+            bpm: point.2,   // bpm
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+struct GpuInputParams {
+    num_notes: u32,
+    num_bpm_points: u32,
+    context_window: u32,
+    total_features: u32,
 }
 
 impl Finger {
@@ -1082,7 +1152,7 @@ impl DeepNeuralNetwork {
             }
         }
 
-        if !self.learning_rate.is_finite() {self.learning_rate = 0.001; }
+        if !self.learning_rate.is_finite() { self.learning_rate = 0.001; }
         if !self.momentum.is_finite() { self.momentum = 0.9; }
         if !self.dropout_rate.is_finite() { self.dropout_rate = 0.1; }
     }
@@ -1536,7 +1606,7 @@ impl DeepNeuralNetwork {
                 println!("[GPU] GPU initialization successful on first attempt");
             } else {
                 self.initialization_failed = true;
-                panic!("[GPU] GPU initialization failed on first attempt - panic as requested");
+                //panic!("[GPU] GPU initialization failed on first attempt - panic as requested");
             }
         } else if self.device.is_some() && self.queue.is_some() && self.matmul_pipeline.is_some() {
             self.gpu_initialized = true;
@@ -2130,10 +2200,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
         results
     }
 
-    /*
-    * 构建神经网络架构 4 层全连接层，输入 28 维，输出 4 维
-    * 前两维为左右手决策，第三维为手指
-     */
+
+/*
+        * 构建神经网络架构 4 层全连接层，输入 28 维，输出 4 维
+        * 前两维为左右手决策，第三维为手指
+         */
     fn build_architecture(&mut self) {
         self.add_dense_layer(28, 128, ActivationFunction::BSiLU);
         self.add_dense_layer(128, 256, ActivationFunction::BSiLU);
@@ -2866,11 +2937,312 @@ impl AdvancedFeatureExtractor {
             },
             last_logged_bpm: None,
             last_logged_time: -1.0,
+            feature_extraction_bind_group_layout: None,
+            feature_extraction_pipeline: None,
+            note_buffer: None,
+            bpm_buffer: None,
+            params_buffer: None,
+            feature_buffer: None,
+            device: None,
+            feature_count: 32,
+            context_window: 32,
         }
+    }
+
+    fn init_feature_extraction(&mut self, device: &wgpu::Device) {
+        // 创建特征提取的BindGroupLayout
+        let feature_extraction_bind_group_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    // notes buffer
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // bpm_points buffer
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // params buffer
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // features buffer (output)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("Feature Extraction Bind Group Layout"),
+            }
+        );
+
+        // 创建pipeline layout
+        let pipeline_layout = device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
+                label: Some("Feature Extraction Pipeline Layout"),
+                bind_group_layouts: &[&feature_extraction_bind_group_layout],
+                push_constant_ranges: &[],
+            }
+        );
+
+        // 加载shader
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Feature Extraction Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("feature_extraction.wgsl").into()),
+        });
+
+        // 创建pipeline
+        let pipeline = device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label: Some("Feature Extraction Pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            }
+        );
+
+        // 保存资源
+        self.feature_extraction_bind_group_layout = Some(feature_extraction_bind_group_layout);
+        self.feature_extraction_pipeline = Some(pipeline);
+    }
+
+    fn create_feature_extraction_buffers(&mut self, device: &wgpu::Device, max_notes: usize, max_bpm_points: usize) {
+        // 创建音符缓冲区
+        self.note_buffer = Some(device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("Note Buffer"),
+                size: (max_notes * std::mem::size_of::<GpuNote>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }
+        ));
+
+        // 创建BPM缓冲区
+        self.bpm_buffer = Some(device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("BPM Buffer"),
+                size: (max_bpm_points * std::mem::size_of::<GpuBpmPoint>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }
+        ));
+
+        // 创建参数缓冲区
+        self.params_buffer = Some(device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("Params Buffer"),
+                size: std::mem::size_of::<GpuInputParams>() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }
+        ));
+
+        // 创建特征输出缓冲区
+        self.feature_buffer = Some(device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("Feature Buffer"),
+                size: (max_notes * self.feature_count * std::mem::size_of::<f32>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }
+        ));
+    }
+
+    fn run_feature_extraction(
+        &mut self,
+        queue: &wgpu::Queue,
+        notes: &[ProcessedNote],
+        bpm_list: &BpmList,
+        context_window: u32, // 作为参数传入
+        feature_count: usize, // 作为参数传入
+        device: &wgpu::Device, // 作为参数传入
+    ) -> Vec<f32> {
+        //let device = self.device.as_ref().unwrap();
+
+        // 准备GPU数据结构
+        let gpu_notes: Vec<GpuNote> = notes.iter().map(|n| n.into()).collect();
+
+        // 修复BpmList的访问方式 - 使用bpm_list.points()方法
+        let gpu_bpm_points: Vec<GpuBpmPoint> = bpm_list.points().iter().map(|p| p.into()).collect();
+
+        // 上传音符数据
+        queue.write_buffer(
+            self.note_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&gpu_notes),
+        );
+
+        // 上传BPM数据
+        queue.write_buffer(
+            self.bpm_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&gpu_bpm_points),
+        );
+
+        // 上传参数
+        let params = GpuInputParams {
+            num_notes: notes.len() as u32,
+            num_bpm_points: bpm_list.points().len() as u32,
+            context_window,
+            total_features: feature_count as u32,
+        };
+        queue.write_buffer(
+            self.params_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        // 创建bind group
+        let bind_group = device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: self.feature_extraction_bind_group_layout.as_ref().unwrap(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.note_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.bpm_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.params_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.feature_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                ],
+                label: Some("Feature Extraction Bind Group"),
+            }
+        );
+
+        // 创建command encoder
+        let mut encoder = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("Feature Extraction") }
+        );
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Feature Extraction Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(self.feature_extraction_pipeline.as_ref().unwrap());
+            cpass.set_bind_group(0, &bind_group, &[]);
+            let workgroup_count = (notes.len() as u32 + 63) / 64;
+            cpass.dispatch_workgroups(workgroup_count, 1, 1);
+        }
+
+        // 提交命令
+        queue.submit(Some(encoder.finish()));
+
+        // 读取结果
+        let staging_buffer = device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("Staging Buffer"),
+                size: (notes.len() * self.feature_count * std::mem::size_of::<f32>()) as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }
+        );
+
+        // 将结果复制到staging buffer
+        let mut encoder = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("Readback") }
+        );
+        encoder.copy_buffer_to_buffer(
+            self.feature_buffer.as_ref().unwrap(),
+            0,
+            &staging_buffer,
+            0,
+            (notes.len() * self.feature_count * std::mem::size_of::<f32>()) as u64,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        // 映射并读取结果
+        let buffer_slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+
+        let _ = device.poll(wgpu::PollType::Wait);
+
+        match rx.recv() {
+            Ok(Ok(())) => {
+                let data = buffer_slice.get_mapped_range();
+                let features: &[f32] = bytemuck::cast_slice(&data);
+                let result = features.to_vec();
+                drop(data);
+                staging_buffer.unmap();
+                result
+            }
+            _ => {
+                // 失败回退到CPU
+                eprintln!("GPU feature extraction failed, falling back to CPU");
+                self.extract_features_on_cpu(notes, bpm_list)
+            }
+        }
+    }
+
+    // 用于回退的CPU特征提取
+    // 修改方法签名
+    fn extract_features_on_cpu(&mut self, notes: &[ProcessedNote], bpm_list: &BpmList) -> Vec<f32> {
+        notes.iter().enumerate().map(|(idx, note)| {
+            let context_window = self.context_window as usize;
+            let context_start = idx.saturating_sub(context_window / 2);
+            let context_end = (idx + context_window / 2 + 1).min(notes.len());
+            let context = &notes[context_start..context_end];
+
+            // 直接调用 self.extract_features，而不是通过不存在的 self.feature_extractor
+            self.extract_features(context, context_window, bpm_list)
+        }).flatten().collect()
     }
 
     pub fn extract_features(&mut self, notes: &[ProcessedNote], window_size: usize, bpm_list: &BpmList) -> Vec<f32> {
         let mut features = Vec::new();
+        if let Some(current_note) = notes.get(0) {
+            let mut kind_features = vec![0.0; 4]; // 假设有4种音符类型
+            match current_note.kind {
+                NoteKind::Click => kind_features[0] = 1.0,
+                NoteKind::Drag => kind_features[1] = 1.0,
+                NoteKind::Flick => kind_features[2] = 1.0,
+                NoteKind::Hold { .. } => kind_features[3] = 1.0,
+            }
+            features.extend(kind_features);
+        } else {
+            features.extend_from_slice(&[0.0; 4]); // 填充默认值
+        }
         features.extend(self.extract_position_features(notes));
         features.extend(self.extract_temporal_features(notes, window_size, bpm_list.clone()));
         features.extend(self.extract_pattern_features(notes));
@@ -3569,6 +3941,15 @@ impl PhiTKAdvancedAI {
         ai.main_network.init_gpu_sync();
         ai.target_network.init_gpu_sync();
         println!("[GPU/CPU SWITCH] New AI GPU initialized successfully.");
+        if ai.main_network.gpu_initialized {
+            if let Some(device) = ai.main_network.device.as_ref() {
+                ai.feature_extractor.device = Some(device.clone());
+                ai.feature_extractor.init_feature_extraction(device);
+                // 预分配特征提取缓冲区，假设最大音符数为 1024，最大BPM点数为 256
+                ai.feature_extractor.create_feature_extraction_buffers(device, 1024, 256);
+                println!("[GPU Feature Buffers] Pre-allocated buffers for up to 1024 notes and 256 BPM points.");
+            }
+        }
 
         ai.warm_thread_pool();
         ai
@@ -3619,6 +4000,15 @@ impl PhiTKAdvancedAI {
         ai.main_network.init_gpu_sync();
         ai.target_network.init_gpu_sync();
         println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
+        if ai.main_network.gpu_initialized {
+            if let Some(device) = ai.main_network.device.as_ref() {
+                ai.feature_extractor.device = Some(device.clone());
+                ai.feature_extractor.init_feature_extraction(device);
+                // 预分配特征提取缓冲区
+                ai.feature_extractor.create_feature_extraction_buffers(device, 1024, 256);
+                println!("[GPU Feature Buffers] Pre-allocated buffers for up to 1024 notes and 256 BPM points.");
+            }
+        }
 
         ai.save_model(filepath);
         ai
@@ -3796,6 +4186,7 @@ impl PhiTKAdvancedAI {
                 time: note.time,
                 kind: note.kind.clone(),
                 assigned_hand: None,
+                assigned_finger: None,
                 confidence: 0.0,
                 features: Vec::new(),
                 judge: JudgeStatus::NotJudged,
@@ -4034,76 +4425,147 @@ impl PhiTKAdvancedAI {
 
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
-        const CONTEXT_WINDOW: usize = 8;
-        const BATCH_SIZE: usize = 64;
+        const CONTEXT_WINDOW: usize = 32;
+        const BATCH_SIZE: usize = 256;
 
         // 收集需要处理的音符索引
-        let unassigned_indices: Vec<usize> = (0..notes.len())
-            .filter(|i| !assigned_indices.contains(i))
-            .collect();
+        let unassigned_indices: Vec<usize> = (0..notes.len()).filter(|i| !assigned_indices.contains(i)).collect();
+
+        // 如果没有需要处理的音符，直接返回
+        if unassigned_indices.is_empty() {
+            return;
+        }
 
         // 批量处理
         for batch_indices in unassigned_indices.chunks(BATCH_SIZE) {
-            // 准备批量输入
-            let mut features_batch = Vec::with_capacity(batch_indices.len());
-            let mut note_data = Vec::with_capacity(batch_indices.len()); // 存储需要的数据
+            // 准备批量输入数据
+            let mut note_data = Vec::with_capacity(batch_indices.len());
+            let mut batch_notes = Vec::with_capacity(batch_indices.len());
 
             for &idx in batch_indices {
-                let start_idx = idx.saturating_sub(CONTEXT_WINDOW / 2);
-                let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
-                let context = &notes[start_idx..end_idx];
-
-                let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
-                features_batch.push(features);
-
-                // 提前获取需要的数据，避免后续借用冲突
-                note_data.push((
-                    idx,
-                    notes[idx].position.x,
-                    notes[idx].time,
-                    notes[idx].judge.clone(),
-                    notes[idx].kind.clone()
-                ));
+                let note = &notes[idx];
+                note_data.push((idx, note.position.x, note.time, note.judge.clone(), note.kind.clone()));
+                batch_notes.push(note.clone());
             }
 
-            // 使用GPU批量推理
-            let feature_slices: Vec<&[f32]> = features_batch.iter().map(|v| v.as_slice()).collect();
-            let outputs = self.main_network.gpu_forward_batch(&feature_slices, batch_indices.len());
+            // 使用GPU进行特征提取和推理
+            if self.main_network.gpu_initialized &&
+                self.feature_extractor.feature_extraction_pipeline.is_some() &&
+                self.main_network.queue.is_some() && // <-- 新增检查
+                self.feature_extractor.device.is_some() { // <-- 新增检查
 
-            // 处理批量输出
-            for (i, output) in outputs.iter().enumerate() {
-                let (note_idx, position_x, time, judge, kind) = &note_data[i];
-                let note = &mut notes[*note_idx];
+                // 安全地获取 queue 和 device
+                let queue = self.main_network.queue.as_ref().unwrap(); // <-- 不再使用 expect
+                let device = self.feature_extractor.device.clone().unwrap();
 
-                // 保存特征用于后续学习
-                note.features = features_batch[i].clone();
+                // 使用 catch_unwind 防止 GPU panic 导致程序崩溃
+                let features_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.feature_extractor.run_feature_extraction(
+                        queue,
+                        &batch_notes,
+                        bpm_list,
+                        CONTEXT_WINDOW as u32,
+                        self.feature_extractor.feature_count,
+                        &device, // <-- 直接传递引用
+                    )
+                }));
 
-                // 解析AI决策
-                let (chosen_hand, confidence, chosen_finger) = self.make_ai_decision(output, note, line_id);
-                note.assigned_hand = Some(chosen_hand);
-                note.confidence = confidence;
+                match features_result {
+                    Ok(features) => {
+                        println!("[GPU Acceleration] Successfully extracted features for {} notes using GPU. 特征GPU加速成功启用", batch_indices.len());
+                        // 重塑特征为batch形式
+                        let feature_slices: Vec<&[f32]> = (0..batch_indices.len())
+                            .map(|i| &features[i * self.feature_extractor.feature_count..(i + 1) * self.feature_extractor.feature_count])
+                            .collect();
 
-                // 使用提前获取的数据，避免借用冲突
-                self.recent_assignments.push_back((chosen_hand, *position_x, *time));
-                if self.recent_assignments.len() > 78 {
-                    self.recent_assignments.pop_front();
+                        // 使用 catch_unwind 防止 GPU 推理 panic
+                        let outputs_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.main_network.gpu_forward_batch(&feature_slices, batch_indices.len())
+                        }));
+
+                        match outputs_result {
+                            Ok(outputs) => {
+                                // 处理输出
+                                for (i, output) in outputs.iter().enumerate() {
+                                    let (note_idx, position_x, time, judge, _kind) = &note_data[i]; // <-- 重命名为 _kind
+                                    let note = &mut notes[*note_idx];
+
+                                    // 保存特征用于后续学习
+                                    note.features = features[i * self.feature_extractor.feature_count..(i + 1) * self.feature_extractor.feature_count].to_vec();
+
+                                    // 解析AI决策
+                                    let (chosen_hand, confidence, chosen_finger) = self.make_ai_decision(output, note, line_id);
+                                    note.assigned_hand = Some(chosen_hand);
+                                    note.assigned_finger = Some(chosen_finger);
+                                    note.confidence = confidence;
+
+                                    // 更新最近分配记录
+                                    self.recent_assignments.push_back((chosen_hand, *position_x, *time));
+                                    if self.recent_assignments.len() > 78 {
+                                        self.recent_assignments.pop_front();
+                                    }
+
+                                    // 记录经验，传递所有必要参数
+                                    self.record_experience(
+                                        &features[i * self.feature_extractor.feature_count..(i + 1) * self.feature_extractor.feature_count],
+                                        note,
+                                        chosen_hand,
+                                        confidence,
+                                        *judge,
+                                        &note.kind // <-- 传递 &note.kind
+                                    );
+                                }
+                                // 成功执行 GPU 逻辑，跳过 CPU 回退
+                                continue;
+                            },
+                            Err(_) => {
+                                eprintln!("[GPU Fallback] GPU inference panicked, falling back to CPU for this batch.");
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        eprintln!("[GPU Fallback] GPU feature extraction panicked, falling back to CPU for this batch.");
+                    }
+                }
+            }
+
+            // 如果 GPU 分支被跳过或失败，则回退到 CPU 逻辑
+            {
+                // CPU 回退逻辑
+                let mut features_batch = Vec::with_capacity(batch_indices.len());
+                let mut note_data = Vec::with_capacity(batch_indices.len());
+
+                for &idx in batch_indices {
+                    let note = &notes[idx];
+                    let context_start = idx.saturating_sub(CONTEXT_WINDOW / 2);
+                    let context_end = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
+                    let context = &notes[context_start..context_end];
+                    let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
+                    features_batch.push(features);
+                    note_data.push((idx, note.position.x, note.time, note.judge.clone(), note.kind.clone()));
                 }
 
-                // 更新手指状态
-                if let Some(finger_state) = self.finger_states.iter_mut().find(|fs| fs.finger == chosen_finger) {
-                    let success = *judge == JudgeStatus::Judged;
-                    finger_state.update_state(note.position, note.time, success, &kind);
-                }
+                let outputs = if self.main_network.gpu_initialized {
+                    let feature_slices: Vec<&[f32]> = features_batch.iter().map(|v| v.as_slice()).collect();
+                    self.main_network.gpu_forward_batch(&feature_slices, batch_indices.len())
+                } else {
+                    features_batch.iter().map(|features| self.main_network.forward(features)).collect()
+                };
 
-                // 更新手部状态
-                let success = *judge == JudgeStatus::Judged;
-                match chosen_hand {
-                    Hand::Left => self.left_hand_state.update_state(note.position, note.time, success, &kind),
-                    Hand::Right => self.right_hand_state.update_state(note.position, note.time, success, &kind),
+                for (i, output) in outputs.iter().enumerate() {
+                    let (note_idx, position_x, time, judge, _kind) = &note_data[i]; // <-- 重命名为 _kind
+                    let note = &mut notes[*note_idx];
+                    note.features = features_batch[i].clone();
+                    let (chosen_hand, confidence, chosen_finger) = self.make_ai_decision(output, note, line_id);
+                    note.assigned_hand = Some(chosen_hand);
+                    note.assigned_finger = Some(chosen_finger);
+                    note.confidence = confidence;
+                    self.recent_assignments.push_back((chosen_hand, *position_x, *time));
+                    if self.recent_assignments.len() > 78 {
+                        self.recent_assignments.pop_front();
+                    }
+                    self.record_experience(&features_batch[i], note, chosen_hand, confidence, *judge, &note.kind); // <-- 传递 &note.kind
                 }
-
-                // 记录经验
-                self.record_experience(&features_batch[i], note, chosen_hand, confidence);
             }
         }
     }
@@ -4277,9 +4739,9 @@ impl PhiTKAdvancedAI {
         (final_hand, final_confidence, best_finger)
     }
 
-    fn record_experience(&mut self, features: &[f32], note: &ProcessedNote, chosen_hand: Hand, confidence: f32) {
+    fn record_experience(&mut self, features: &[f32], note: &ProcessedNote, chosen_hand: Hand, confidence: f32, judge:JudgeStatus, note_kind: &NoteKind) {
         //println!("Recording experience, replay size now: {}", self.experience_replay.len());
-        let reward = self.calculate_reward(note, chosen_hand, confidence);
+        let reward = self.calculate_reward(note, chosen_hand, confidence, judge, &note.kind);
         let feature_diversity = features.iter().map(|&x| (x - 0.5).abs()).sum::<f32>() / features.len() as f32;
         let priority = if feature_diversity > 0.3 { 2.0 } else { 1.0 };
 
@@ -4295,28 +4757,53 @@ impl PhiTKAdvancedAI {
         self.experience_replay.push(experience);
     }
 
-    fn calculate_reward(&self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
+    fn calculate_reward(&self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32, judge: JudgeStatus, note_kind: &NoteKind) -> f32 {
         let mut reward = 0.0;
 
+        // 1. 基础奖励（基于判定结果）
+        let base_reward = match judge {
+            JudgeStatus::Judged => 1.0,
+            JudgeStatus::NotJudged => -0.5,
+            JudgeStatus::PreJudge => 0.0,
+            JudgeStatus::Hold(perfect, _, _, _, _) => {
+                if perfect { 1.2 } else { 0.8 }
+            }
+        };
+        reward += base_reward;
+
+        // 2. 位置奖励
         let position_reward = if note.position.x < -0.1 {
-            if chosen_hand == Hand::Left { 1.0 } else { -0.6 }
+            if chosen_hand == Hand::Left { 0.5 } else { -0.3 }
         } else if note.position.x > 0.1 {
-            if chosen_hand == Hand::Right { 1.0 } else { -0.6 }
+            if chosen_hand == Hand::Right { 0.5 } else { -0.3 }
         } else {
-            if chosen_hand == Hand::Right { 0.2 } else { 0.0 }
+            0.0
         };
         reward += position_reward;
 
-        if confidence > 0.9 {
-            reward -= (confidence - 0.9) * 2.0; // 高信心惩罚
+        // 3. 新增：音符类型奖励/惩罚
+        // 不同类型音符有不同的“基础难度”，成功处理高难度音符应获得更高奖励
+        let kind_difficulty_bonus = match note_kind {
+            NoteKind::Click => 0.0,      // 基础难度
+            NoteKind::Drag => 0.2,       // 稍难
+            NoteKind::Flick => 0.3,      // 较难
+            NoteKind::Hold { .. } => 0.4, // 最难
+        };
+        // 只有成功判定时才给予难度奖励
+        if matches!(judge, JudgeStatus::Judged | JudgeStatus::Hold(..)) {
+            reward += kind_difficulty_bonus;
         }
 
-        let difficulty_bonus = (note.difficulty - 1.0) * 0.3;
-        reward += difficulty_bonus;
+        // 4. 信心奖励（仅在成功时）
+        if matches!(judge, JudgeStatus::Judged | JudgeStatus::Hold(..)) {
+            reward += (confidence - 0.5) * 0.5;
+        }
 
-        let noise = (fastrand::f32() - 0.5) * 0.2;
+        // 5. 随机噪声
+        let noise = (fastrand::f32() - 0.5) * 0.1;
         reward += noise;
 
+        // 限制奖励范围
         reward.clamp(-2.0, 2.0)
     }
 

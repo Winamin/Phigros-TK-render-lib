@@ -99,12 +99,23 @@ impl FlickTracker {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 pub enum JudgeStatus {
     NotJudged,
     PreJudge,
     Judged,
     Hold(bool, f32, f32, bool, f32), // perfect, at, diff, pre-judge, up-time
+}
+
+impl From<JudgeStatus> for u32 {
+    fn from(status: JudgeStatus) -> u32 {
+        match status {
+            JudgeStatus::NotJudged => 0,
+            JudgeStatus::PreJudge => 1,
+            JudgeStatus::Judged => 2,
+            JudgeStatus::Hold(..) => 3,
+        }
+    }
 }
 
 #[repr(u8)]
