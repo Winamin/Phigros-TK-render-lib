@@ -150,4 +150,7 @@ impl BpmList {
         let (_, _, bpm) = &self.elements[cursor];
         *bpm
     }
+    pub fn points(&self) -> &[(f32, f32, f32)] {
+        &self.elements
+    }
 }

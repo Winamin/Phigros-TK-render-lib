@@ -20,6 +20,7 @@ use wgpu::util::DeviceExt;
 use crossbeam_channel::{unbounded, Receiver as CbReceiver, Sender as CbSender, TryRecvError, TrySendError};
 use rayon::ThreadPool;
 use std::hash::{Hash, Hasher};
+use futures_intrusive::channel::shared::oneshot_channel;
 
 type StdHashMap<K, V> = HashMap<K, V>;
 type MatmulKey = (usize, usize, usize, usize, usize, usize); // (layer_idx, input_ptr, output_ptr, input_size, output_size, batch_size)
@@ -577,6 +578,18 @@ struct DeepNeuralNetwork {
     last_used_buffers: StdHashMap<wgpu::Buffer, (Option<Instant>, usize, wgpu::BufferUsages)>,
     #[serde(skip)]
     reusable_buffers: StdHashMap<(usize, wgpu::BufferUsages), Vec<wgpu::Buffer>>,
+    #[serde(skip)]
+    loss_pipeline: Option<wgpu::ComputePipeline>,
+    #[serde(skip)]
+    backward_pipelines: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
+    #[serde(skip)]
+    weight_update_pipeline: Option<wgpu::ComputePipeline>,
+    #[serde(skip)]
+    weight_gradient_buffers: Vec<wgpu::Buffer>,
+    #[serde(skip)]
+    bias_gradient_buffers: Vec<wgpu::Buffer>,
+    #[serde(skip)]
+    staging_buffers: Vec<wgpu::Buffer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1288,6 +1301,12 @@ impl DeepNeuralNetwork {
             reusable_buffers: StdHashMap::new(),
             last_used_buffers: StdHashMap::new(),
             buffer_cleanup_interval: Some(Instant::now()),
+            loss_pipeline: None,
+            backward_pipelines: StdHashMap::new(),
+            weight_update_pipeline: None,
+            weight_gradient_buffers: Vec::new(),
+            bias_gradient_buffers: Vec::new(),
+            staging_buffers: Vec::new(),
         };
 
         network.build_architecture();
@@ -1296,6 +1315,35 @@ impl DeepNeuralNetwork {
             network.pre_allocate_buffers(64, 256);
         }
         network
+    }
+
+    fn sync_weights_to_gpu(&self) {
+        // 健全性检查
+        if self.device.is_none() || self.queue.is_none() {
+            eprintln!("[GPU Sync] 无法同步权重：device 或 queue 未初始化");
+            return;
+        }
+        let device = self.device.as_ref().unwrap();
+        let queue = self.queue.as_ref().unwrap();
+
+        for layer in &self.layers {
+            // 检查该层的 GPU 缓冲区是否存在
+            if let (Some(weights_buffer), Some(biases_buffer)) = (&layer.weights_buffer, &layer.biases_buffer) {
+                // 将 CPU 内存中的权重和偏置数据同步到 GPU 缓冲区
+                let weights_flat = layer.weights.iter().flatten().cloned().collect::<Vec<f32>>();
+                queue.write_buffer(weights_buffer, 0, bytemuck::cast_slice(&weights_flat));
+
+                queue.write_buffer(biases_buffer, 0, bytemuck::cast_slice(&layer.biases));
+            } else {
+                // 如果某层的 GPU 缓冲区不存在，可以在这里选择初始化它，或者跳过
+                // 为简单起见，我们选择跳过，并打印警告
+                eprintln!("[GPU Sync] 跳过层同步：weights_buffer 或 biases_buffer 为 None");
+            }
+        }
+
+        // 同步完成后，提交所有写入命令
+        //queue.submit(std::iter::empty::<wgpu::CommandEncoder>()); // 提交一个空的命令批次，确保前面的 write_buffer 被执行
+        device.poll(wgpu::PollType::Wait); // 等待 GPU 完成同步
     }
 
     fn pre_allocate_buffers(&mut self, max_batch_size: usize, input_size: usize) {
@@ -1311,11 +1359,10 @@ impl DeepNeuralNetwork {
 
         let mut current_size = input_size;
 
-        // 为每一层预分配输入和输出缓冲区
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let output_size = layer.weights.len();
 
-            // 输入缓冲区
+            // 输入缓冲区：只读存储，并可被拷贝数据
             let input_buffer_size = current_size * max_batch_size * std::mem::size_of::<f32>();
             let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Pre-allocated Input Buffer Layer {}", layer_idx)),
@@ -1325,15 +1372,15 @@ impl DeepNeuralNetwork {
             });
             self.pre_allocated_input_buffers.push(Some((input_buffer, input_buffer_size, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST)));
 
-            // 输出缓冲区
+            // 输出缓冲区：读写存储，并可被拷贝数据
             let output_buffer_size = output_size * max_batch_size * std::mem::size_of::<f32>();
             let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Pre-allocated Output Buffer Layer {}", layer_idx)),
                 size: output_buffer_size as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            self.pre_allocated_output_buffers.push(Some((output_buffer, output_buffer_size, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC)));
+            self.pre_allocated_output_buffers.push(Some((output_buffer, output_buffer_size,wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST)));
 
             current_size = output_size;
         }
@@ -1380,20 +1427,20 @@ impl DeepNeuralNetwork {
             self.cleanup_expired_buffers();
             self.buffer_cleanup_interval = Some(now);
         }
-        // 首先尝试从可复用缓冲区中获取
+
+        // 首先尝试从可复用缓冲区中获取（用途必须完全匹配）
         let key = (size, usage);
         if let Some(buffers) = self.reusable_buffers.get_mut(&key) {
             if let Some(buffer) = buffers.pop() {
-                //self.last_used_buffers.insert(buffer.clone(), (now, size, usage));
                 self.last_used_buffers.insert(buffer.clone(), (Some(now), size, usage));
                 return buffer;
             }
         }
 
-        // 然后检查预分配缓冲区
+        // 然后检查预分配缓冲区（用途必须完全匹配）
         for buffer_option in &self.pre_allocated_input_buffers {
             if let Some((ref prealloc_buffer, prealloc_size, prealloc_usage)) = buffer_option {
-                if *prealloc_size >= size && prealloc_usage.contains(usage) {
+                if *prealloc_size >= size && *prealloc_usage == usage {
                     self.last_used_buffers.insert(prealloc_buffer.clone(), (Some(now), size, usage));
                     return prealloc_buffer.clone();
                 }
@@ -1401,12 +1448,14 @@ impl DeepNeuralNetwork {
         }
         for buffer_option in &self.pre_allocated_output_buffers {
             if let Some((ref prealloc_buffer, prealloc_size, prealloc_usage)) = buffer_option {
-                if *prealloc_size >= size && prealloc_usage.contains(usage) {
+                if *prealloc_size >= size && *prealloc_usage == usage {
                     self.last_used_buffers.insert(prealloc_buffer.clone(), (Some(now), size, usage));
                     return prealloc_buffer.clone();
                 }
             }
         }
+
+        // 如果没有找到，创建新的缓冲区
         let buffer = self.device.as_ref().unwrap().create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: size as u64,
@@ -1443,7 +1492,6 @@ impl DeepNeuralNetwork {
 
     fn return_buffer_to_pool(&mut self, buffer: wgpu::Buffer, size: usize, usage: wgpu::BufferUsages) {
         let now = Instant::now();
-        //self.last_used_buffers.insert(buffer.clone(), (now, size, usage));
         self.last_used_buffers.insert(buffer.clone(), (Some(now), size, usage));
         let key = (size, usage);
         self.reusable_buffers.entry(key).or_insert_with(Vec::new).push(buffer);
@@ -1582,36 +1630,48 @@ impl DeepNeuralNetwork {
     }
 
     pub fn init_gpu_sync(&mut self) {
-        if self.gpu_initialized {
-            return;
+        let device_missing = self.device.is_none();
+        let queue_missing = self.queue.is_none();
+        let pipeline_missing = self.matmul_pipeline.is_none() || self.activation_pipelines.is_empty();
+
+        // 检测不一致状态：gpu_initialized为true但资源缺失
+        if self.gpu_initialized && (device_missing || queue_missing || pipeline_missing) {
+            println!("[GPU修复] 检测到不一致状态 (gpu_initialized=true但资源缺失)，强制重新初始化...");
+            // 重置状态以便重新初始化
+            self.gpu_initialized = false;
+            self.initialization_attempted = false;
+            self.initialization_failed = false;
+            // 清理可能部分初始化的资源
+            self.device = None;
+            self.queue = None;
+            self.matmul_pipeline = None;
+            self.activation_pipelines.clear();
+            self.activation_bind_group_layouts.clear();
+            self.buffer_pool = None;
         }
 
+        // 如果之前尝试初始化但失败了，不再重试
         if self.initialization_attempted && self.initialization_failed {
             return;
         }
 
+        // 尝试初始化
         if !self.initialization_attempted {
             self.initialization_attempted = true;
-
-            let rt = tokio::runtime::Runtime::new()
-                .expect("Failed to create Tokio runtime for GPU initialization");
-
-            let init_result = rt.block_on(async {
-                self.init_gpu().await
-            });
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime for GPU initialization");
+            let init_result = rt.block_on(async { self.init_gpu().await });
 
             if init_result {
                 self.gpu_initialized = true;
                 self.initialization_failed = false;
-                println!("[GPU] GPU initialization successful on first attempt");
+                println!("[GPU] GPU 初始化成功");
             } else {
                 self.initialization_failed = true;
-                //panic!("[GPU] GPU initialization failed on first attempt - panic as requested");
+                println!("[GPU] GPU 初始化失败，将回退到 CPU 模式");
+                // 不 panic，允许系统继续运行但使用 CPU
             }
-        } else if self.device.is_some() && self.queue.is_some() && self.matmul_pipeline.is_some() {
-            self.gpu_initialized = true;
-            println!("[GPU] GPU already initialized and ready");
         }
+
     }
 
     pub async fn init_gpu(&mut self) -> bool {
@@ -1625,6 +1685,7 @@ impl DeepNeuralNetwork {
         };
         let instance = wgpu::Instance::new(&instance_desc);
 
+        // --- 修改 1: 为 request_adapter 添加详细错误日志 ---
         let adapter = match instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
@@ -1632,15 +1693,18 @@ impl DeepNeuralNetwork {
         }).await {
             Ok(adapter) => adapter,
             Err(e) => {
-                eprintln!("Failed to request GPU adapter: {:?}", e);
+                eprintln!("[GPU Init Error] Failed to request GPU adapter: {:?}", e);
+                eprintln!("[GPU Init Error] This usually means no compatible GPU was found, or the graphics driver is missing/outdated.");
                 return false;
             }
         };
 
+        // --- 修改 2: 为 request_device 添加详细错误日志 ---
         let (device, queue) = match adapter.request_device(&wgpu::DeviceDescriptor::default()).await {
             Ok((d, q)) => (d, q),
             Err(e) => {
-                eprintln!("Failed to request GPU device: {:?}", e);
+                eprintln!("[GPU Init Error] Failed to request GPU device: {:?}", e);
+                eprintln!("[GPU Init Error] This usually means the GPU does not support the required features, or is out of memory.");
                 return false;
             }
         };
@@ -1764,28 +1828,25 @@ impl DeepNeuralNetwork {
                 ],
                 label: Some(&format!("{:?} Activation Layout", func)),
             });
-
             let activation_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
                 bind_group_layouts: &[&activation_bind_group_layout],
                 push_constant_ranges: &[],
             });
-
             let shader_src = self.get_activation_shader(&func);
             let activation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: None,
+                label: Some(&format!("{:?} Activation Shader", func)),
                 source: wgpu::ShaderSource::Wgsl(shader_src.into()),
             });
 
             let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: None,
+                label: Some(&format!("{:?} Activation Pipeline", func)),
                 layout: Some(&activation_pipeline_layout),
                 module: &activation_shader,
                 entry_point: Some("main"),
                 cache: None,
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                compilation_options: Default::default(),
             });
-
             activation_pipelines.insert(func.clone(), pipeline);
             activation_bind_group_layouts.insert(func, activation_bind_group_layout);
         }
@@ -1864,9 +1925,746 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 }}
 "#,
                              fn_body = fn_body);
-        println!("Activation shader:\\n{}", shader);
+        //println!("Activation shader:\\n{}", shader);
 
         shader
+    }
+
+    fn calculate_loss(&self) -> f32 {
+        // TODO：这是一个简单的实现，返回最近一次记录的损失
+        // 您可以根据需要实现更复杂的逻辑
+        return self.last_loss;
+    }
+
+    pub fn gpu_train_batch(&mut self, training_data: &[(Vec<f32>, Vec<f32>)]) -> f32 {
+        // 强制使用64的批量大小
+        const TARGET_BATCH_SIZE: usize = 64;
+
+        // 确保GPU已初始化
+        if !self.gpu_initialized {
+            println!("[GPU训练] GPU未初始化，回退到CPU训练");
+            return self.calculate_loss();
+        }
+
+        // 检查必要的GPU资源
+        if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
+            println!("[GPU训练] GPU资源不完整，尝试重新初始化...");
+            self.init_gpu_sync();
+
+            // 再次检查
+            if !self.gpu_initialized || self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
+                println!("[GPU训练] GPU重新初始化失败，回退到CPU训练");
+                self.train(training_data);
+                let loss = self.calculate_loss(); // 或其他计算 loss 的方法
+                return loss; // 直接返回 loss 值
+            }
+        }
+
+        println!("[GPU训练] 开始GPU训练，强制批量大小: {}", TARGET_BATCH_SIZE);
+
+        // 准备输入和目标数据
+        let mut inputs: Vec<&[f32]> = Vec::with_capacity(TARGET_BATCH_SIZE);
+        let mut targets: Vec<&[f32]> = Vec::with_capacity(TARGET_BATCH_SIZE);
+
+        // 填充到64个样本（不足则重复）
+        for i in 0..TARGET_BATCH_SIZE {
+            let idx = i % training_data.len();
+            inputs.push(&training_data[idx].0);
+            targets.push(&training_data[idx].1);
+        }
+
+        // 预分配GPU缓冲区
+        let input_size = inputs[0].len();
+        let output_size = targets[0].len();
+        self.pre_allocate_buffers(TARGET_BATCH_SIZE, input_size);
+
+        // 执行前向传播
+        let outputs = self.gpu_forward_batch(&inputs, TARGET_BATCH_SIZE);
+
+        // 计算损失
+        let loss = self.gpu_calculate_loss(&outputs, &targets, TARGET_BATCH_SIZE);
+
+        // 执行反向传播
+        self.gpu_backward(&inputs, &outputs, &targets, TARGET_BATCH_SIZE);
+
+        // 应用梯度
+        self.gpu_apply_gradients(TARGET_BATCH_SIZE as f32);
+
+        // 更新学习率
+        self.adapt_learning_rate(loss);
+        self.epoch_count += 1;
+
+        // 每个epoch都打印状态
+        let (min_weight, max_weight) = self.get_weight_range();
+        println!("[GPU训练状态] Epoch: {}, Loss: {:.6}, LR: {:.6}, 权重范围 [{:.4}, {:.4}]",
+                 self.epoch_count, loss, self.learning_rate, min_weight, max_weight);
+
+        loss
+    }
+
+    fn train_with_loss(&mut self, training_data: &[(Vec<f32>, Vec<f32>)], loss_out: &mut f32) {
+        let mut total_loss = 0.0;
+        let output_size = training_data[0].1.len(); // 假设所有目标长度相同
+        for (input, target) in training_data {
+            let output = self.forward(input);
+            for i in 0..output.len() {
+                let diff = output[i] - target[i];
+                total_loss += diff * diff;
+            }
+            // 初始化梯度累积结构
+            let mut total_gradients = vec![vec![vec![0.0; input.len()]; output.len()]; self.layers.len()];
+            let mut total_bias_gradients = vec![vec![0.0; output.len()]; self.layers.len()];
+            self.backward(&output, target, &mut total_gradients, &mut total_bias_gradients);
+            self.apply_gradients(&total_gradients, &total_bias_gradients, 1);
+        }
+        *loss_out = total_loss / (training_data.len() * output_size) as f32;
+    }
+
+    /// 在GPU上计算损失（均方误差）
+    fn gpu_calculate_loss(&mut self, outputs: &[Vec<f32>], targets: &[&[f32]], batch_size: usize) -> f32 {
+        if !self.gpu_initialized {
+            // CPU回退
+            let mut total_loss = 0.0;
+            for i in 0..batch_size {
+                for j in 0..outputs[i].len() {
+                    let diff = outputs[i][j] - targets[i][j];
+                    total_loss += diff * diff;
+                }
+            }
+            return total_loss / (batch_size * outputs[0].len()) as f32;
+        }
+
+        // 准备损失计算
+        let output_size = outputs[0].len();
+        let total_elements = batch_size * output_size;
+
+        // 创建损失缓冲区
+        let device = self.device.as_ref().unwrap();
+        let queue = self.queue.as_ref().unwrap();
+
+        let loss_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Loss Buffer"),
+            size: (batch_size * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        // 创建损失计算管线（如果不存在）
+        let loss_pipeline = match self.loss_pipeline {
+            Some(ref pipeline) => pipeline.clone(),
+            None => {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Loss Shader"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("loss.wgsl").into()),
+                });
+
+                let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Loss Pipeline Layout"),
+                    bind_group_layouts: &[
+                        &device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                            entries: &[
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 0,
+                                    visibility: wgpu::ShaderStages::COMPUTE,
+                                    ty: wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                        has_dynamic_offset: false,
+                                        min_binding_size: None,
+                                    },
+                                    count: None,
+                                },
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 1,
+                                    visibility: wgpu::ShaderStages::COMPUTE,
+                                    ty: wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                        has_dynamic_offset: false,
+                                        min_binding_size: None,
+                                    },
+                                    count: None,
+                                },
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 2,
+                                    visibility: wgpu::ShaderStages::COMPUTE,
+                                    ty: wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                        has_dynamic_offset: false,
+                                        min_binding_size: None,
+                                    },
+                                    count: None,
+                                },
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 3,
+                                    visibility: wgpu::ShaderStages::COMPUTE,
+                                    ty: wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                        has_dynamic_offset: false,
+                                        min_binding_size: None,
+                                    },
+                                    count: None,
+                                },
+                            ],
+                            label: Some("Loss Bind Group Layout"),
+                        }),
+                    ],
+                    push_constant_ranges: &[],
+                });
+
+                let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("Loss Pipeline"),
+                    layout: Some(&compute_pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("main"),
+                    cache: None,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                });
+
+                self.loss_pipeline = Some(pipeline.clone());
+                pipeline
+            }
+        };
+
+        // 创建输出和目标缓冲区
+        let outputs_flat: Vec<f32> = outputs.iter().flat_map(|o| o.iter().cloned()).collect();
+        let targets_flat: Vec<f32> = targets.iter().flat_map(|t| t.iter().cloned()).collect();
+
+        let outputs_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Outputs Buffer"),
+            contents: bytemuck::cast_slice(&outputs_flat),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let targets_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Targets Buffer"),
+            contents: bytemuck::cast_slice(&targets_flat),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let input_size = output_size;
+
+        // 创建参数缓冲区（批量大小和输出大小）
+        let params = [
+            batch_size as f32,
+            input_size as f32,
+            output_size as f32
+        ];
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Params Buffer"),
+            contents: bytemuck::cast_slice(&params),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // 创建绑定组
+        let bind_group_layout = loss_pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: outputs_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: targets_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: loss_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("Loss Bind Group"),
+        });
+
+        // 执行损失计算
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Loss Encoder"),
+        });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Loss Pass"),
+                timestamp_writes: None,
+            });
+
+            compute_pass.set_pipeline(&loss_pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            let workgroup_size = 256;
+            let num_groups = (batch_size + workgroup_size - 1) / workgroup_size;
+            compute_pass.dispatch_workgroups(num_groups as u32, 1, 1);
+        }
+
+        queue.submit(Some(encoder.finish()));
+
+        // 读取损失结果
+        let loss_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Loss Staging Buffer"),
+            size: (batch_size * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Copy Loss Encoder"),
+        });
+        encoder.copy_buffer_to_buffer(&loss_buffer, 0, &loss_staging, 0, loss_staging.size());
+        queue.submit(Some(encoder.finish()));
+
+        let buffer_slice = loss_staging.slice(..);
+        let (tx, rx) = oneshot_channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+
+        device.poll(wgpu::PollType::Wait);
+
+        let data = buffer_slice.get_mapped_range();
+        let loss_values: &[f32] = bytemuck::cast_slice(&data);
+
+        // 计算平均损失
+        let total_loss: f32 = loss_values.iter().sum();
+        let avg_loss = total_loss / (batch_size * output_size) as f32;
+
+        drop(data);
+        loss_staging.unmap();
+
+        avg_loss
+    }
+
+    /// 在GPU上执行反向传播
+    fn gpu_backward(&mut self, inputs: &[&[f32]], outputs: &[Vec<f32>], targets: &[&[f32]], batch_size: usize) {
+        if !self.gpu_initialized {
+            // CPU回退 - 使用正确的参数调用backward
+            let mut total_gradients = vec![vec![vec![0.0; inputs[0].len()]; outputs[0].len()]; self.layers.len()];
+            let mut total_bias_gradients = vec![vec![0.0; outputs[0].len()]; self.layers.len()];
+            for i in 0..batch_size {
+                self.backward(&outputs[i], targets[i], &mut total_gradients, &mut total_bias_gradients);
+            }
+            self.apply_gradients(&total_gradients, &total_bias_gradients, batch_size as usize);
+            return;
+        }
+
+        println!("[GPU训练] 执行GPU反向传播，批量大小: {}", batch_size);
+
+        let device = self.device.as_ref().unwrap();
+        let queue = self.queue.as_ref().unwrap();
+
+        // 为每层创建梯度缓冲区
+        let mut gradient_buffers = Vec::new();
+        let mut weight_gradient_buffers = Vec::new();
+        let mut bias_gradient_buffers = Vec::new();
+
+        // 创建输出层梯度（损失对输出的梯度）
+        let output_size = outputs[0].len();
+        let output_gradients: Vec<f32> = (0..batch_size * output_size)
+            .map(|i| {
+                let layer = i / output_size;
+                let neuron = i % output_size;
+                2.0 * (outputs[layer][neuron] - targets[layer][neuron])
+            })
+            .collect();
+
+        let output_gradient_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Output Gradient Buffer"),
+            contents: bytemuck::cast_slice(&output_gradients),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        gradient_buffers.push(output_gradient_buffer);
+
+        // 从输出层向输入层反向传播
+        for layer_idx in (0..self.layers.len()).rev() {
+            let layer = &self.layers[layer_idx];
+            let input_size = if layer_idx == 0 {
+                self.layers[0].weights[0].len()
+            } else {
+                self.layers[layer_idx - 1].weights.len()
+            };
+            let output_size = layer.weights.len();
+
+            println!("[GPU训练] 处理反向传播层: {}", layer_idx);
+
+            // 创建当前层的权重梯度和偏置梯度缓冲区
+            let weight_gradients_size = input_size * output_size;
+            let bias_gradients_size = output_size;
+
+            let weight_gradient_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Layer {} Weight Gradient Buffer", layer_idx)),
+                size: (weight_gradients_size * std::mem::size_of::<f32>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+
+            let bias_gradient_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("Layer {} Bias Gradient Buffer", layer_idx)),
+                size: (bias_gradients_size * std::mem::size_of::<f32>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+
+            weight_gradient_buffers.push(weight_gradient_buffer.clone());
+            bias_gradient_buffers.push(bias_gradient_buffer.clone());
+
+            // 获取前一层的梯度（用于下一层反向传播）
+            let prev_gradient_buffer = if layer_idx > 0 {
+                gradient_buffers.last().unwrap().clone()
+            } else {
+                // 输入层不需要前一层梯度
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Dummy Gradient Buffer"),
+                    size: 1,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                })
+            };
+
+            let prev_activations_buffer = if layer_idx > 0 {
+                self.layers[layer_idx - 1].activations_buffer.as_ref().unwrap().clone()
+            } else {
+                // 输入层没有前一层
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Dummy Activations Buffer"),
+                    size: 1,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                })
+            };
+
+
+            // 创建反向传播管线（如果不存在）
+            let backward_pipeline = match &self.backward_pipelines.get(&layer.activation_func) {
+                Some(pipeline) => pipeline.clone(),
+                None => {
+                    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("Backward Shader"),
+                        source: wgpu::ShaderSource::Wgsl(include_str!("backward.wgsl").into()),
+                    });
+
+                    let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("Backward Pipeline Layout"),
+                        bind_group_layouts: &[
+                            &device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                                entries: &[
+                                    wgpu::BindGroupLayoutEntry {
+                                        binding: 0,
+                                        visibility: wgpu::ShaderStages::COMPUTE,
+                                        ty: wgpu::BindingType::Buffer {
+                                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                            has_dynamic_offset: false,
+                                            min_binding_size: None,
+                                        },
+                                        count: None,
+                                    },
+                                    wgpu::BindGroupLayoutEntry {
+                                        binding: 1,
+                                        visibility: wgpu::ShaderStages::COMPUTE,
+                                        ty: wgpu::BindingType::Buffer {
+                                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                            has_dynamic_offset: false,
+                                            min_binding_size: None,
+                                        },
+                                        count: None,
+                                    },
+                                    wgpu::BindGroupLayoutEntry {
+                                        binding: 2,
+                                        visibility: wgpu::ShaderStages::COMPUTE,
+                                        ty: wgpu::BindingType::Buffer {
+                                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                            has_dynamic_offset: false,
+                                            min_binding_size: None,
+                                        },
+                                        count: None,
+                                    },
+                                    wgpu::BindGroupLayoutEntry {
+                                        binding: 3,
+                                        visibility: wgpu::ShaderStages::COMPUTE,
+                                        ty: wgpu::BindingType::Buffer {
+                                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                            has_dynamic_offset: false,
+                                            min_binding_size: None,
+                                        },
+                                        count: None,
+                                    },
+                                    wgpu::BindGroupLayoutEntry {
+                                        binding: 4,
+                                        visibility: wgpu::ShaderStages::COMPUTE,
+                                        ty: wgpu::BindingType::Buffer {
+                                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                            has_dynamic_offset: false,
+                                            min_binding_size: None,
+                                        },
+                                        count: None,
+                                    },
+                                    wgpu::BindGroupLayoutEntry {
+                                        binding: 5,
+                                        visibility: wgpu::ShaderStages::COMPUTE,
+                                        ty: wgpu::BindingType::Buffer {
+                                            ty: wgpu::BufferBindingType::Uniform,
+                                            has_dynamic_offset: false,
+                                            min_binding_size: None,
+                                        },
+                                        count: None,
+                                    },
+                                    wgpu::BindGroupLayoutEntry {
+                                        binding: 6,
+                                        visibility: wgpu::ShaderStages::COMPUTE,
+                                        ty: wgpu::BindingType::Buffer {
+                                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                            has_dynamic_offset: false,
+                                            min_binding_size: None,
+                                        },
+                                        count: None,
+                                    }
+                                ],
+                                label: Some("Backward Bind Group Layout"),
+                            }),
+                        ],
+                        push_constant_ranges: &[],
+                    });
+
+                    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("Backward Pipeline"),
+                        layout: Some(&compute_pipeline_layout),
+                        module: &shader,
+                        entry_point: Some("main"),
+                        cache: None,
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    });
+
+                    self.backward_pipelines.insert(layer.activation_func.clone(), pipeline.clone());
+                    // 返回克隆的值，而不是引用
+                    &self.backward_pipelines.get(&layer.activation_func).unwrap()
+                }
+            };
+
+            // 创建绑定组
+            let bind_group_layout = backward_pipeline.get_bind_group_layout(0);
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: gradient_buffers.last().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: weight_gradient_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: bias_gradient_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: prev_gradient_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.batch_size_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                ],
+                label: Some(&format!("Backward Bind Group Layer {}", layer_idx)),
+            });
+
+            // 执行反向传播
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some(&format!("Backward Encoder Layer {}", layer_idx)),
+            });
+
+            {
+                let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("Backward Pass Layer {}", layer_idx)),
+                    timestamp_writes: None,
+                });
+
+                compute_pass.set_pipeline(&backward_pipeline);
+                compute_pass.set_bind_group(0, &bind_group, &[]);
+                let workgroup_size = 256;
+                let num_groups = ((input_size * output_size) + workgroup_size - 1) / workgroup_size;
+                compute_pass.dispatch_workgroups(num_groups as u32, 1, 1);
+            }
+
+            queue.submit(Some(encoder.finish()));
+
+            // 为下一层准备梯度
+            if layer_idx > 0 {
+                let prev_gradient_size = input_size * batch_size;
+                let prev_gradient_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Layer {} Gradient Buffer", layer_idx - 1)),
+                    size: (prev_gradient_size * std::mem::size_of::<f32>()) as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+
+                // 这里应该添加计算前一层梯度的GPU操作
+                // 由于实现细节复杂，简化为占位实现
+                gradient_buffers.push(prev_gradient_buffer);
+            }
+        }
+    }
+
+    /// 在GPU上应用梯度更新权重
+    fn gpu_apply_gradients(&mut self, batch_size: f32) {
+        if !self.gpu_initialized {
+            // CPU回退
+            return;
+        }
+
+        println!("[GPU训练] 应用GPU梯度，批量大小: {}", batch_size as usize);
+
+        let device = self.device.as_ref().unwrap();
+        let queue = self.queue.as_ref().unwrap();
+
+        // 创建权重更新管线
+        let update_pipeline = match &self.weight_update_pipeline {
+            Some(pipeline) => pipeline.clone(),
+            None => {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Weight Update Shader"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("update.wgsl").into()),
+                });
+
+                let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Weight Update Pipeline Layout"),
+                    bind_group_layouts: &[
+                        &device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                            entries: &[
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 0,
+                                    visibility: wgpu::ShaderStages::COMPUTE,
+                                    ty: wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                        has_dynamic_offset: false,
+                                        min_binding_size: None,
+                                    },
+                                    count: None,
+                                },
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 1,
+                                    visibility: wgpu::ShaderStages::COMPUTE,
+                                    ty: wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                        has_dynamic_offset: false,
+                                        min_binding_size: None,
+                                    },
+                                    count: None,
+                                },
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 2,
+                                    visibility: wgpu::ShaderStages::COMPUTE,
+                                    ty: wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                        has_dynamic_offset: false,
+                                        min_binding_size: None,
+                                    },
+                                    count: None,
+                                },
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 3,
+                                    visibility: wgpu::ShaderStages::COMPUTE,
+                                    ty: wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Uniform,
+                                        has_dynamic_offset: false,
+                                        min_binding_size: None,
+                                    },
+                                    count: None,
+                                },
+                            ],
+                            label: Some("Weight Update Bind Group Layout"),
+                        }),
+                    ],
+                    push_constant_ranges: &[],
+                });
+
+                let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("Weight Update Pipeline"),
+                    layout: Some(&compute_pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("main"),
+                    cache: None,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                });
+
+                self.weight_update_pipeline = Some(pipeline.clone());
+                pipeline
+            }
+        };
+
+        let input_sizes: Vec<usize> = self.layers.iter().enumerate().map(|(idx, layer)| {
+            if idx == 0 {
+                layer.weights.get(0).map_or(0, |w| w.len())
+            } else {
+                self.layers[idx - 1].weights.len()
+            }
+        }).collect();
+
+        // 为每层应用梯度
+        for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
+            let input_size = input_sizes[layer_idx];
+            let output_size = layer.weights.len();
+
+            println!("[GPU训练] 应用梯度到层: {}", layer_idx);
+
+            // 创建学习率缓冲区
+            let learning_rate = self.learning_rate;
+            let weight_decay = self.weight_decay;
+            let params = [learning_rate, weight_decay, batch_size];
+            let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Params Buffer"),
+                contents: bytemuck::cast_slice(&params),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+            // 创建绑定组
+            let bind_group_layout = update_pipeline.get_bind_group_layout(0);
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.weight_gradient_buffers[layer_idx].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.bias_gradient_buffers[layer_idx].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: params_buffer.as_entire_binding(),
+                    },
+                ],
+                label: Some(&format!("Weight Update Bind Group Layer {}", layer_idx)),
+            });
+
+            // 执行权重更新
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some(&format!("Weight Update Encoder Layer {}", layer_idx)),
+            });
+
+            {
+                let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("Weight Update Pass Layer {}", layer_idx)),
+                    timestamp_writes: None,
+                });
+
+                compute_pass.set_pipeline(&update_pipeline);
+                compute_pass.set_bind_group(0, &bind_group, &[]);
+                let workgroup_size = 256;
+                let num_groups = ((input_size * output_size) + workgroup_size - 1) / workgroup_size;
+                compute_pass.dispatch_workgroups(num_groups as u32, 1, 1);
+            }
+
+            queue.submit(Some(encoder.finish()));
+        }
     }
 
     fn create_matmul_bind_group(
@@ -2009,9 +2807,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
     }
 
     fn gpu_forward_batch(&mut self, inputs: &[&[f32]], actual_batch_size: usize) -> Vec<Vec<f32>> {
-        if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
-            return inputs.iter().map(|input| self.light_forward(input)).collect();
+        if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() || self.activation_pipelines.is_empty() {
+            println!("[GPU推理] GPU 资源不完整 (device: {}, queue: {}, matmul_pipeline: {}, activation_pipelines: {}), 尝试重新初始化...",
+                     self.device.is_some(), self.queue.is_some(), self.matmul_pipeline.is_none(), !self.activation_pipelines.is_empty());
+            self.init_gpu_sync();
+            // 重新检查
+            if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() || self.activation_pipelines.is_empty() {
+                println!("[GPU推理] GPU 初始化失败或不完整，回退到 CPU 处理批次大小: {}", actual_batch_size);
+                return inputs.iter().map(|input| self.light_forward(input)).collect();
+            } else {
+                println!("[GPU推理] GPU 重新初始化成功，处理批次大小: {}", actual_batch_size);
+            }
         }
+
 
         let input_size = inputs[0].len();
 
@@ -2019,6 +2827,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
         if self.last_batch_size != actual_batch_size || self.pre_allocated_input_buffers.is_empty() {
             self.pre_allocate_buffers(actual_batch_size.max(64), input_size);
         }
+        //println!("[GPU推理] 成功使用GPU处理批次大小: {}", actual_batch_size);
 
         // 准备输入数据
         let batch_input_data = self.prepare_batch_input_data(inputs, actual_batch_size, input_size);
@@ -2038,13 +2847,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
         // 逐层处理
         for layer_idx in 0..self.layers.len() {
+            //println!("GPU批量处理正确开启");
             let output_size = self.layers[layer_idx].weights.len();
             let total_output_size = output_size * actual_batch_size;
 
             // 获取输出缓冲区
             let output_buffer = self.get_or_create_buffer(
                 total_output_size * std::mem::size_of::<f32>(),
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                 &format!("Output Buffer Layer {}", layer_idx)
             );
 
@@ -2184,6 +2994,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             _ => {
                 // GPU失败时回退到CPU处理
                 println!("GPU batch inference failed, falling back to CPU processing for batch of {} inputs", actual_batch_size);
+                println!("你的GPU挂掉了");
                 inputs.iter().take(actual_batch_size).map(|input| self.light_forward(input)).collect()
             }
         };
@@ -3082,76 +3893,90 @@ impl AdvancedFeatureExtractor {
         queue: &wgpu::Queue,
         notes: &[ProcessedNote],
         bpm_list: &BpmList,
-        context_window: u32, // 作为参数传入
-        feature_count: usize, // 作为参数传入
-        device: &wgpu::Device, // 作为参数传入
+        context_window: u32,
+        feature_count: usize,
+        device: &wgpu::Device,
     ) -> Vec<f32> {
-        //let device = self.device.as_ref().unwrap();
+        // 检查必要的 GPU 资源是否已初始化
+        if self.feature_extraction_bind_group_layout.is_none() || self.feature_extraction_pipeline.is_none() {
+            eprintln!("[GPU Fallback] Feature extraction pipeline or layout not initialized, falling back to CPU");
+            return self.extract_features_on_cpu(notes, bpm_list);
+        }
 
-        // 准备GPU数据结构
+        println!("[GPU特征提取] 成功使用GPU提取特征，音符数量: {}", notes.len());
+
+        // --- 动态创建缓冲区 ---
+        // 1. 创建音符缓冲区
         let gpu_notes: Vec<GpuNote> = notes.iter().map(|n| n.into()).collect();
+        let note_buffer_size = gpu_notes.len() * std::mem::size_of::<GpuNote>();
+        let note_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Dynamic Note Buffer"),
+            contents: bytemuck::cast_slice(&gpu_notes),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
 
-        // 修复BpmList的访问方式 - 使用bpm_list.points()方法
+        // 2. 创建BPM缓冲区
         let gpu_bpm_points: Vec<GpuBpmPoint> = bpm_list.points().iter().map(|p| p.into()).collect();
+        let bpm_buffer_size = gpu_bpm_points.len() * std::mem::size_of::<GpuBpmPoint>();
+        let bpm_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Dynamic BPM Buffer"),
+            contents: bytemuck::cast_slice(&gpu_bpm_points),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
 
-        // 上传音符数据
-        queue.write_buffer(
-            self.note_buffer.as_ref().unwrap(),
-            0,
-            bytemuck::cast_slice(&gpu_notes),
-        );
-
-        // 上传BPM数据
-        queue.write_buffer(
-            self.bpm_buffer.as_ref().unwrap(),
-            0,
-            bytemuck::cast_slice(&gpu_bpm_points),
-        );
-
-        // 上传参数
+        // 3. 创建参数缓冲区
         let params = GpuInputParams {
             num_notes: notes.len() as u32,
             num_bpm_points: bpm_list.points().len() as u32,
             context_window,
-            total_features: feature_count as u32,
+            total_features: feature_count as u32, // 使用传入的 feature_count
         };
-        queue.write_buffer(
-            self.params_buffer.as_ref().unwrap(),
-            0,
-            bytemuck::cast_slice(&[params]),
-        );
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Dynamic Params Buffer"),
+            contents: bytemuck::cast_slice(&[params]),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
 
-        // 创建bind group
+        // 4. 创建特征输出缓冲区
+        let feature_buffer_size = notes.len() * feature_count * std::mem::size_of::<f32>();
+        let feature_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dynamic Feature Buffer"),
+            size: feature_buffer_size as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        // --- 动态创建结束 ---
+
+        // 创建 bind group (使用新创建的动态缓冲区)
         let bind_group = device.create_bind_group(
             &wgpu::BindGroupDescriptor {
                 layout: self.feature_extraction_bind_group_layout.as_ref().unwrap(),
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.note_buffer.as_ref().unwrap().as_entire_binding(),
+                        resource: note_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: self.bpm_buffer.as_ref().unwrap().as_entire_binding(),
+                        resource: bpm_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: self.params_buffer.as_ref().unwrap().as_entire_binding(),
+                        resource: params_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: self.feature_buffer.as_ref().unwrap().as_entire_binding(),
+                        resource: feature_buffer.as_entire_binding(),
                     },
                 ],
                 label: Some("Feature Extraction Bind Group"),
             }
         );
 
-        // 创建command encoder
+        // 创建 command encoder 并执行计算
         let mut encoder = device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("Feature Extraction") }
         );
-
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Feature Extraction Pass"),
@@ -3162,30 +3987,27 @@ impl AdvancedFeatureExtractor {
             let workgroup_count = (notes.len() as u32 + 63) / 64;
             cpass.dispatch_workgroups(workgroup_count, 1, 1);
         }
-
-        // 提交命令
         queue.submit(Some(encoder.finish()));
 
-        // 读取结果
+        // 读取结果: 创建 staging buffer 并复制数据
         let staging_buffer = device.create_buffer(
             &wgpu::BufferDescriptor {
                 label: Some("Staging Buffer"),
-                size: (notes.len() * self.feature_count * std::mem::size_of::<f32>()) as u64,
+                size: feature_buffer_size as u64,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }
         );
 
-        // 将结果复制到staging buffer
         let mut encoder = device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("Readback") }
         );
         encoder.copy_buffer_to_buffer(
-            self.feature_buffer.as_ref().unwrap(),
+            &feature_buffer,
             0,
             &staging_buffer,
             0,
-            (notes.len() * self.feature_count * std::mem::size_of::<f32>()) as u64,
+            feature_buffer_size as u64,
         );
         queue.submit(Some(encoder.finish()));
 
@@ -3195,7 +4017,6 @@ impl AdvancedFeatureExtractor {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).unwrap();
         });
-
         let _ = device.poll(wgpu::PollType::Wait);
 
         match rx.recv() {
@@ -3208,8 +4029,8 @@ impl AdvancedFeatureExtractor {
                 result
             }
             _ => {
-                // 失败回退到CPU
-                eprintln!("GPU feature extraction failed, falling back to CPU");
+                // GPU 处理失败，回退到 CPU
+                eprintln!("[GPU Fallback] GPU feature extraction failed, falling back to CPU");
                 self.extract_features_on_cpu(notes, bpm_list)
             }
         }
@@ -3959,47 +4780,106 @@ impl PhiTKAdvancedAI {
         let path = Path::new(filepath);
         if let Ok(bytes) = fs::read(path) {
             if let Ok(mut ai) = bincode::deserialize::<Self>(&bytes) {
-                ai.main_network.buffer_cleanup_interval = Some(Instant::now());
-                ai.main_network.last_used_buffers = StdHashMap::new();
-                ai.main_network.reusable_buffers = StdHashMap::new();
-                // 同样处理 target_network
-                ai.target_network.buffer_cleanup_interval = Some(Instant::now());
-                ai.target_network.last_used_buffers = StdHashMap::new();
-                ai.target_network.reusable_buffers = StdHashMap::new();
-                if ai.validate_for_serialization() {
-                    println!("[Model] 从文件加载模型: {}, 训练回合数: {}", filepath, ai.training_episodes);
-                    ai.rotation = rotation;
-                    ai.update_hand_positions();
+                println!("[Model Loading] Successfully loaded AI model from {}", filepath);
 
-                    // 强制 GPU 初始化，失败则 panic
-                    ai.main_network.initialization_attempted = true;
-                    ai.main_network.initialization_failed = false;
-                    ai.main_network.gpu_initialized = false;
-                    println!("[GPU/CPU SWITCH] Beginning GPU init for main_network...");
-                    ai.main_network.init_gpu_sync(); // 失败会 panic
-                    println!("[GPU/CPU SWITCH] main_network GPU initialized successfully.");
+                // 关键：重置GPU状态标志，因为序列化数据不包含GPU资源
+                // 这是解决"gpu_initialized: true 但实际资源缺失"问题的核心
+                ai.main_network.gpu_initialized = false;
+                ai.main_network.initialization_attempted = false;
+                ai.main_network.initialization_failed = false;
+                ai.target_network.gpu_initialized = false;
+                ai.target_network.initialization_attempted = false;
+                ai.target_network.initialization_failed = false;
 
-                    // target_network 也强制使用 GPU
-                    ai.target_network.initialization_attempted = true;
-                    ai.target_network.initialization_failed = false;
-                    ai.target_network.gpu_initialized = false;
-                    println!("[GPU/CPU SWITCH] Beginning GPU init for target_network...");
-                    ai.target_network.init_gpu_sync(); // 失败会 panic
-                    println!("[GPU/CPU SWITCH] target_network GPU initialized successfully.");
+                // 清理可能残留的GPU资源引用
+                ai.main_network.device = None;
+                ai.main_network.queue = None;
+                ai.main_network.matmul_pipeline = None;
+                ai.main_network.batch_size_buffer = None;
+                ai.main_network.activation_pipelines.clear();
+                ai.main_network.activation_bind_group_layouts.clear();
+                ai.main_network.buffer_pool = None;
 
-                    return ai;
+                ai.target_network.device = None;
+                ai.target_network.queue = None;
+                ai.target_network.matmul_pipeline = None;
+                ai.target_network.batch_size_buffer = None;
+                ai.target_network.activation_pipelines.clear();
+                ai.target_network.activation_bind_group_layouts.clear();
+                ai.target_network.buffer_pool = None;
+
+                // 修复GPU资源池状态
+                ai.main_network.pre_allocated_input_buffers.clear();
+                ai.main_network.pre_allocated_output_buffers.clear();
+                ai.main_network.pre_allocated_staging_buffer = None;
+
+                ai.target_network.pre_allocated_input_buffers.clear();
+                ai.target_network.pre_allocated_output_buffers.clear();
+                ai.target_network.pre_allocated_staging_buffer = None;
+
+                println!("[GPU/CPU SWITCH] Beginning GPU initialization for loaded model...");
+                ai.main_network.init_gpu_sync();
+                ai.target_network.init_gpu_sync();
+
+                // 验证GPU状态是否真正就绪
+                if ai.main_network.gpu_initialized {
+                    if ai.main_network.device.is_none() ||
+                        ai.main_network.queue.is_none() ||
+                        ai.main_network.matmul_pipeline.is_none() {
+                        println!("[GPU Repair] Detected inconsistent GPU state after initialization, forcing reset");
+                        ai.main_network.gpu_initialized = false;
+                        ai.main_network.initialization_attempted = false;
+                        ai.main_network.initialization_failed = false;
+                        ai.main_network.init_gpu_sync();
+                    }
                 }
+
+                // 如果GPU初始化成功，设置feature_extractor
+                if ai.main_network.gpu_initialized {
+                    if let Some(device) = ai.main_network.device.as_ref() {
+                        ai.feature_extractor.device = Some(device.clone());
+                        ai.feature_extractor.init_feature_extraction(device);
+                        // 预分配特征提取缓冲区
+                        ai.feature_extractor.create_feature_extraction_buffers(device, 1024, 256);
+                        println!("[GPU Feature Buffers] Pre-allocated buffers for up to 1024 notes and 256 BPM points.");
+                    }
+                }
+
+                // 确保学习率等参数有效
+                if !ai.main_network.learning_rate.is_finite() {
+                    ai.main_network.learning_rate = 0.001;
+                    println!("[Model Repair] Reset learning rate to default value");
+                }
+
+                if !ai.target_network.learning_rate.is_finite() {
+                    ai.target_network.learning_rate = 0.001;
+                }
+
+                return ai;
+            } else {
+                println!("[Model Loading] Failed to deserialize AI model, creating new one");
+            }
+        } else {
+            println!("[Model Loading] No existing model found at {}, creating new one", filepath);
+        }
+
+        let mut ai = Self::new(rotation);
+        ai.save_model(filepath);
+
+
+        // 额外验证GPU状态
+        if ai.main_network.gpu_initialized {
+            if ai.main_network.device.is_none() ||
+                ai.main_network.queue.is_none() ||
+                ai.main_network.matmul_pipeline.is_none() {
+                println!("[GPU Repair] Detected inconsistent GPU state for new model, forcing reset");
+                ai.main_network.gpu_initialized = false;
+                ai.main_network.initialization_attempted = false;
+                ai.main_network.initialization_failed = false;
+                ai.main_network.init_gpu_sync();
             }
         }
 
-        // 创建新模型时也强制使用 GPU
-        let mut ai = Self::new(rotation);
-
-        // 初始化 GPU，失败则 panic
-        println!("[GPU/CPU SWITCH] Beginning GPU init for new model...");
-        ai.main_network.init_gpu_sync();
-        ai.target_network.init_gpu_sync();
-        println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
         if ai.main_network.gpu_initialized {
             if let Some(device) = ai.main_network.device.as_ref() {
                 ai.feature_extractor.device = Some(device.clone());
@@ -4010,7 +4890,11 @@ impl PhiTKAdvancedAI {
             }
         }
 
-        ai.save_model(filepath);
+        // 如果GPU初始化失败，记录警告但继续
+        if !ai.main_network.gpu_initialized {
+            println!("[GPU Warning] GPU initialization failed, falling back to CPU mode");
+        }
+
         ai
     }
 
@@ -4129,10 +5013,13 @@ impl PhiTKAdvancedAI {
     }
 
     fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize) {
+        println!("[DEBUG] analyze_and_assign started, notes.len() = {}", notes.len());
         //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
+            println!("[DEBUG] analyze_and_assign: notes is empty, returning early");
             return;
         }
+
         let mut processed_notes = self.preprocess_notes(notes);
         let simultaneous_groups = self.detect_simultaneous_groups(&processed_notes);
         self.detect_and_switch_mode(notes);
@@ -4141,13 +5028,39 @@ impl PhiTKAdvancedAI {
         self.ai_assign_single_notes(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
         self.post_process_assignments(&mut processed_notes);
         self.optimize_jack_pattern(&mut processed_notes);
-        self.apply_and_learn(notes, &processed_notes);
-        if self.experience_replay.len() >= 64 && self.total_notes_processed % 25 == 0 {
-            self.train_network();
+
+        // --- 关键修复：在 apply_and_learn 前添加长度检查 ---
+        if notes.len() != processed_notes.len() {
+            eprintln!("[CRITICAL ERROR in analyze_and_assign] Length mismatch before apply_and_learn! original: {}, processed: {}", notes.len(), processed_notes.len());
+            // 打印前几个音符的信息以便调试
+            for i in 0..notes.len().min(processed_notes.len()).min(5) {
+                eprintln!("[DEBUG] Note {} - Original Time: {}, Processed Time: {}", i, notes.get(i).map(|n| n.time).unwrap_or(-1.0), processed_notes.get(i).map(|n| n.time).unwrap_or(-1.0));
+            }
+            return; // 提前返回，避免 apply_and_learn 中的潜在崩溃
         }
+        // --- 关键修复结束 ---
+
+        self.apply_and_learn(notes, &processed_notes);
+
+        // --- 关键修复：在训练条件检查前再次添加长度检查 ---
+        // 虽然 apply_and_learn 内部也有检查，但这里再加一层保险
+        if notes.len() != processed_notes.len() {
+            eprintln!("[CRITICAL ERROR in analyze_and_assign] Length mismatch after apply_and_learn! original: {}, processed: {}", notes.len(), processed_notes.len());
+            return;
+        }
+        // --- 关键修复结束 ---
+
+        if self.experience_replay.len() >= 64 && self.total_notes_processed % 25 == 0 {
+            println!("[DEBUG] Training condition met: replay_len={}, total_notes={}", self.experience_replay.len(), self.total_notes_processed);
+            self.train_network();
+        } else {
+            println!("[DEBUG] Training skipped: replay_len={}, total_notes={}", self.experience_replay.len(), self.total_notes_processed);
+        }
+
         if self.training_episodes % self.target_update_frequency as u64 == 0 {
             self.target_network = self.main_network.clone();
         }
+
         self.training_episodes += 1;
         self.last_save_episodes += 1;
         if self.last_save_episodes >= 500 {
@@ -4428,95 +5341,82 @@ impl PhiTKAdvancedAI {
         const CONTEXT_WINDOW: usize = 32;
         const BATCH_SIZE: usize = 256;
 
-        // 收集需要处理的音符索引
         let unassigned_indices: Vec<usize> = (0..notes.len()).filter(|i| !assigned_indices.contains(i)).collect();
-
-        // 如果没有需要处理的音符，直接返回
         if unassigned_indices.is_empty() {
             return;
         }
 
-        // 批量处理
         for batch_indices in unassigned_indices.chunks(BATCH_SIZE) {
-            // 准备批量输入数据
             let mut note_data = Vec::with_capacity(batch_indices.len());
             let mut batch_notes = Vec::with_capacity(batch_indices.len());
-
             for &idx in batch_indices {
                 let note = &notes[idx];
                 note_data.push((idx, note.position.x, note.time, note.judge.clone(), note.kind.clone()));
                 batch_notes.push(note.clone());
             }
 
-            // 使用GPU进行特征提取和推理
+            // --- GPU 尝试阶段 ---
             if self.main_network.gpu_initialized &&
                 self.feature_extractor.feature_extraction_pipeline.is_some() &&
-                self.main_network.queue.is_some() && // <-- 新增检查
-                self.feature_extractor.device.is_some() { // <-- 新增检查
+                self.main_network.queue.is_some() &&
+                self.feature_extractor.device.is_some() {
 
-                // 安全地获取 queue 和 device
-                let queue = self.main_network.queue.as_ref().unwrap(); // <-- 不再使用 expect
+                let queue = self.main_network.queue.as_ref().unwrap();
                 let device = self.feature_extractor.device.clone().unwrap();
 
                 // 使用 catch_unwind 防止 GPU panic 导致程序崩溃
                 let features_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // --- 新增：健全性检查 ---
+                    if self.feature_extractor.device.is_none() {
+                        panic!("[Pre-Call Check] Feature extractor's device is None");
+                    }
+                    if self.feature_extractor.feature_extraction_bind_group_layout.is_none() ||
+                        self.feature_extractor.feature_extraction_pipeline.is_none() {
+                        panic!("[Pre-Call Check] Feature extraction GPU resources (layout/pipeline) not ready");
+                    }
+                    // --- 新增结束 ---
+
+                    // 安全地获取 device 引用
+                    let safe_device = self.feature_extractor.device.clone().expect("Device should be Some after check");
                     self.feature_extractor.run_feature_extraction(
                         queue,
                         &batch_notes,
                         bpm_list,
                         CONTEXT_WINDOW as u32,
                         self.feature_extractor.feature_count,
-                        &device, // <-- 直接传递引用
+                        &safe_device, // <-- 传递安全的引用
                     )
                 }));
 
                 match features_result {
                     Ok(features) => {
-                        println!("[GPU Acceleration] Successfully extracted features for {} notes using GPU. 特征GPU加速成功启用", batch_indices.len());
-                        // 重塑特征为batch形式
+                        println!("[GPU Acceleration] Successfully extracted features for {} notes using GPU.", batch_indices.len());
                         let feature_slices: Vec<&[f32]> = (0..batch_indices.len())
                             .map(|i| &features[i * self.feature_extractor.feature_count..(i + 1) * self.feature_extractor.feature_count])
                             .collect();
 
-                        // 使用 catch_unwind 防止 GPU 推理 panic
                         let outputs_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             self.main_network.gpu_forward_batch(&feature_slices, batch_indices.len())
                         }));
 
                         match outputs_result {
                             Ok(outputs) => {
-                                // 处理输出
+                                // 成功处理整个批次
                                 for (i, output) in outputs.iter().enumerate() {
-                                    let (note_idx, position_x, time, judge, _kind) = &note_data[i]; // <-- 重命名为 _kind
+                                    let (note_idx, position_x, time, judge, _kind) = &note_data[i];
                                     let note = &mut notes[*note_idx];
-
-                                    // 保存特征用于后续学习
                                     note.features = features[i * self.feature_extractor.feature_count..(i + 1) * self.feature_extractor.feature_count].to_vec();
-
-                                    // 解析AI决策
                                     let (chosen_hand, confidence, chosen_finger) = self.make_ai_decision(output, note, line_id);
                                     note.assigned_hand = Some(chosen_hand);
                                     note.assigned_finger = Some(chosen_finger);
                                     note.confidence = confidence;
-
-                                    // 更新最近分配记录
                                     self.recent_assignments.push_back((chosen_hand, *position_x, *time));
                                     if self.recent_assignments.len() > 78 {
                                         self.recent_assignments.pop_front();
                                     }
-
-                                    // 记录经验，传递所有必要参数
-                                    self.record_experience(
-                                        &features[i * self.feature_extractor.feature_count..(i + 1) * self.feature_extractor.feature_count],
-                                        note,
-                                        chosen_hand,
-                                        confidence,
-                                        *judge,
-                                        &note.kind // <-- 传递 &note.kind
-                                    );
+                                    self.record_experience(&note.features, note, chosen_hand, confidence, *judge, &note.kind);
                                 }
-                                // 成功执行 GPU 逻辑，跳过 CPU 回退
-                                continue;
+                                continue; // 跳过 CPU 回退
                             },
                             Err(_) => {
                                 eprintln!("[GPU Fallback] GPU inference panicked, falling back to CPU for this batch.");
@@ -4529,11 +5429,13 @@ impl PhiTKAdvancedAI {
                 }
             }
 
-            // 如果 GPU 分支被跳过或失败，则回退到 CPU 逻辑
+            // --- CPU 回退阶段 (修复版) ---
+            // 如果 GPU 阶段失败或未启用，则用 CPU 处理整个批次
             {
-                // CPU 回退逻辑
+                println!("[CPU Fallback] Processing batch of {} notes on CPU.", batch_indices.len());
+
                 let mut features_batch = Vec::with_capacity(batch_indices.len());
-                let mut note_data = Vec::with_capacity(batch_indices.len());
+                let mut note_data_cpu = Vec::with_capacity(batch_indices.len()); // 重命名以避免混淆
 
                 for &idx in batch_indices {
                     let note = &notes[idx];
@@ -4542,20 +5444,19 @@ impl PhiTKAdvancedAI {
                     let context = &notes[context_start..context_end];
                     let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
                     features_batch.push(features);
-                    note_data.push((idx, note.position.x, note.time, note.judge.clone(), note.kind.clone()));
+                    note_data_cpu.push((idx, note.position.x, note.time, note.judge.clone(), note.kind.clone()));
                 }
 
-                let outputs = if self.main_network.gpu_initialized {
-                    let feature_slices: Vec<&[f32]> = features_batch.iter().map(|v| v.as_slice()).collect();
-                    self.main_network.gpu_forward_batch(&feature_slices, batch_indices.len())
-                } else {
-                    features_batch.iter().map(|features| self.main_network.forward(features)).collect()
-                };
+                // 对整个批次进行推理 (在 CPU 上)
+                let outputs: Vec<Vec<f32>> = features_batch.iter()
+                    .map(|features| self.main_network.forward(features))
+                    .collect();
 
+                // 处理整个批次的输出
                 for (i, output) in outputs.iter().enumerate() {
-                    let (note_idx, position_x, time, judge, _kind) = &note_data[i]; // <-- 重命名为 _kind
+                    let (note_idx, position_x, time, judge, _kind) = &note_data_cpu[i];
                     let note = &mut notes[*note_idx];
-                    note.features = features_batch[i].clone();
+                    note.features = features_batch[i].clone(); // 保存特征
                     let (chosen_hand, confidence, chosen_finger) = self.make_ai_decision(output, note, line_id);
                     note.assigned_hand = Some(chosen_hand);
                     note.assigned_finger = Some(chosen_finger);
@@ -4564,9 +5465,9 @@ impl PhiTKAdvancedAI {
                     if self.recent_assignments.len() > 78 {
                         self.recent_assignments.pop_front();
                     }
-                    self.record_experience(&features_batch[i], note, chosen_hand, confidence, *judge, &note.kind); // <-- 传递 &note.kind
+                    self.record_experience(&features_batch[i], note, chosen_hand, confidence, *judge, &note.kind);
                 }
-            }
+            } // --- CPU 回退阶段结束 ---
         }
     }
 
@@ -5189,33 +6090,88 @@ impl PhiTKAdvancedAI {
             self.confidence_threshold = (self.confidence_threshold - 0.01).max(0.5);
         }
     }
+        fn train_network(&mut self) {
+            println!("[训练前检查] main_network.gpu_initialized: {}", self.main_network.gpu_initialized);
+            println!("[训练前检查] main_network.device.is_some(): {}", self.main_network.device.is_some());
+            println!("[训练前检查] main_network.queue.is_some(): {}", self.main_network.queue.is_some());
+            println!("[训练前检查] main_network.matmul_pipeline.is_some(): {}", self.main_network.matmul_pipeline.is_some());
 
-    fn train_network(&mut self) {
-        let batch_size = 64;
-        let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
-        println!("Training network with experience replay size: {}, sampled: {}", self.experience_replay.len(), experiences.len());
-        let mut training_data = Vec::with_capacity(batch_size);
+            // 强制重新检查并修复GPU状态
+            self.main_network.init_gpu_sync();
+            self.target_network.init_gpu_sync();
 
-        for exp in &experiences {
-            let target_value = (exp.reward + self.discount_factor * self.estimate_future_value(&exp.next_state)).clamp(0.0, 1.0);
-            let mut target_output = vec![0.5, 0.5, 1.0, exp.reward.abs()];
-            if exp.action < target_output.len() {
-                target_output[exp.action] = target_value.clamp(0.0, 1.0);
+            // 再次验证GPU状态
+            if self.main_network.gpu_initialized {
+                if self.main_network.device.is_none() ||
+                    self.main_network.queue.is_none() ||
+                    self.main_network.matmul_pipeline.is_none() {
+                    println!("[训练前修复] 检测到GPU状态仍不一致，强制重置状态");
+                    // 强制重置状态
+                    self.main_network.gpu_initialized = false;
+                    self.main_network.initialization_attempted = false;
+                    self.main_network.initialization_failed = false;
+                    // 再次尝试初始化
+                    self.main_network.init_gpu_sync();
+                }
             }
-            training_data.push((exp.state.clone(), target_output));
+
+            // 确保feature_extractor也正确设置
+            if self.main_network.gpu_initialized {
+                if let Some(device) = self.main_network.device.as_ref() {
+                    self.feature_extractor.device = Some(device.clone());
+                    self.feature_extractor.init_feature_extraction(device);
+                    // 重新创建特征提取缓冲区
+                    self.feature_extractor.create_feature_extraction_buffers(device, 1024, 256);
+                    println!("[GPU Feature Buffers] 重新分配了特征提取缓冲区");
+                }
+            }
+
+            // 强制使用64的批量大小
+            const BATCH_SIZE: usize = 64;
+            let experiences: Vec<_> = self.experience_replay.sample(BATCH_SIZE).into_iter().cloned().collect();
+
+            if experiences.is_empty() {
+                return; // 没有经验，不训练
+            }
+
+            let mut training_data = Vec::with_capacity(BATCH_SIZE);
+            for exp in &experiences {
+                let target_value = (exp.reward + self.discount_factor * self.estimate_future_value(&exp.next_state)).clamp(0.0, 1.0);
+                let mut target_output = vec![0.5, 0.5, 1.0, exp.reward.abs()];
+
+                if exp.action < target_output.len() {
+                    target_output[exp.action] = target_value.clamp(0.0, 1.0);
+                }
+
+                training_data.push((exp.state.clone(), target_output));
+            }
+
+            // 使用GPU训练
+            if self.main_network.gpu_initialized {
+                println!("[训练] 使用GPU进行训练，批量大小: {}", BATCH_SIZE);
+                let loss = self.main_network.gpu_train_batch(&training_data);
+                println!("[训练] GPU训练完成，Loss: {:.6}", loss);
+            } else {
+                // CPU回退
+                println!("[训练] GPU未启用，使用CPU进行训练，样本数: {}", training_data.len());
+                self.main_network.train(&training_data);
+            }
+
+            // 训练完成后，如果GPU已初始化，确保权重同步
+            if self.main_network.gpu_initialized {
+                println!("[训练] 权重已在GPU上更新，无需额外同步");
+            }
+
+            println!("网络训练完成: Epoch {}, 学习率: {:.6}, 探索率: {:.3}, 准确率: {:.3}",
+                     self.main_network.epoch_count,
+                     self.main_network.learning_rate,
+                     self.exploration_rate,
+                     self.average_reward);
         }
-        println!("Training network with experience replay size: {}", self.experience_replay.len());
-
-        println!("网络训练完成: Epoch {}, 学习率: {:.6}, 探索率: {:.3}, 准确率: {:.3}",
-                 self.main_network.epoch_count,
-                 self.main_network.learning_rate,
-                 self.exploration_rate,
-                 self.average_reward);
-
-        self.main_network.train(&training_data);
-    }
 
     fn estimate_future_value(&mut self, state: &[f32]) -> f32 {
+        // 确保目标网络的GPU资源有效
+        self.target_network.init_gpu_sync();
         let output = self.target_network.forward(state);
         output.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
     }
