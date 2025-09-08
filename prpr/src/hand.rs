@@ -1421,14 +1421,12 @@ impl DeepNeuralNetwork {
 
 
     fn get_or_create_buffer(&mut self, size: usize, usage: wgpu::BufferUsages, label: &str) -> wgpu::Buffer {
-        // 定期清理过期缓冲区
         let now = Instant::now();
         if now.duration_since(self.buffer_cleanup_interval.expect("buffer_cleanup_interval was None")) > Duration::from_secs(30) {
             self.cleanup_expired_buffers();
             self.buffer_cleanup_interval = Some(now);
         }
 
-        // 首先尝试从可复用缓冲区中获取（用途必须完全匹配）
         let key = (size, usage);
         if let Some(buffers) = self.reusable_buffers.get_mut(&key) {
             if let Some(buffer) = buffers.pop() {
@@ -1437,7 +1435,6 @@ impl DeepNeuralNetwork {
             }
         }
 
-        // 然后检查预分配缓冲区（用途必须完全匹配）
         for buffer_option in &self.pre_allocated_input_buffers {
             if let Some((ref prealloc_buffer, prealloc_size, prealloc_usage)) = buffer_option {
                 if *prealloc_size >= size && *prealloc_usage == usage {
@@ -1455,7 +1452,6 @@ impl DeepNeuralNetwork {
             }
         }
 
-        // 如果没有找到，创建新的缓冲区
         let buffer = self.device.as_ref().unwrap().create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: size as u64,
@@ -1470,7 +1466,6 @@ impl DeepNeuralNetwork {
 
     fn pre_allocate_common_buffers(&mut self) {
         if let Some(ref mut pool) = self.buffer_pool {
-            // 预分配常用大小的缓冲区
             let common_sizes = [1024, 2048, 4096, 8192, 16384, 32768];
             for &size in &common_sizes {
                 for &usage in &[
@@ -1931,22 +1926,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
     }
 
     fn calculate_loss(&self) -> f32 {
-        // TODO：这是一个简单的实现，返回最近一次记录的损失
-        // 您可以根据需要实现更复杂的逻辑
         return self.last_loss;
     }
 
     pub fn gpu_train_batch(&mut self, training_data: &[(Vec<f32>, Vec<f32>)]) -> f32 {
-        // 强制使用64的批量大小
         const TARGET_BATCH_SIZE: usize = 64;
 
-        // 确保GPU已初始化
         if !self.gpu_initialized {
             println!("[GPU训练] GPU未初始化，回退到CPU训练");
             return self.calculate_loss();
         }
 
-        // 检查必要的GPU资源
         if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
             println!("[GPU训练] GPU资源不完整，尝试重新初始化...");
             self.init_gpu_sync();
@@ -1955,8 +1945,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             if !self.gpu_initialized || self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
                 println!("[GPU训练] GPU重新初始化失败，回退到CPU训练");
                 self.train(training_data);
-                let loss = self.calculate_loss(); // 或其他计算 loss 的方法
-                return loss; // 直接返回 loss 值
+                let loss = self.calculate_loss();
+                return loss;
             }
         }
 
@@ -2235,7 +2225,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
     /// 在GPU上执行反向传播
     fn gpu_backward(&mut self, inputs: &[&[f32]], outputs: &[Vec<f32>], targets: &[&[f32]], batch_size: usize) {
         if !self.gpu_initialized {
-            // CPU回退 - 使用正确的参数调用backward
             let mut total_gradients = vec![vec![vec![0.0; inputs[0].len()]; outputs[0].len()]; self.layers.len()];
             let mut total_bias_gradients = vec![vec![0.0; outputs[0].len()]; self.layers.len()];
             for i in 0..batch_size {
@@ -2285,44 +2274,42 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
             println!("[GPU训练] 处理反向传播层: {}", layer_idx);
 
-            // 创建当前层的权重梯度和偏置梯度缓冲区
             let weight_gradients_size = input_size * output_size;
             let bias_gradients_size = output_size;
-
             let weight_gradient_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Layer {} Weight Gradient Buffer", layer_idx)),
                 size: (weight_gradients_size * std::mem::size_of::<f32>()) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
-
             let bias_gradient_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("Layer {} Bias Gradient Buffer", layer_idx)),
                 size: (bias_gradients_size * std::mem::size_of::<f32>()) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
-
             weight_gradient_buffers.push(weight_gradient_buffer.clone());
             bias_gradient_buffers.push(bias_gradient_buffer.clone());
-
-            // 获取前一层的梯度（用于下一层反向传播）
             let prev_gradient_buffer = if layer_idx > 0 {
-                gradient_buffers.last().unwrap().clone()
+                let prev_gradient_size = input_size * batch_size;
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Layer {} Gradient Buffer (Writable)", layer_idx - 1)),
+                    size: (prev_gradient_size * std::mem::size_of::<f32>()) as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                buffer
             } else {
-                // 输入层不需要前一层梯度
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Dummy Gradient Buffer"),
-                    size: 1,
+                    size: 256,
                     usage: wgpu::BufferUsages::STORAGE,
                     mapped_at_creation: false,
                 })
             };
-
             let prev_activations_buffer = if layer_idx > 0 {
                 self.layers[layer_idx - 1].activations_buffer.as_ref().unwrap().clone()
             } else {
-                // 输入层没有前一层
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Dummy Activations Buffer"),
                     size: 1,
@@ -2331,8 +2318,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                 })
             };
 
-
-            // 创建反向传播管线（如果不存在）
             let backward_pipeline = match &self.backward_pipelines.get(&layer.activation_func) {
                 Some(pipeline) => pipeline.clone(),
                 None => {
@@ -2433,7 +2418,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                     });
 
                     self.backward_pipelines.insert(layer.activation_func.clone(), pipeline.clone());
-                    // 返回克隆的值，而不是引用
                     &self.backward_pipelines.get(&layer.activation_func).unwrap()
                 }
             };
@@ -2467,6 +2451,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                         binding: 5,
                         resource: self.batch_size_buffer.as_ref().unwrap().as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: prev_activations_buffer.as_entire_binding(),
+                    },
                 ],
                 label: Some(&format!("Backward Bind Group Layer {}", layer_idx)),
             });
@@ -2493,16 +2481,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
             // 为下一层准备梯度
             if layer_idx > 0 {
-                let prev_gradient_size = input_size * batch_size;
-                let prev_gradient_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(&format!("Layer {} Gradient Buffer", layer_idx - 1)),
-                    size: (prev_gradient_size * std::mem::size_of::<f32>()) as u64,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                    mapped_at_creation: false,
-                });
-
-                // 这里应该添加计算前一层梯度的GPU操作
-                // 由于实现细节复杂，简化为占位实现
+                //let prev_gradient_size = input_size * batch_size;
                 gradient_buffers.push(prev_gradient_buffer);
             }
         }

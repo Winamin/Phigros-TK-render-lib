@@ -2,8 +2,9 @@
 @group(0) @binding(1) var<storage, read> weights: array<f32>;
 @group(0) @binding(2) var<storage, read_write> weight_gradients: array<f32>;
 @group(0) @binding(3) var<storage, read_write> bias_gradients: array<f32>;
-@group(0) @binding(4) var<storage, read_write> prev_gradients: array<f32>;
+@group(0) @binding(4) var<storage, read_write> prev_gradients: array<atomic<f32>>;
 @group(0) @binding(5) var<uniform> batch_size: u32;
+@group(0) @binding(6) var<storage, read> prev_activations: array<f32>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
