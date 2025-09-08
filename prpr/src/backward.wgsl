@@ -2,7 +2,7 @@
 @group(0) @binding(1) var<storage, read> weights: array<f32>;
 @group(0) @binding(2) var<storage, read_write> weight_gradients: array<f32>;
 @group(0) @binding(3) var<storage, read_write> bias_gradients: array<f32>;
-@group(0) @binding(4) var<storage, read_write> prev_gradients: array<atomic<f32>>;
+@group(0) @binding(4) var<storage, read_write> prev_gradients: array<atomic<u32>>;
 @group(0) @binding(5) var<uniform> batch_size: u32;
 @group(0) @binding(6) var<storage, read> prev_activations: array<f32>;
 
@@ -36,11 +36,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     bias_gradients[output_idx] = total_bias_grad;
 
     // 计算前一层的梯度
+    // 计算前一层的梯度
     for (var b = 0u; b < batch_size; b = b + 1) {
         let grad = gradients[b * output_size + output_idx];
         for (var i = 0u; i < input_size; i = i + 1) {
             let weight_idx = output_idx * input_size + i;
-            atomicAdd(&prev_gradients[b * input_size + i], grad * weights[weight_idx]);
+            let value_to_add = grad * weights[weight_idx];
+            _ = atomicAdd(&prev_gradients[b * input_size + i], bitcast<u32>(value_to_add));
         }
     }
 }
