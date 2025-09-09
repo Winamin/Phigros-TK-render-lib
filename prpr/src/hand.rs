@@ -535,9 +535,9 @@ struct DeepNeuralNetwork {
     #[serde(skip)]
     weight_decay: f32,
     #[serde(default)]
-    last_loss: f32,          // 用于学习率调整
+    last_loss: f32,
     #[serde(default)]
-    bad_epochs: usize,       // 用于学习率调整
+    bad_epochs: usize,
     epoch_count: u64,
     #[serde(skip)]device: Option<wgpu::Device>,
     #[serde(skip)]queue: Option<wgpu::Queue>,
@@ -1103,7 +1103,7 @@ impl DeepNeuralNetwork {
             learning_rate: 0.001,
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size: 16384,
+            batch_size: 64,
             max_grad_norm: 10.0,
             weight_decay: 0.0001,
             last_loss: f32::INFINITY,
@@ -1555,7 +1555,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                 current_input_buffer = next_input_buffer;
                 current_input_size = output_size;
             } else {
-                current_input_buffer = output_buffer;
+                current_input_buffer = output_buffer.clone();
             }
 
             if i < self.layers.len() - 1 {
@@ -1585,21 +1585,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
         queue.submit(Some(encoder.finish()));
 
-        let buffer_slice = staging_buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let binding = staging_buffer.clone();
+        let buffer_slice = binding.slice(..);
 
-        let map_result = buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
+        let (sender, receiver) = std::sync::mpsc::channel::<Result<(), wgpu::BufferAsyncError>>();
+        let sender_clone = sender.clone();
 
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
+            let _ = sender_clone.send(result);
         });
-
         let _ = device.poll(wgpu::PollType::Wait);
 
+        // 在这里接收并检查回调中的错误
         match receiver.recv() {
             Ok(Ok(())) => {
+                // 映射成功
                 let data = buffer_slice.get_mapped_range();
                 let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
 
@@ -1613,8 +1613,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
                 result
             }
-            _ => {
-                eprintln!("[GPU] Failed to read back result from GPU, falling back to CPU.");
+            Ok(Err(e)) => {
+                // ❗ map_async 回调中报告错误
+                eprintln!("[GPU] Failed to map buffer asynchronously: {:?}", e);
+                for buf in layer_output_buffers.drain(..) { drop(buf); }
+                drop(current_input_buffer);
+                drop(staging_buffer);
+                self.light_forward(input)
+            }
+            Err(_) => {
+                // ❗ 通道接收失败（比如 sender 被 drop）
+                eprintln!("[GPU] Channel receive failed, falling back to CPU.");
                 for buf in layer_output_buffers.drain(..) { drop(buf); }
                 drop(current_input_buffer);
                 drop(staging_buffer);
@@ -2409,6 +2418,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             targets.push(target);
         }
         let outputs = self.gpu_forward_batch(&inputs, batch_size);
+        for layer in &mut self.layers {
+            if layer.inputs.len() != layer.activations.len() {
+                layer.inputs = vec![0.0; layer.activations.len()];
+            }
+        }
         let mut total_gradients: Vec<Vec<Vec<f32>>> = vec![vec![vec![0.0; 0]; 0]; self.layers.len()];
         let mut total_bias_gradients: Vec<Vec<f32>> = vec![vec![0.0; 0]; self.layers.len()];
 
@@ -2437,8 +2451,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
     fn backward(&mut self, output: &[f32], target: &[f32], total_gradients: &mut [Vec<Vec<f32>>], total_bias_gradients: &mut [Vec<f32>]) {
         let mut layer_errors = vec![vec![0.0; 0]; self.layers.len()];
-
-        // 计算输出层误差
         if let Some(last_layer_idx) = self.layers.len().checked_sub(1) {
             let output_errors: Vec<f32> = output.iter()
                 .zip(target.iter())
@@ -2446,6 +2458,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                 .collect();
 
             let last_layer = &self.layers[last_layer_idx];
+            assert_eq!(
+                last_layer.inputs.len(),
+                last_layer.activations.len(),
+                "Output layer inputs/activations length mismatch! Inputs: {}, Activations: {}",
+                last_layer.inputs.len(),
+                last_layer.activations.len()
+            );
+
             let derivatives: Vec<f32> = last_layer.inputs.iter()
                 .map(|&x| DeepNeuralNetwork::activate_derivative(x, &last_layer.activation_func))
                 .collect();
@@ -2458,10 +2478,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             layer_errors[last_layer_idx] = output_layer_errors;
         }
 
-        // 反向传播误差
         for layer_idx in (0..self.layers.len() - 1).rev() {
             let layer = &self.layers[layer_idx];
             let next_layer = &self.layers[layer_idx + 1];
+
+            assert_eq!(
+                layer.inputs.len(),
+                layer.activations.len(),
+                "Layer {} inputs/activations length mismatch! Inputs: {}, Activations: {}",
+                layer_idx,
+                layer.inputs.len(),
+                layer.activations.len()
+            );
+
             let derivatives: Vec<f32> = layer.inputs.iter()
                 .map(|&x| DeepNeuralNetwork::activate_derivative(x, &layer.activation_func))
                 .collect();
@@ -2473,7 +2502,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                         current_errors[i] += error * next_layer.weights[j][i];
                     }
                 }
-                current_errors[i] *= derivatives[i];
+                if i < derivatives.len() {
+                    current_errors[i] *= derivatives[i];
+                } else {
+                    current_errors[i] = 0.0;
+                }
             }
             layer_errors[layer_idx] = current_errors;
         }
@@ -3278,6 +3311,13 @@ impl PhiTKAdvancedAI {
                     println!("[Model] 从文件加载模型: {}, 训练回合数: {}", filepath, ai.training_episodes);
                     ai.rotation = rotation;
                     ai.update_hand_positions();
+
+                    for layer in &mut ai.main_network.layers {
+                        layer.inputs = vec![0.0; layer.activations.len()];
+                    }
+                    for layer in &mut ai.target_network.layers {
+                        layer.inputs = vec![0.0; layer.activations.len()];
+                    }
 
                     // 为 main_network 设置状态，强制重新初始化 GPU
                     ai.main_network.initialization_attempted = false;
@@ -4482,7 +4522,7 @@ struct BatchSize {
 @group(0) @binding(3) var<storage, read> biases: array<f32>;
 @group(0) @binding(4) var<storage, read> batch_size: BatchSize;
 
-@compute @workgroup_size(8)
+@compute @workgroup_size(32)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let output_size = arrayLength(&biases);
     let input_size = arrayLength(&input) / batch_size.size;
