@@ -8,7 +8,7 @@
 // 那么这里按索引读取即可
 @group(0) @binding(3) var<storage, read> params_buf: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
 

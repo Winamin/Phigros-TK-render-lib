@@ -2241,8 +2241,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
         // 为每层创建梯度缓冲区
         let mut gradient_buffers = Vec::new();
-        let mut weight_gradient_buffers = Vec::new();
-        let mut bias_gradient_buffers = Vec::new();
+        //let mut weight_gradient_buffers = Vec::new();
+        //let mut bias_gradient_buffers = Vec::new();
+        self.weight_gradient_buffers.clear();
+        self.bias_gradient_buffers.clear();
 
         // 创建输出层梯度（损失对输出的梯度）
         let output_size = outputs[0].len();
@@ -2288,8 +2290,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
-            weight_gradient_buffers.push(weight_gradient_buffer.clone());
-            bias_gradient_buffers.push(bias_gradient_buffer.clone());
+            self.weight_gradient_buffers.push(weight_gradient_buffer.clone());
+            self.bias_gradient_buffers.push(bias_gradient_buffer.clone());
             let prev_gradient_buffer = if layer_idx > 0 {
                 let prev_gradient_size = input_size * batch_size;
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2312,7 +2314,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             } else {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Dummy Activations Buffer"),
-                    size: 1,
+                    size: 4,
                     usage: wgpu::BufferUsages::STORAGE,
                     mapped_at_creation: false,
                 })
@@ -2375,7 +2377,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                                         binding: 4,
                                         visibility: wgpu::ShaderStages::COMPUTE,
                                         ty: wgpu::BindingType::Buffer {
-                                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                            ty: wgpu::BufferBindingType::Storage { read_only: false },
                                             has_dynamic_offset: false,
                                             min_binding_size: None,
                                         },
@@ -2385,7 +2387,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                                         binding: 5,
                                         visibility: wgpu::ShaderStages::COMPUTE,
                                         ty: wgpu::BindingType::Buffer {
-                                            ty: wgpu::BufferBindingType::Uniform,
+                                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                                             has_dynamic_offset: false,
                                             min_binding_size: None,
                                         },
@@ -3876,6 +3878,9 @@ impl AdvancedFeatureExtractor {
         feature_count: usize,
         device: &wgpu::Device,
     ) -> Vec<f32> {
+        if notes.is_empty() {
+            return Vec::new();
+        }
         // 检查必要的 GPU 资源是否已初始化
         if self.feature_extraction_bind_group_layout.is_none() || self.feature_extraction_pipeline.is_none() {
             eprintln!("[GPU Fallback] Feature extraction pipeline or layout not initialized, falling back to CPU");
