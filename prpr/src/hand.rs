@@ -596,6 +596,7 @@ enum LayerType {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 enum ActivationFunction {
     ReLU,
+    Linear,
     Sigmoid,
     Tanh,
     Swish,
@@ -1052,6 +1053,7 @@ impl DeepNeuralNetwork {
     pub fn activate(x: f32, func: &ActivationFunction) -> f32 {
         match func {
             ActivationFunction::ReLU => x.max(0.0),
+            ActivationFunction::Linear => x,
             ActivationFunction::Sigmoid => 1.0 / (1.0 + (-x).exp()),
             ActivationFunction::Tanh => x.tanh(),
             ActivationFunction::Swish => x * (1.0 / (1.0 + (-x).exp())),
@@ -1292,7 +1294,7 @@ impl DeepNeuralNetwork {
         let mut activation_pipelines = StdHashMap::new();
         let mut activation_bind_group_layouts = StdHashMap::new();
 
-        for func in [ActivationFunction::ReLU, ActivationFunction::Sigmoid,
+        for func in [ActivationFunction::ReLU, ActivationFunction::Linear ,ActivationFunction::Sigmoid,
             ActivationFunction::Tanh, ActivationFunction::Swish, ActivationFunction::GELU, ActivationFunction::BSiLU] {
             let activation_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -1387,6 +1389,7 @@ impl DeepNeuralNetwork {
         // 先用 &str 写所有分支，match 结束后再统一 to_string()
         let fn_body = match func {
             ActivationFunction::ReLU => "return max(val, 0.0);",
+            ActivationFunction::Linear => "return val;",
             ActivationFunction::Sigmoid => "return 1.0 / (1.0 + exp(-val));",
             ActivationFunction::Tanh => "return tanh(val);",
             ActivationFunction::Swish => "return val * (1.0 / (1.0 + exp(-val)));",
@@ -1673,33 +1676,38 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
         })
     }
 
-    fn create_activation_bind_group(
-        &self,
-        layer: &NetworkLayer,
-        buffer: &wgpu::Buffer,
-    ) -> wgpu::BindGroup {
-        let device = self.device.as_ref().unwrap();
-        let layout = self.activation_bind_group_layouts.get(&layer.activation_func).unwrap();
+    pub fn create_activation_bind_group(&self, layer: &NetworkLayer, buffer: &wgpu::Buffer, ) -> wgpu::BindGroup {
+        let device = self.device.as_ref().expect("GPU device not initialized");
+        let layout = self.activation_bind_group_layouts.get(&layer.activation_func).unwrap_or_else(|| {
+            panic!(
+                "卡车丢失 {:?}. \
+            Make sure to initialize a layout for Lineary layers.",
+                layer.activation_func
+            )
+        });
 
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: buffer.as_entire_binding()
+                    resource: buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: self.batch_size_buffer.as_ref().unwrap(),
+                        buffer: self.batch_size_buffer
+                            .as_ref()
+                            .expect("batch_size_buffer not initialized"),
                         offset: 0,
                         size: None,
                     }),
                 },
             ],
-            label: None,
+            label: Some(&format!("activation_bind_group_{:?}", layer.activation_func)),
         })
     }
+
 
     fn gpu_forward_batch(&mut self, inputs: &[&[f32]], actual_batch_size: usize) -> Vec<Vec<f32>> {
         if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
@@ -1846,20 +1854,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
         results
     }
 
-    /*
-    * 构建神经网络架构 4 层全连接层，输入 28 维，输出 4 维
-    * 前两维为左右手决策，第三维为手指
-     */
     fn build_architecture(&mut self) {
         self.add_dense_layer(28, 128, ActivationFunction::BSiLU);
-        self.add_dense_layer(128, 256, ActivationFunction::BSiLU);
-        self.add_dense_layer(256, 256, ActivationFunction::BSiLU);
-        self.add_dense_layer(256, 4, ActivationFunction::BSiLU);
-        println!("Network architecture built with {} layers", self.layers.len());
-        println!("Output size: 4 (L/R decision, finger assignment, confidence)");
+        self.add_attention_layer(128, 128);
+        self.add_residual_layer(128, 128);
+        self.add_lstm_layer_bi(128, 256, true, 8);
+        self.add_residual_layer(256, 256);
+        self.add_dense_layer(256, 512, ActivationFunction::BSiLU);
+        self.add_dense_layer(512, 256, ActivationFunction::BSiLU);
+        //self.add_dense_layer(256, 4, ActivationFunction::Sigmoid);
+        //sigmoid out!
+        //man, what can i say
+        self.add_dense_layer(256, 4, ActivationFunction::Linear);
     }
 
-    //TODO: 归一化输出
     fn normalize_output(&self, raw_output: &[f32]) -> Vec<f32> {
         let mut normalized = raw_output.to_vec();
         if normalized.len() >= 2 {
@@ -1867,7 +1875,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
                 normalized[0] = 0.5;
                 normalized[1] = 0.5;
             } else {
-                let temperature = 1.0;
+                let temperature = 1.4; // 1.4 is the default temperature
                 let left_exp = (normalized[0] / temperature).exp();
                 let right_exp = (normalized[1] / temperature).exp();
                 let sum = left_exp + right_exp;
@@ -1896,7 +1904,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             ActivationFunction::ReLU | ActivationFunction::GELU | ActivationFunction::Swish | ActivationFunction::BSiLU => {
                 (2.0 / input_size as f32).sqrt()
             }
-            ActivationFunction::Sigmoid | ActivationFunction::Tanh => {
+            ActivationFunction::Sigmoid | ActivationFunction::Tanh | ActivationFunction::Linear => {
                 (1.0 / input_size as f32).sqrt()
             }
         };
@@ -2042,6 +2050,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             ActivationFunction::ReLU => {
                 if x > 0.0 { 1.0 } else { 0.0 }
             }
+            ActivationFunction::Linear => 1.0,
             ActivationFunction::Sigmoid => {
                 let sigmoid = 1.0 / (1.0 + (-x).exp());
                 sigmoid * (1.0 - sigmoid)
@@ -3821,8 +3830,8 @@ impl PhiTKAdvancedAI {
                 ));
             }
 
-            println!("[DEBUG] Using network with device: {}",
-                     if self.main_network.device.is_some() { "GPU" } else { "CPU" });
+            //println!("[DEBUG] Using network with device: {}",
+            //         if self.main_network.device.is_some() { "GPU" } else { "CPU" });
 
             // 使用GPU批量推理
             let feature_slices: Vec<&[f32]> = features_batch.iter().map(|v| v.as_slice()).collect();
