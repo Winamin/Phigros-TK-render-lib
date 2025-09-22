@@ -15,6 +15,8 @@ use tracing::warn;
 use crate::core::note::Hand;
 use crate::hand::assign_hands;
 use crate::config::Config;
+use std::sync::{Mutex, Arc};
+use crate::core::CtrlObject;
 
 trait Take {
     fn take_f32(&mut self) -> Result<f32>;
@@ -175,7 +177,8 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32, r: &mut Bpm
             rotation: rotation_anim,
             scale: AnimVector(AnimFloat::fixed(3.91 / 6.), AnimFloat::default()),
         },
-        ctrl_obj: RefCell::default(),
+        //ctrl_obj: RefCell::default(),
+        ctrl_obj: Arc::new(Mutex::new(CtrlObject::default())),
         kind: JudgeLineKind::Normal,
         height,
         incline: AnimFloat::default(),

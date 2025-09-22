@@ -15,6 +15,7 @@ use std::{cell::RefCell, collections::HashMap, num::FpCategory};
 use tracing::debug;
 use crate::core::note::Hand;
 use serde::Deserialize;
+use std::sync::{Mutex, Arc};
 
 pub const FLICK_SPEED_THRESHOLD: f32 = 0.8;
 pub const LIMIT_PERFECT: f32 = 0.08;
@@ -766,7 +767,7 @@ impl Judge {
                                 let incline_sin = line.incline.now_opt().map(|it| it.to_radians().sin()).unwrap_or_default();
                                 mat *= note.now_transform(
                                     res,
-                                    &line.ctrl_obj.borrow_mut(),
+                                    &mut line.ctrl_obj.lock().unwrap(),
                                     (note.height - line.height.now()) / res.aspect_ratio * note.speed,
                                     incline_sin,
                                 );

@@ -18,6 +18,8 @@ use anyhow::bail;
 use crate::core::note::Hand;
 use crate::hand::assign_hands;
 use crate::config::Config;
+use std::sync::{Mutex, Arc};
+use crate::core::CtrlObject;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -242,7 +244,7 @@ fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32, bpm_list: &BpmList, id: us
             translation: parse_move_events(r, pgr.move_events).with_context(|| ptl!("move-events-parse-failed"))?,
             ..Default::default()
         },
-        ctrl_obj: RefCell::default(),
+        ctrl_obj: Arc::new(Mutex::new(CtrlObject::default())),
         kind: JudgeLineKind::Normal,
         height,
         incline: AnimFloat::default(),

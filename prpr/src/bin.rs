@@ -16,7 +16,7 @@ use std::{
     //rc::Rc,
 };
 use crate::core::note::Hand;
-use std::sync::Arc;
+use std::sync::{Mutex, Arc};
 
 pub trait BinaryData: Sized {
     fn read_binary<R: Read>(r: &mut BinaryReader<R>) -> Result<Self>;
@@ -367,7 +367,7 @@ impl BinaryData for JudgeLine {
             0 => JudgeLineKind::Normal,
             1 => JudgeLineKind::Texture(Texture2D::empty().into(), r.read()?),
             2 => JudgeLineKind::Text(r.read()?),
-            3 => JudgeLineKind::Paint(r.read()?, RefCell::default()),
+            3 => JudgeLineKind::Paint(r.read()?, Arc::new(Mutex::new((None, false)))),
             4 => unimplemented!(),
             _ => bail!("invalid judge line kind"),
         };
@@ -381,7 +381,8 @@ impl BinaryData for JudgeLine {
         let show_below = r.read()?;
         let cache = JudgeLineCache::new(&mut notes);
         let attach_ui = UIElement::from_u8(r.read()?);
-        let ctrl_obj = RefCell::new(r.read()?);
+        let ctrl_obj = Arc::new(Mutex::new(r.read()?));
+        //let ctrl_obj = RefCell::new(r.read()?);
         let incline = r.read()?;
         let z_index = r.read()?;
         Ok(Self {
@@ -431,7 +432,8 @@ impl BinaryData for JudgeLine {
         })?;
         w.write_val(self.show_below)?;
         w.write_val(self.attach_ui.map_or(0, |it| it as u8))?;
-        w.write(self.ctrl_obj.borrow().deref())?;
+        //w.write(self.ctrl_obj.borrow().deref())?;
+        w.write(self.ctrl_obj.lock().unwrap().deref())?;
         w.write(&self.incline)?;
         w.write(&self.z_index)?;
         Ok(())

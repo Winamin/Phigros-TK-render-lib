@@ -20,7 +20,7 @@ use crate::ext::SafeTexture;
 use crate::core::note::Hand;
 use crate::hand::assign_hands;
 use crate::config::Config;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub const RPE_WIDTH: f32 = 1350.;
 pub const RPE_HEIGHT: f32 = 900.;
@@ -197,6 +197,9 @@ fn parse_events<T: Tweenable, V: Clone + Into<T>>(
         }
     }
     for e in rpe {
+        let tween_id = RPE_TWEEN_MAP.get(e.easing_type.max(1) as usize)
+            .copied()
+            .unwrap_or(RPE_TWEEN_MAP[0]);
         kfs.push(Keyframe {
             time: r.time(&e.start_time),
             value: e.start.clone().into(),
@@ -206,7 +209,8 @@ fn parse_events<T: Tweenable, V: Clone + Into<T>>(
                     //Arc::clone(&bezier_map[&bezier_key(e)])
                     bezier_map[&bezier_key(e)].clone()
                 } else if e.easing_left.abs() < EPS && (e.easing_right - 1.0).abs() < EPS {
-                    Arc::new(StaticTween(tween))
+                    //Arc::new(StaticTween(tween))
+                    StaticTween::get_arc(tween_id)
                 } else {
                     Arc::new(ClampedTween::new(tween, e.easing_left..e.easing_right))
                 }
@@ -503,12 +507,12 @@ async fn parse_judge_line(
                     .unwrap_or_default()
             },
         },
-        ctrl_obj: RefCell::new(CtrlObject {
+        ctrl_obj: Arc::new(Mutex::new(CtrlObject {
             alpha: parse_ctrl_events(&rpe.alpha_control, "alpha"),
             size: parse_ctrl_events(&rpe.size_control, "size"),
             pos: parse_ctrl_events(&rpe.pos_control, "pos"),
             y: parse_ctrl_events(&rpe.y_control, "y"),
-        }),
+        })),
         height,
         incline: if let Some(events) = rpe.extended.as_ref().and_then(|e| e.incline_events.as_ref()) {
             parse_events(r, events, Some(0.), bezier_map).with_context(|| ptl!("incline-events-parse-failed"))?
@@ -520,7 +524,7 @@ async fn parse_judge_line(
             if let Some(events) = rpe.extended.as_ref().and_then(|e| e.paint_events.as_ref()) {
                 JudgeLineKind::Paint(
                     parse_events(r, events, Some(-1.), bezier_map).with_context(|| ptl!("paint-events-parse-failed"))?,
-                    RefCell::default(),
+                    Arc::new(Mutex::new((None, false))),
                 )
             } else if let Some(extended) = rpe.extended.as_ref() {
                 if let Some(events) = extended.gif_events.as_ref() {

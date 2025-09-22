@@ -57,7 +57,7 @@ pub enum JudgeLineKind {
     Normal,
     Texture(SafeTexture, String),
     Text(Anim<String>),
-    Paint(Anim<f32>, RefCell<(Option<RenderPass>, bool)>),
+    Paint(Anim<f32>, Arc<Mutex<(Option<RenderPass>, bool)>>),
     TextureGif(Anim<f32>, GifFrames, String),
 }
 
@@ -157,7 +157,7 @@ impl GifFrames {
 
 pub struct JudgeLine {
     pub object: Object,
-    pub ctrl_obj: RefCell<CtrlObject>,
+    pub ctrl_obj: Arc<Mutex<CtrlObject>>,
     pub kind: JudgeLineKind,
     pub height: AnimFloat,
     pub incline: AnimFloat,
@@ -266,7 +266,7 @@ impl JudgeLine {
         let rot = self.object.rotation.now();
         self.height.set_time(res.time);
         let line_height = self.height.now();
-        let mut ctrl_obj = self.ctrl_obj.borrow_mut();
+        let mut ctrl_obj = self.ctrl_obj.lock().unwrap();
         self.cache.update_order.retain(|id| {
             let note = &mut self.notes[*id as usize];
             note.update(res, rot, &tr, &mut ctrl_obj, line_height, bpm_list, index);
@@ -337,8 +337,7 @@ impl JudgeLine {
     pub fn render(&self, mut ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
         let color = self.color.now_opt();
-        let painter_state: Rc<RefCell<Option<Painter>>> = Rc::new(RefCell::new(None));
-
+        let painter_state: Arc<Mutex<Option<Painter>>> = Arc::new(Mutex::new(None));
         res.with_model(self.now_transform(res, lines), |res| {
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| {
@@ -448,10 +447,10 @@ impl JudgeLine {
                             });
                         }
                         JudgeLineKind::Paint(anim, _state) => {
-                            let size  = anim.now();
+                            let size = anim.now();
                             let color = color.unwrap_or(WHITE);
                             let alpha = alpha;
-                            let mut opt = painter_state.borrow_mut();
+                            let mut opt = painter_state.lock().unwrap();
                             let painter = opt.get_or_insert_with(|| Painter::new());
                             painter.paint(&mut ui, size, alpha, color);
                         }
@@ -462,7 +461,8 @@ impl JudgeLine {
                 let mut gl = unsafe { get_internal_gl() };
                 let ctx = &mut gl.quad_context;
 
-                let guard = state.borrow_mut();
+                //let guard = state.borrow_mut();
+                let mut guard = state.lock().unwrap();
                 let ready = guard.1;
 
                 if ready {
@@ -484,7 +484,7 @@ impl JudgeLine {
             }
             let mut config = RenderConfig {
                 settings,
-                ctrl_obj: &mut self.ctrl_obj.borrow_mut(),
+                ctrl_obj: &mut *self.ctrl_obj.lock().unwrap(),
                 line_height: self.height.now(),
                 appear_before: f32::INFINITY,
                 invisible_time: f32::INFINITY,
