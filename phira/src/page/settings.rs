@@ -657,10 +657,9 @@ impl DebugList {
         if self.touch_debug_btn.touch(touch, t) {
             config.touch_debug ^= true;
             return Ok(Some(true));
-            }
+        }
         if let wt @ Some(_) = self.chart_ratio_slider.touch(touch, t, &mut config.chart_ratio) {
             return Ok(wt);
-        }
         }
         Ok(None)
     }
