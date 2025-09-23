@@ -9,7 +9,7 @@ use crate::{
 use anyhow::{Context, Result};
 use macroquad::prelude::{Color, Vec2};
 use serde::Deserialize;
-use std::{collections::HashMap, rc::Rc};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // serde is weird...

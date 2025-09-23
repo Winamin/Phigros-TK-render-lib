@@ -10,7 +10,6 @@ use crate::{
     judge::JudgeStatus,
 };
 use anyhow::{bail, Context, Result};
-use std::cell::RefCell;
 use tracing::warn;
 use crate::core::note::Hand;
 use crate::hand::assign_hands;
@@ -219,7 +218,6 @@ pub fn parse_pec_with_list(source: &str, extra: ChartExtra, _r: &mut BpmList) ->
             ensure_bpm(&mut r, &mut bpm_list)
         };
     }
-    #[warn(unused_macros)]
     macro_rules! last_note {
         () => {{
             let Some(last_line) = last_line else {

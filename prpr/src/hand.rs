@@ -12,12 +12,12 @@ use std::fs;
 use std::panic;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
 use wgpu;
 use wgpu::util::DeviceExt;
-use crossbeam_channel::{unbounded, Receiver as CbReceiver, Sender as CbSender, TryRecvError, TrySendError};
+use crossbeam_channel::{unbounded, Receiver as CbReceiver, Sender as CbSender};
 use rayon::ThreadPool;
 use std::hash::{Hash, Hasher};
 
@@ -95,29 +95,6 @@ fn calculate_checksum(notes: &[Note]) -> u64 {
         std::mem::discriminant(&note.hand).hash(&mut hasher);
     }
     hasher.finish()
-}
-
-fn validate_notes_consistency(original: &[Note], updated: &[Note]) -> bool {
-    if original.len() != updated.len() {
-        return false;
-    }
-    for (orig, upd) in original.iter().zip(updated.iter()) {
-        if (orig.time - upd.time).abs() > 0.001 {
-            return false;
-        }
-        if std::mem::discriminant(&orig.kind) != std::mem::discriminant(&upd.kind) {
-            return false;
-        }
-        let orig_x = orig.object.translation.0.now();
-        let orig_y = orig.object.translation.1.now();
-        let upd_x = upd.object.translation.0.now();
-        let upd_y = upd.object.translation.1.now();
-        let pos_diff = ((orig_x - upd_x).powi(2) + (orig_y - upd_y).powi(2)).sqrt();
-        if pos_diff > 100.0 {
-            return false;
-        }
-    }
-    true
 }
 
 fn match_and_merge_notes(original: &mut [Note], updated: &[Note]) -> bool {
@@ -239,7 +216,7 @@ fn start_ai_worker_if_needed() {
                             checksum,
                         };
 
-                        if let Err(e) = tx_resp.send(resp) {
+                        if let Err(_e) = tx_resp.send(resp) {
                             //eprintln!("Failed to send AI response for id={} : {:?}", req.id, e);
                         } else {
                             //println!("AI worker: sent response for id={}", req.id);
@@ -380,7 +357,7 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
             };
 
             if let Some(tx) = AI_REQ_TX.get() {
-                if let Err(e) = tx.send(req) {
+                if let Err(_e) = tx.send(req) {
                     //eprintln!("Failed to send AI request id={} : {:?}", request_id, e);
                     line_state.pending_requests.remove(&request_id);
                 }
@@ -559,8 +536,10 @@ struct NetworkLayer {
     weights: Vec<Vec<f32>>,
     #[serde(default)]
     biases: Vec<f32>,
+
     #[serde(default)]
     activations: Vec<f32>,
+
     #[serde(default)]
     gradients: Vec<f32>,
     #[serde(default)]
@@ -731,220 +710,36 @@ impl std::ops::Mul<f32> for Vector2 {
     }
 }
 
-impl Finger {
-    pub fn to_hand(&self) -> Hand {
-        match self {
-            Finger::LeftIndex | Finger::LeftMiddle => Hand::Left,
-            Finger::RightIndex | Finger::RightMiddle => Hand::Right,
-        }
-    }
-
-    pub fn is_index(&self) -> bool {
-        matches!(self, Finger::LeftIndex | Finger::RightIndex)
-    }
-}
-
-impl FingerState {
-    fn new(finger: Finger, initial_pos: Vector2) -> Self {
-        Self {
-            finger,
-            position: initial_pos,
-            velocity: Vector2::new(0.0, 0.0),
-            last_time: -1.0,
-            fatigue: 0.0,
-            confidence: 1.0,
-            success_streak: 0,
-            total_actions: 0,
-            performance_score: 1.0,
-            is_busy: false,
-            busy_until: -1.0,
-        }
-    }
-
-    pub fn clean(&mut self) {
-        self.position.clean();
-        self.velocity.clean();
-        if !self.last_time.is_finite() {
-            self.last_time = -1.0;
-        }
-        if !self.fatigue.is_finite() {
-            self.fatigue = 0.0;
-        }
-        if !self.confidence.is_finite() {
-            self.confidence = 1.0;
-        }
-        if !self.performance_score.is_finite() {
-            self.performance_score = 1.0;
-        }
-        if !self.busy_until.is_finite() {
-            self.busy_until = -1.0;
-        }
-    }
-
-    fn update_state(&mut self, new_pos: Vector2, time: f32, success: bool, note_kind: &NoteKind) {
-        let time_diff = time - self.last_time;
-
-        if time_diff > 0.001 {
-            let distance = new_pos.distance_to(&self.position);
-            let new_velocity = (new_pos - self.position) * (1.0 / time_diff);
-            self.velocity = self.velocity * 0.7 + new_velocity * 0.3;
-
-            // 疲劳计算
-            let base_movement_cost = distance * 0.12;
-            let speed_cost = (self.velocity.magnitude() / 10.0).powf(1.5) * 0.08;
-            let time_factor = if time_diff < 0.1 { 2.0 } else { 1.0 };
-
-            let total_cost = (base_movement_cost + speed_cost) * time_factor;
-            self.fatigue = (self.fatigue + total_cost).min(1.0);
-
-            // 动态恢复率，基于休息时间
-            let rest_factor = if time_diff > 0.3 { 2.0 } else { 1.0 };
-            let recovery = (time_diff * 0.25 * rest_factor).min(0.3);
-            self.fatigue = (self.fatigue - recovery).max(0.0);
-        }
-
-        // 繁忙状态更新
-        let busy_duration = match note_kind {
-            NoteKind::Hold { end_time, .. } => (end_time - time + 0.1).max(0.15),
-            NoteKind::Drag => 0.25,
-            NoteKind::Flick => 0.2,
-            NoteKind::Click => 0.12,
-        };
-
-        self.is_busy = true;
-        self.busy_until = time + busy_duration;
-
-        // 信心更新
-        self.total_actions += 1;
-        if success {
-            self.success_streak += 1;
-            // 信心增长有上限，避免过于自信.jpg
-            let confidence_gain = (0.01 * (1.0 - self.confidence)).max(0.002);
-            self.confidence = (self.confidence + confidence_gain).min(0.95);
-        } else {
-            self.success_streak = 0;
-            // 失败时信心下降更明显
-            let confidence_loss = (0.03 + self.confidence * 0.01).max(0.01);
-            self.confidence = (self.confidence - confidence_loss).max(0.15);
-        }
-
-        // 性能评分计算改进
-        let recent_window = 15.0_f32.min(self.total_actions as f32);
-        let recent_success_rate = if recent_window > 0.0 {
-            self.success_streak as f32 / recent_window
-        } else {
-            0.5
-        };
-
-        // 添加随机波动，模拟真实表现
-        let randomness = (fastrand::f32() - 0.5) * 0.1;
-        self.performance_score = (
-            recent_success_rate * 0.4 +
-                self.confidence * 0.35 +
-                (1.0 - self.fatigue) * 0.25 +
-                randomness
-        ).clamp(0.1, 0.95);
-
-        self.position = new_pos;
-        self.last_time = time;
-    }
-
-    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32,
-                                  current_time: f32, note_kind: &NoteKind, note_duration: f32) -> f32 {
-        // 繁忙状态检查
-        let is_available = current_time >= self.busy_until;
-        let distance = target_pos.distance_to(&self.position);
-        let time_diff = time - self.last_time;
-
-        let mut score = 0.5; // 基础分数
-
-        // 繁忙惩罚
-        if !is_available {
-            let busy_penalty = (self.busy_until - current_time).min(1.0) * 0.8;
-            score -= busy_penalty;
-        }
-
-        // 位置偏好 - 增加梯度变化
-        let position_weight = match self.finger.to_hand() {
-            Hand::Left => {
-                if target_pos.x < -0.25 {
-                    0.35 + ((-0.25 - target_pos.x) * 0.5).min(0.15)
-                } else if target_pos.x > 0.0 {
-                    -0.15 - (target_pos.x * 0.8).min(0.4)
-                } else {
-                    // 中性区域的线性过渡
-                    0.35 * ((-target_pos.x) / 0.25)
-                }
-            }
-            Hand::Right => {
-                if target_pos.x > 0.15 {
-                    0.4 + ((target_pos.x - 0.15) * 0.6).min(0.2)
-                } else if target_pos.x < -0.15 {
-                    -0.25 - ((-target_pos.x - 0.15) * 0.9).min(0.35)
-                } else {
-                    // 中性区域
-                    0.1 + (target_pos.x / 0.15) * 0.3
-                }
-            }
-        };
-        score += position_weight;
-
-        // 距离评分
-        let distance_score = if distance < 0.1 {
-            0.9 - distance * 2.0
-        } else if distance < 0.3 {
-            0.7 - (distance - 0.1) * 1.5
-        } else if distance < 0.6 {
-            0.4 - (distance - 0.3) * 0.8
-        } else {
-            0.1 - (distance - 0.6).min(0.4) * 0.25
-        };
-        score *= distance_score.max(0.1);
-
-        // 疲劳影响 - 非线性
-        let fatigue_penalty = self.fatigue.powf(1.5) * 0.35;
-        score *= (1.0 - fatigue_penalty);
-
-        // 时间间隔评分
-        if time_diff > 0.001 {
-            let time_score = if time_diff < 0.06 {
-                0.3 + (time_diff / 0.06) * 0.4 // 过快惩罚
-            } else if time_diff < 0.2 {
-                0.7 + ((time_diff - 0.06) / 0.14) * 0.25 // 最佳区间
-            } else if time_diff < 0.5 {
-                0.95 - ((time_diff - 0.2) / 0.3) * 0.15 // 稍慢
-            } else {
-                0.8 + ((time_diff - 0.5).min(0.5) / 0.5) * 0.15 // 很慢反而好
-            };
-            score *= time_score;
-        }
-
-        if matches!(note_kind, NoteKind::Hold { .. }) {
-            if self.is_busy {
-                score *= 0.6;
-            }
-        }
-
-        let performance_factor = 0.5 + self.performance_score * 0.5;
-        score *= performance_factor;
-
-        let difficulty_factor = 1.0 - (note_difficulty - 1.0).max(0.0) * (1.0 - self.confidence) * 0.15;
-        score *= difficulty_factor;
-
-        let randomness = (fastrand::f32() - 0.5) * 0.05;
-        score += randomness;
-
-        score.clamp(0.0, 1.0)
-    }
-    fn update_busy_status(&mut self, current_time: f32) {
-        if current_time >= self.busy_until {
-            self.is_busy = false;
-            self.busy_until = -1.0;
-        }
-    }
-}
-
 impl DeepNeuralNetwork {
+    fn new() -> Self {
+        let mut network = Self {
+            layers: Vec::new(),
+            learning_rate: 0.0001,
+            momentum: 0.9,
+            dropout_rate: 0.1,
+            batch_size: 1024,
+            max_grad_norm: 5.0,
+            weight_decay: 0.0001,
+            last_loss: f32::INFINITY,
+            bad_epochs: 0,
+            epoch_count: 0,
+            device: None,
+            queue: None,
+            matmul_pipeline: None,
+            matmul_bind_group_layout: None,
+            activation_pipelines: StdHashMap::new(),
+            activation_bind_group_layouts: StdHashMap::new(),
+            gpu_initialized: false,
+            batch_size_buffer: None,
+            initialization_attempted: false,
+            initialization_failed: false,
+        };
+
+        network.build_architecture();
+        network.init_gpu_sync();
+        network
+    }
+
     pub fn clean(&mut self) {
         for layer in &mut self.layers {
             for weights in &mut layer.weights {
@@ -1087,72 +882,54 @@ impl DeepNeuralNetwork {
         current_input
     }
 
-    fn new() -> Self {
-        let mut network = Self {
-            layers: Vec::new(),
-            learning_rate: 0.001,
-            momentum: 0.9,
-            dropout_rate: 0.1,
-            batch_size: 16384,
-            max_grad_norm: 5.0,
-            weight_decay: 0.0001,
-            last_loss: f32::INFINITY,
-            bad_epochs: 0,
-            epoch_count: 0,
-            device: None,
-            queue: None,
-            matmul_pipeline: None,
-            matmul_bind_group_layout: None,
-            activation_pipelines: StdHashMap::new(),
-            activation_bind_group_layouts: StdHashMap::new(),
-            gpu_initialized: false,
-            batch_size_buffer: None,
-            initialization_attempted: false,
-            initialization_failed: false,
-        };
-
-        network.build_architecture();
-        network.init_gpu_sync();
-        network
-    }
 
     pub fn init_gpu_sync(&mut self) {
         if self.gpu_initialized {
+            println!("[GPU] Already initialized, skipping");
             return;
         }
 
         if self.initialization_attempted && self.initialization_failed {
+            println!("[GPU] Previous initialization failed, skipping");
             return;
         }
 
-        if self.device.is_some() && self.queue.is_some() && self.matmul_pipeline.is_some() {
-            self.gpu_initialized = true;
-            println!("[GPU/CPU SWITCH] GPU already initialized and ready.");
-            return;
+        // 如果是第一次初始化，强制使用 GPU，失败则 panic
+        if !self.initialization_attempted {
+            self.initialization_attempted = true;
+
+            let rt = tokio::runtime::Runtime::new()
+                .expect("Failed to create Tokio runtime for GPU initialization");
+
+            let init_result = rt.block_on(async {
+                self.init_gpu().await
+            });
+
+            let resources_valid = self.device.is_some()
+                && self.queue.is_some()
+                && self.batch_size_buffer.is_some()
+                && self.matmul_pipeline.is_some();
+
+            if init_result && resources_valid {
+                self.gpu_initialized = true;
+                self.initialization_failed = false;
+                println!("[GPU] GPU initialization successful on first attempt");
+            } else {
+                self.initialization_failed = true;
+                // 记录缺失的资源
+                let missing = format!("device: {}, queue: {}, batch_size: {}, pipeline: {}",
+                                      self.device.is_some(),
+                                      self.queue.is_some(),
+                                      self.batch_size_buffer.is_some(),
+                                      self.matmul_pipeline.is_some()
+                );
+                eprintln!("[GPU] GPU initialization partially failed - missing resources: {}", missing);
+                //panic!("[GPU] GPU initialization failed on first attempt - panic as requested");
+            }
         }
-        self.initialization_attempted = true;
+        println!("[GPU INIT CHECK] gpu_initialized={}, device.is_some()={}",
+                 self.gpu_initialized, self.device.is_some());
 
-        let rt = tokio::runtime::Runtime::new()
-            .expect("Failed to create Tokio runtime for GPU initialization");
-
-        let init_result = rt.block_on(async {
-            self.init_gpu().await
-        });
-
-        println!("[GPU/CPU SWITCH] GPU initialization completed (init_result = {} ).", init_result);
-
-        if init_result {
-            self.gpu_initialized = true;
-            self.initialization_failed = false;
-        } else {
-            self.initialization_failed = true;
-            println!("[GPU/CPU SWITCH] GPU initialization marked failed.");
-            self.device = None;
-            self.queue = None;
-            self.matmul_pipeline = None;
-            self.activation_pipelines.clear();
-            self.activation_bind_group_layouts.clear();
-        }
     }
 
     pub async fn init_gpu(&mut self) -> bool {
@@ -1177,6 +954,12 @@ impl DeepNeuralNetwork {
                 return false;
             }
         };
+
+        let adapter_info = adapter.get_info();
+        println!(
+            "[GPU/CPU SWITCH] Adapter chosen: name=\"{}\", backend={:?}, vendor=0x{:x}, device=0x{:x}",
+            adapter_info.name, adapter_info.backend, adapter_info.vendor, adapter_info.device
+        );
 
         let (device, queue) = match adapter.request_device(&wgpu::DeviceDescriptor::default()).await {
             Ok((d, q)) => (d, q),
@@ -1395,13 +1178,17 @@ impl DeepNeuralNetwork {
         if !self.gpu_initialized {
             self.init_gpu_sync();
             if !self.gpu_initialized {
+                println!("回退到了CPU");
                 return self.light_forward(input);
             }
         }
 
         let device = match self.device.as_ref() {
             Some(d) => d,
-            None => return self.light_forward(input),
+            None => {
+                println!("[GPU DEBUG] 'device' is None. FALLING BACK TO CPU (light_forward).");
+                return self.light_forward(input);
+            },
         };
 
         let queue = self.queue.as_ref().unwrap();
@@ -1560,6 +1347,7 @@ impl DeepNeuralNetwork {
             }
             _ => {
                 // 失败时回退到CPU
+                println!("[GPU DEBUG] Buffer mapping failed. FALLING BACK TO CPU (light_forward).");
                 self.light_forward(input)
             }
         }
@@ -1635,7 +1423,9 @@ impl DeepNeuralNetwork {
     }
 
     fn gpu_forward_batch(&mut self, inputs: &[&[f32]], actual_batch_size: usize) -> Vec<Vec<f32>> {
+        println!("[GPU BATCH DEBUG] Processing batch with {} samples.", actual_batch_size);
         if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
+            println!("[GPU DEBUG] Critical GPU resource (device/queue/pipeline) is None. FALLING BACK TO CPU.");
             return inputs.iter().map(|input| self.light_forward(input)).collect();
         }
 
@@ -2105,22 +1895,106 @@ impl DeepNeuralNetwork {
         output
     }
 
+    fn monitor_gradients(&self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_idx: usize) -> bool {
+        let mut all_gradients_zero = true;
+        let mut has_nan_or_inf = false;
+
+        'check_all: for (layer_idx, layer_grad) in gradients.iter().enumerate() {
+            for (i, row) in layer_grad.iter().enumerate() {
+                for (j, &g) in row.iter().enumerate() {
+                    if g.is_nan() || g.is_infinite() {
+                        has_nan_or_inf = true;
+                        eprintln!("[Gradient Monitor] NaN/Inf detected at layer {}, weight[{}][{}]", layer_idx, i, j);
+                        break 'check_all;
+                    }
+                    if g.abs() > 1e-8 {
+                        all_gradients_zero = false;
+                    }
+                }
+            }
+        }
+
+        'check_biases: for (layer_idx, bias_grad) in bias_gradients.iter().enumerate() {
+            for (i, &g) in bias_grad.iter().enumerate() {
+                if g.is_nan() || g.is_infinite() {
+                    has_nan_or_inf = true;
+                    eprintln!("[Gradient Monitor] NaN/Inf detected at layer {}, bias[{}]", layer_idx, i);
+                    break 'check_biases;
+                }
+                if g.abs() > 1e-8 {
+                    all_gradients_zero = false;
+                }
+            }
+        }
+
+        if has_nan_or_inf {
+            eprintln!("[Gradient Monitor] Batch {} aborted due to invalid gradients (NaN/Inf).", batch_idx);
+            return false;
+        }
+
+        if all_gradients_zero {
+            eprintln!("[Gradient Monitor] Warning: All gradients are zero in batch {}. This may indicate a problem.", batch_idx);
+            // 我们不立即返回 false，而是让后续的 `apply_gradients` 中的修复逻辑来处理。
+            // 因为零梯度可能是暂时的，修复后下个batch可能就正常了。
+        }
+
+        true // 梯度健康，可以继续
+    }
+
+    fn get_momentum_range(&self) -> (f32, f32) {
+        let mut min_momentum = f32::INFINITY;
+        let mut max_momentum = f32::NEG_INFINITY;
+
+        // 检查权重动量
+        for layer in &self.layers {
+            for row in &layer.momentum_weights {
+                for &m in row {
+                    min_momentum = min_momentum.min(m);
+                    max_momentum = max_momentum.max(m);
+                }
+            }
+            // 检查偏置动量
+            for &m in &layer.momentum_biases {
+                min_momentum = min_momentum.min(m);
+                max_momentum = max_momentum.max(m);
+            }
+        }
+
+        // 如果没有找到有效值，返回0
+        if min_momentum.is_infinite() {
+            min_momentum = 0.0;
+        }
+        if max_momentum.is_infinite() {
+            max_momentum = 0.0;
+        }
+
+        (min_momentum, max_momentum)
+    }
+
     fn train(&mut self, training_data: &[(Vec<f32>, Vec<f32>)]) {
         if training_data.is_empty() {
             eprintln!("警告: 训练数据为空，跳过训练");
             return;
         }
 
-        // 初始化梯度累积
-        let mut total_gradients: Vec<Vec<Vec<f32>>> = vec![vec![]; self.layers.len()];
-        let mut total_bias_gradients: Vec<Vec<f32>> = vec![vec![]; self.layers.len()];
-
-        // 准备梯度累积结构
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            if !layer.weights.is_empty() {
-                total_gradients[layer_idx] = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
+        // 确保动量缓冲区结构正确 (原有代码保持不变)
+        for layer in &mut self.layers {
+            if !layer.weights.is_empty() && !layer.momentum_weights.is_empty() {
+                if layer.momentum_weights.len() != layer.weights.len() {
+                    layer.momentum_weights = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
+                } else {
+                    for i in 0..layer.momentum_weights.len() {
+                        if layer.momentum_weights[i].len() != layer.weights[i].len() {
+                            layer.momentum_weights[i] = vec![0.0; layer.weights[i].len()];
+                        }
+                    }
+                }
+            } else if !layer.weights.is_empty() {
+                layer.momentum_weights = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
             }
-            total_bias_gradients[layer_idx] = vec![0.0; layer.biases.len()];
+            if layer.momentum_biases.len() != layer.biases.len() {
+                layer.momentum_biases = vec![0.0; layer.biases.len()];
+            }
         }
 
         let batch_count = (training_data.len() + self.batch_size - 1) / self.batch_size;
@@ -2130,40 +2004,34 @@ impl DeepNeuralNetwork {
             let start_idx = batch_idx * self.batch_size;
             let end_idx = start_idx + self.batch_size.min(training_data.len() - start_idx);
             let batch = &training_data[start_idx..end_idx];
-            let batch_size = batch.len() as f32;
-            for layer_grad in &mut total_gradients {
-                for row in layer_grad {
-                    for g in row {
-                        *g = 0.0;
-                    }
-                }
-            }
-            for bias_grad in &mut total_bias_gradients {
-                for g in bias_grad {
-                    *g = 0.0;
-                }
-            }
+
+            // >>>>>>>>>>>>> 核心修改：使用 train_batch 替代单样本循环 <<<<<<<<<<<<<
+            // 首先，计算这个批次的总损失
+            let mut batch_loss = 0.0;
             for (input, target) in batch {
-                let output = self.forward(input);
+                let output = self.light_forward(input); // 临时用CPU计算损失，或者您也可以实现一个GPU版的损失计算
                 let loss: f32 = output.iter().zip(target.iter())
                     .map(|(o, t)| (o - t).powi(2))
                     .sum();
-                total_loss += loss;
-                self.backward(&output, target, &mut total_gradients, &mut total_bias_gradients);
+                batch_loss += loss;
             }
+            total_loss += batch_loss;
 
-            self.apply_weight_decay();
-            self.clip_gradients(&mut total_gradients, &mut total_bias_gradients);
-            self.apply_gradients(&total_gradients, &total_bias_gradients, batch_size as usize);
-        }
-        let avg_loss = total_loss / training_data.len() as f32;
-        self.adapt_learning_rate(avg_loss);
-        self.epoch_count += 1;
-        if self.epoch_count % 10 == 0 {
-            let (min_weight, max_weight) = self.get_weight_range();
-            let (min_grad, max_grad) = self.get_gradient_range(&total_gradients);
-            println!("[训练状态] Epoch: {}, Loss: {:.6}, LR: {:.6}, 权重范围 [{:.4}, {:.4}], 梯度范围 [{:.4}, {:.4}]",
-                     self.epoch_count, avg_loss, self.learning_rate, min_weight, max_weight, min_grad, max_grad);
+            // 调用批量训练方法，它内部会使用 gpu_forward_batch
+            self.train_batch(batch);
+
+            // >>>>>>>>>>>>> 修改日志打印 <<<<<<<<<<<<<
+            if batch_idx == batch_count - 1 {
+                let avg_loss = total_loss / training_data.len() as f32;
+                self.adapt_learning_rate(avg_loss);
+                self.epoch_count += 1;
+                if self.epoch_count % 10 == 0 {
+                    let (min_weight, max_weight) = self.get_weight_range();
+                    let (min_momentum, max_momentum) = self.get_momentum_range();
+                    println!("[训练状态] Epoch: {}, Loss: {:.6}, LR: {:.6}, 权重范围 [{:.4}, {:.4}], 动量范围 [{:.4}, {:.4}]",
+                             self.epoch_count, avg_loss, self.learning_rate, min_weight, max_weight, min_momentum, max_momentum);
+                }
+            }
         }
     }
 
@@ -2301,6 +2169,7 @@ impl DeepNeuralNetwork {
         (min_grad, max_grad)
     }
 
+
     fn train_batch(&mut self, batch: &[(Vec<f32>, Vec<f32>)]) {
         let batch_size = batch.len();
 
@@ -2340,14 +2209,20 @@ impl DeepNeuralNetwork {
 
     fn backward(&mut self, output: &[f32], target: &[f32], total_gradients: &mut [Vec<Vec<f32>>], total_bias_gradients: &mut [Vec<f32>]) {
         let mut layer_errors = vec![vec![0.0; 0]; self.layers.len()];
-
         if let Some(last_layer_idx) = self.layers.len().checked_sub(1) {
             let output_errors: Vec<f32> = output.iter()
                 .zip(target.iter())
                 .map(|(o, t)| 2.0 * (o - t))
                 .collect();
+
+            if output_errors.iter().any(|&e| !e.is_finite()) {
+                eprintln!("[Gradient Safety] NaN/Inf detected in output errors, skipping backward pass for this sample.");
+                return;
+            }
+
             layer_errors[last_layer_idx] = output_errors;
         }
+
 
         for layer_idx in (0..self.layers.len()).rev() {
             if layer_idx < self.layers.len() - 1 {
@@ -2394,7 +2269,8 @@ impl DeepNeuralNetwork {
 
     fn apply_gradients(&mut self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_size: usize) {
         let batch_size_f = batch_size as f32;
-        const MAX_GRAD: f32 = 5.0;
+        const MAX_GRAD: f32 = 1.0; // <<<--- 将最大梯度限制从 5.0 降低到 1.0 或 0.5
+        const MAX_WEIGHT: f32 = 10.0; // <<<--- 新增：权重的最大绝对值限制
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             for (i, weight_row) in layer.weights.iter_mut().enumerate() {
@@ -2402,15 +2278,21 @@ impl DeepNeuralNetwork {
                     if i < gradients[layer_idx].len() && j < gradients[layer_idx][i].len() {
                         let mut grad = gradients[layer_idx][i][j] / batch_size_f;
 
-                        if grad > MAX_GRAD {
-                            grad = MAX_GRAD;
-                        } else if grad < -MAX_GRAD {
-                            grad = -MAX_GRAD;
+                        if !grad.is_finite() {
+                            eprintln!("[Gradient Safety] NaN/Inf gradient detected at layer {}, weight[{}][{}], setting to 0.", layer_idx, i, j);
+                            grad = 0.0;
                         }
+                        grad = grad.clamp(-MAX_GRAD, MAX_GRAD);
 
                         layer.momentum_weights[i][j] =
                             self.momentum * layer.momentum_weights[i][j] - self.learning_rate * grad;
                         *weight += layer.momentum_weights[i][j];
+
+                        if !weight.is_finite() {
+                            eprintln!("[Gradient Safety] NaN/Inf weight detected at layer {}, weight[{}][{}], setting to 0.", layer_idx, i, j);
+                            *weight = 0.0;
+                        }
+                        *weight = weight.clamp(-MAX_WEIGHT, MAX_WEIGHT);
                     }
                 }
             }
@@ -2419,15 +2301,20 @@ impl DeepNeuralNetwork {
                 if i < bias_gradients[layer_idx].len() {
                     let mut grad = bias_gradients[layer_idx][i] / batch_size_f;
 
-                    if grad > MAX_GRAD {
-                        grad = MAX_GRAD;
-                    } else if grad < -MAX_GRAD {
-                        grad = -MAX_GRAD;
+                    if !grad.is_finite() {
+                        eprintln!("[Gradient Safety] NaN/Inf gradient detected at layer {}, bias[{}], setting to 0.", layer_idx, i);
+                        grad = 0.0;
                     }
+                    grad = grad.clamp(-MAX_GRAD, MAX_GRAD);
 
                     layer.momentum_biases[i] =
                         self.momentum * layer.momentum_biases[i] - self.learning_rate * grad;
                     *bias += layer.momentum_biases[i];
+                    if !bias.is_finite() {
+                        eprintln!("[Gradient Safety] NaN/Inf bias detected at layer {}, bias[{}], setting to 0.", layer_idx, i);
+                        *bias = 0.0;
+                    }
+                    *bias = bias.clamp(-MAX_WEIGHT, MAX_WEIGHT);
                 }
             }
         }
@@ -2442,6 +2329,213 @@ impl DeepNeuralNetwork {
             queue.write_buffer(weights_buf, 0, bytemuck::cast_slice(&weights_flat));
             queue.write_buffer(biases_buf, 0, bytemuck::cast_slice(&layer.biases));
         }
+    }
+}
+
+impl Finger {
+    pub fn to_hand(&self) -> Hand {
+        match self {
+            Finger::LeftIndex | Finger::LeftMiddle => Hand::Left,
+            Finger::RightIndex | Finger::RightMiddle => Hand::Right,
+        }
+    }
+
+    pub fn is_index(&self) -> bool {
+        matches!(self, Finger::LeftIndex | Finger::RightIndex)
+    }
+}
+
+impl FingerState {
+    fn new(finger: Finger, initial_pos: Vector2) -> Self {
+        Self {
+            finger,
+            position: initial_pos,
+            velocity: Vector2::new(0.0, 0.0),
+            last_time: -1.0,
+            fatigue: 0.0,
+            confidence: 1.0,
+            success_streak: 0,
+            total_actions: 0,
+            performance_score: 1.0,
+            is_busy: false,
+            busy_until: -1.0,
+        }
+    }
+
+    pub fn clean(&mut self) {
+        self.position.clean();
+        self.velocity.clean();
+        if !self.last_time.is_finite() {
+            self.last_time = -1.0;
+        }
+        if !self.fatigue.is_finite() {
+            self.fatigue = 0.0;
+        }
+        if !self.confidence.is_finite() {
+            self.confidence = 1.0;
+        }
+        if !self.performance_score.is_finite() {
+            self.performance_score = 1.0;
+        }
+        if !self.busy_until.is_finite() {
+            self.busy_until = -1.0;
+        }
+    }
+
+    fn update_state(&mut self, new_pos: Vector2, time: f32, success: bool, note_kind: &NoteKind) {
+        let time_diff = time - self.last_time;
+
+        if time_diff > 0.001 {
+            let distance = new_pos.distance_to(&self.position);
+            let new_velocity = (new_pos - self.position) * (1.0 / time_diff);
+            self.velocity = self.velocity * 0.7 + new_velocity * 0.3;
+
+            // 疲劳计算
+            let base_movement_cost = distance * 0.12;
+            let speed_cost = (self.velocity.magnitude() / 10.0).powf(1.5) * 0.08;
+            let time_factor = if time_diff < 0.1 { 2.0 } else { 1.0 };
+
+            let total_cost = (base_movement_cost + speed_cost) * time_factor;
+            self.fatigue = (self.fatigue + total_cost).min(1.0);
+
+            // 动态恢复率，基于休息时间
+            let rest_factor = if time_diff > 0.3 { 2.0 } else { 1.0 };
+            let recovery = (time_diff * 0.25 * rest_factor).min(0.3);
+            self.fatigue = (self.fatigue - recovery).max(0.0);
+        }
+
+        // 繁忙状态更新
+        let busy_duration = match note_kind {
+            NoteKind::Hold { end_time, .. } => (end_time - time + 0.1).max(0.15),
+            NoteKind::Drag => 0.25,
+            NoteKind::Flick => 0.2,
+            NoteKind::Click => 0.12,
+        };
+
+        self.is_busy = true;
+        self.busy_until = time + busy_duration;
+
+        // 信心更新
+        self.total_actions += 1;
+        if success {
+            self.success_streak += 1;
+            // 信心增长有上限，避免过于自信.jpg
+            let confidence_gain = (0.01 * (1.0 - self.confidence)).max(0.002);
+            self.confidence = (self.confidence + confidence_gain).min(0.95);
+        } else {
+            self.success_streak = 0;
+            // 失败时信心下降更明显
+            let confidence_loss = (0.03 + self.confidence * 0.01).max(0.01);
+            self.confidence = (self.confidence - confidence_loss).max(0.15);
+        }
+
+        // 性能评分计算改进
+        let recent_window = 15.0_f32.min(self.total_actions as f32);
+        let recent_success_rate = if recent_window > 0.0 {
+            self.success_streak as f32 / recent_window
+        } else {
+            0.5
+        };
+
+        // 添加随机波动，模拟真实表现
+        let randomness = (fastrand::f32() - 0.5) * 0.1;
+        self.performance_score = (
+            recent_success_rate * 0.4 +
+                self.confidence * 0.35 +
+                (1.0 - self.fatigue) * 0.25 +
+                randomness
+        ).clamp(0.1, 0.95);
+
+        self.position = new_pos;
+        self.last_time = time;
+    }
+
+    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32,
+                                  current_time: f32, note_kind: &NoteKind, _note_duration: f32) -> f32 {
+        // 繁忙状态检查
+        let is_available = current_time >= self.busy_until;
+        let distance = target_pos.distance_to(&self.position);
+        let time_diff = time - self.last_time;
+
+        let mut score = 0.5; // 基础分数
+
+        // 繁忙惩罚
+        if !is_available {
+            let busy_penalty = (self.busy_until - current_time).min(1.0) * 0.8;
+            score -= busy_penalty;
+        }
+
+        // 位置偏好 - 增加梯度变化
+        let position_weight = match self.finger.to_hand() {
+            Hand::Left => {
+                if target_pos.x < -0.25 {
+                    0.35 + ((-0.25 - target_pos.x) * 0.5).min(0.15)
+                } else if target_pos.x > 0.0 {
+                    -0.15 - (target_pos.x * 0.8).min(0.4)
+                } else {
+                    // 中性区域的线性过渡
+                    0.35 * ((-target_pos.x) / 0.25)
+                }
+            }
+            Hand::Right => {
+                if target_pos.x > 0.15 {
+                    0.4 + ((target_pos.x - 0.15) * 0.6).min(0.2)
+                } else if target_pos.x < -0.15 {
+                    -0.25 - ((-target_pos.x - 0.15) * 0.9).min(0.35)
+                } else {
+                    // 中性区域
+                    0.1 + (target_pos.x / 0.15) * 0.3
+                }
+            }
+        };
+        score += position_weight;
+
+        // 距离评分
+        let distance_score = if distance < 0.1 {
+            0.9 - distance * 2.0
+        } else if distance < 0.3 {
+            0.7 - (distance - 0.1) * 1.5
+        } else if distance < 0.6 {
+            0.4 - (distance - 0.3) * 0.8
+        } else {
+            0.1 - (distance - 0.6).min(0.4) * 0.25
+        };
+        score *= distance_score.max(0.1);
+
+        // 疲劳影响 - 非线性
+        let fatigue_penalty = self.fatigue.powf(1.5) * 0.35;
+        score *= 1.0 - fatigue_penalty;
+
+        // 时间间隔评分
+        if time_diff > 0.001 {
+            let time_score = if time_diff < 0.06 {
+                0.3 + (time_diff / 0.06) * 0.4 // 过快惩罚
+            } else if time_diff < 0.2 {
+                0.7 + ((time_diff - 0.06) / 0.14) * 0.25 // 最佳区间
+            } else if time_diff < 0.5 {
+                0.95 - ((time_diff - 0.2) / 0.3) * 0.15 // 稍慢
+            } else {
+                0.8 + ((time_diff - 0.5).min(0.5) / 0.5) * 0.15 // 很慢反而好
+            };
+            score *= time_score;
+        }
+
+        if matches!(note_kind, NoteKind::Hold { .. }) {
+            if self.is_busy {
+                score *= 0.6;
+            }
+        }
+
+        let performance_factor = 0.5 + self.performance_score * 0.5;
+        score *= performance_factor;
+
+        let difficulty_factor = 1.0 - (note_difficulty - 1.0).max(0.0) * (1.0 - self.confidence) * 0.15;
+        score *= difficulty_factor;
+
+        let randomness = (fastrand::f32() - 0.5) * 0.05;
+        score += randomness;
+
+        score.clamp(0.0, 1.0)
     }
 }
 
@@ -2494,7 +2588,7 @@ impl AdvancedFeatureExtractor {
                 _ => features[i] = features[i].clamp(-5.0, 5.0),
             }
         }
-        let mut min_val = features.iter().cloned().fold(f32::INFINITY, f32::min);
+        let min_val = features.iter().cloned().fold(f32::INFINITY, f32::min);
         let mut max_val = features.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         if (max_val - min_val).abs() < f32::EPSILON {
             max_val = min_val + 1.0;
@@ -2503,7 +2597,7 @@ impl AdvancedFeatureExtractor {
             features[i] = 2.0 * (features[i] - min_val) / (max_val - min_val) - 1.0;
         }
         let valid_features: Vec<f32> = features.iter().filter(|&&x| x.is_finite()).cloned().collect();
-        let mean = if !valid_features.is_empty() {
+        let _mean = if !valid_features.is_empty() {
             valid_features.iter().sum::<f32>() / valid_features.len() as f32
         } else {
             0.0
@@ -2531,7 +2625,7 @@ impl AdvancedFeatureExtractor {
         ]
     }
 
-    fn extract_temporal_features(&mut self, notes: &[ProcessedNote], window_size: usize, mut bpm_list: BpmList) -> Vec<f32> {
+    fn extract_temporal_features(&mut self, notes: &[ProcessedNote], window_size: usize, bpm_list: BpmList) -> Vec<f32> {
         if notes.is_empty() {
             return vec![0.0; 6];
         }
@@ -3074,15 +3168,6 @@ impl PhiTKAdvancedAI {
         if !self.pattern_recognition_strength.is_finite() { self.pattern_recognition_strength = 1.0; }
         if !self.memory_consolidation_rate.is_finite() { self.memory_consolidation_rate = 0.1; }
         self.feature_extractor.difficulty_estimator.base_difficulty = self.feature_extractor.difficulty_estimator.base_difficulty.max(0.0).min(10.0);
-        //GPU
-        self.main_network.device = None;
-        self.main_network.queue = None;
-        self.main_network.matmul_pipeline = None;
-        self.main_network.activation_pipelines.clear();
-        self.target_network.device = None;
-        self.target_network.queue = None;
-        self.target_network.matmul_pipeline = None;
-        self.target_network.activation_pipelines.clear();
 
         for finger_state in &mut self.finger_states {
             finger_state.clean();
@@ -3122,7 +3207,7 @@ impl PhiTKAdvancedAI {
             thread_pool: thread_pool.clone(),
             thread_count: if thread_pool.is_some() { 32 } else { 1 },
             feature_extractor: AdvancedFeatureExtractor::new(),
-            experience_replay: ExperienceReplay::new(6000000),
+            experience_replay: ExperienceReplay::new(3000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad)),
             right_hand_state: HandState::new(Hand::Right, Vector2::new(0.3, 0.0).rotate(rad)),
             rotation,
@@ -3155,14 +3240,15 @@ impl PhiTKAdvancedAI {
             last_assigned_hand: None,
         };
 
-        ai.target_network = ai.main_network.clone();
-        //thread_pool: Option<rayon::ThreadPool>;
+        ai.target_network = DeepNeuralNetwork::new(); // 创建新实例
+        ai.target_network.build_architecture();       // 构建相同架构
+        ai.target_network.init_gpu_sync();
 
         ai.warm_thread_pool();
         ai
     }
 
-    pub fn load_or_create(filepath: &str, rotation: f32) -> Self {
+    fn load_or_create(filepath: &str, rotation: f32) -> Self {
         let path = Path::new(filepath);
         if let Ok(bytes) = fs::read(path) {
             if let Ok(mut ai) = bincode::deserialize::<Self>(&bytes) {
@@ -3171,37 +3257,43 @@ impl PhiTKAdvancedAI {
                     ai.rotation = rotation;
                     ai.update_hand_positions();
 
-                    ai.main_network.initialization_attempted = true; // 标记为已尝试，防止 reentry
+                    // 为 main_network 设置状态，强制重新初始化 GPU
+                    ai.main_network.initialization_attempted = false;
                     ai.main_network.initialization_failed = false;
-                    ai.main_network.gpu_initialized = false;
+                    ai.main_network.gpu_initialized = false; // 确保状态与资源一致
                     println!("[GPU/CPU SWITCH] Beginning GPU init for main_network...");
-                    let res = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                        ai.main_network.init_gpu_sync();
-                    }));
 
-                    if res.is_err() || !ai.main_network.gpu_initialized {
-                        ai.main_network.initialization_failed = true;
-                        println!("[GPU/CPU SWITCH] main_network GPU init failed or panicked — will use CPU.");
-                    } else {
-                        println!("[GPU/CPU SWITCH] main_network GPU initialized successfully.");
+                    // 第一次初始化强制使用 GPU，失败则 panic
+                    ai.main_network.init_gpu_sync();
+                    println!("[GPU/CPU SWITCH] main_network GPU initialized successfully.");
+
+                    // 为 target_network 清除所有 GPU 资源
+                    ai.target_network.device = None;
+                    ai.target_network.queue = None;
+                    ai.target_network.batch_size_buffer = None;
+                    ai.target_network.matmul_pipeline = None;
+                    ai.target_network.activation_pipelines = HashMap::new();
+                    ai.target_network.activation_bind_group_layouts = HashMap::new();
+                    // 清除所有层的GPU缓冲区
+                    for layer in &mut ai.target_network.layers {
+                        layer.weights_buffer = None;
+                        layer.biases_buffer = None;
+                        layer.activations_buffer = None;
                     }
 
-                    // --- safer GPU init for target_network ---
-                    ai.target_network.initialization_attempted = true;
+                    // ✅ 关键修复：在清除资源后，必须重置 gpu_initialized 状态
+                    ai.target_network.initialization_attempted = false;
                     ai.target_network.initialization_failed = false;
-                    ai.target_network.gpu_initialized = false;
+                    ai.target_network.gpu_initialized = false; // <<< 这行是核心修复
+
                     println!("[GPU/CPU SWITCH] Beginning GPU init for target_network...");
+                    ai.target_network.init_gpu_sync();
 
-                    let res2 = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                        ai.target_network.init_gpu_sync();
-                    }));
-
-
-                    if res2.is_err() || !ai.target_network.gpu_initialized {
-                        ai.target_network.initialization_failed = true;
-                        println!("[GPU/CPU SWITCH] target_network GPU init failed or panicked — will use CPU.");
-                    } else {
+                    // 添加验证检查
+                    if ai.target_network.device.is_some() && ai.target_network.queue.is_some() {
                         println!("[GPU/CPU SWITCH] target_network GPU initialized successfully.");
+                    } else {
+                        println!("[GPU/CPU SWITCH] WARNING: target_network GPU initialization reported success but resources are missing!");
                     }
 
                     return ai;
@@ -3209,7 +3301,15 @@ impl PhiTKAdvancedAI {
             }
         }
 
+        // 创建新模型时也强制使用 GPU
         let mut ai = Self::new(rotation);
+
+        // 初始化 GPU
+        println!("[GPU/CPU SWITCH] Beginning GPU init for new model...");
+        ai.main_network.init_gpu_sync();
+        ai.target_network.init_gpu_sync();
+        println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
+
         ai.save_model(filepath);
         ai
     }
@@ -3335,8 +3435,8 @@ impl PhiTKAdvancedAI {
         }
         let mut processed_notes = self.preprocess_notes(notes);
         let simultaneous_groups = self.detect_simultaneous_groups(&processed_notes);
-        self.detect_and_switch_mode(notes);
         let mut bpm_list_clone = bpm_list.clone();
+        self.detect_and_switch_mode(notes);
         self.assign_simultaneous_groups(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
         self.ai_assign_single_notes(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
         self.post_process_assignments(&mut processed_notes);
@@ -3624,8 +3724,8 @@ impl PhiTKAdvancedAI {
 
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
-        const CONTEXT_WINDOW: usize = 8;
-        const BATCH_SIZE: usize = 64;
+        const CONTEXT_WINDOW: usize = 256;
+        const BATCH_SIZE: usize = 1024;
 
         // 收集需要处理的音符索引
         let mut unassigned_indices = Vec::new();
@@ -3707,7 +3807,7 @@ impl PhiTKAdvancedAI {
         }
     }
 
-    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, line_id: usize) -> (Hand, f32, Finger) {
+    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, _line_id: usize) -> (Hand, f32, Finger) {
         //println!("[Token Usage] AI Decision - Features: {}, Time: {:.2}", features.len(), note.time);
         let token = TOTAL_TOKENS_USED.fetch_add(1, Ordering::Relaxed);
         if token % 1000 == 0 {
@@ -3762,7 +3862,7 @@ impl PhiTKAdvancedAI {
 
         finger_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-        for (i, (finger, score)) in finger_scores.iter().enumerate() {
+        for (_i, (finger, _score)) in finger_scores.iter().enumerate() {
             let state = self.finger_states.iter().find(|fs| fs.finger == *finger).unwrap();
             //println!("  {}: {:?} 评分:{:.3} 位置({:.2},{:.2}) 疲劳:{:.2} 信心:{:.2} 繁忙:{}",
             //         i, finger, score, state.position.x, state.position.y,
@@ -3819,7 +3919,7 @@ impl PhiTKAdvancedAI {
 
                 if opposite_hand_score > best_score * 0.6 && position_suitable {
                     final_hand = opposite_hand;
-                    if let Some((opposite_finger, _)) = finger_scores.iter()
+                    if let Some((_opposite_finger, _)) = finger_scores.iter()
                         .find(|(finger, _)| finger.to_hand() == opposite_hand)
                     {
                         //TODO: 这里可以更新 best_finger
@@ -4284,7 +4384,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn train_network(&mut self) {
-        let batch_size = 64;
+        let batch_size = 1024;
         let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
         //println!("Training network with experience replay size: {}, sampled: {}", self.experience_replay.len(), experiences.len());
         let mut training_data = Vec::with_capacity(batch_size);

@@ -15,7 +15,6 @@ use std::{cell::RefCell, collections::HashMap, num::FpCategory};
 use tracing::debug;
 use crate::core::note::Hand;
 use serde::Deserialize;
-use std::sync::{Mutex, Arc};
 
 pub const FLICK_SPEED_THRESHOLD: f32 = 0.8;
 pub const LIMIT_PERFECT: f32 = 0.08;

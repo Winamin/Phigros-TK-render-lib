@@ -11,7 +11,6 @@ use macroquad::prelude::*;
 use miniquad::{RenderPass, Texture, TextureParams, TextureWrap, FilterMode};
 use nalgebra::Rotation2;
 use serde::Deserialize;
-use std::{cell::RefCell, rc::Rc};
 use once_cell::sync::OnceCell;
 use std::sync::{Mutex, Arc, RwLock};
 use once_cell::sync::Lazy;
@@ -462,7 +461,7 @@ impl JudgeLine {
                 let ctx = &mut gl.quad_context;
 
                 //let guard = state.borrow_mut();
-                let mut guard = state.lock().unwrap();
+                let guard = state.lock().unwrap();
                 let ready = guard.1;
 
                 if ready {

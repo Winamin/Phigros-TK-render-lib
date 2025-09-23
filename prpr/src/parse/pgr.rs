@@ -12,7 +12,6 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize};
-use std::cell::RefCell;
 use tracing::warn;
 use anyhow::bail;
 use crate::core::note::Hand;

@@ -10,7 +10,6 @@ use anyhow::{bail, Result};
 use byteorder::{LittleEndian as LE, ReadBytesExt, WriteBytesExt};
 use macroquad::{prelude::Color, texture::Texture2D};
 use std::{
-    cell::RefCell,
     io::{Read, Write},
     ops::Deref,
     //rc::Rc,
