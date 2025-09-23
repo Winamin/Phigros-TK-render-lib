@@ -520,7 +520,7 @@ struct DeepNeuralNetwork {
     #[serde(skip)]queue: Option<wgpu::Queue>,
     #[serde(skip)]matmul_pipeline: Option<wgpu::ComputePipeline>,
     #[serde(skip)]matmul_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    #[serde(skip)]activation_pipelines: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
+    #[serde(skip)]activation_pipelinotes: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
     #[serde(
         skip
     )]activation_bind_group_layouts: StdHashMap<ActivationFunction, wgpu::BindGroupLayout>,
@@ -727,7 +727,7 @@ impl DeepNeuralNetwork {
             queue: None,
             matmul_pipeline: None,
             matmul_bind_group_layout: None,
-            activation_pipelines: StdHashMap::new(),
+            activation_pipelinotes: StdHashMap::new(),
             activation_bind_group_layouts: StdHashMap::new(),
             gpu_initialized: false,
             batch_size_buffer: None,
@@ -1052,7 +1052,7 @@ impl DeepNeuralNetwork {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         });
 
-        let mut activation_pipelines = StdHashMap::new();
+        let mut activation_pipelinotes = StdHashMap::new();
         let mut activation_bind_group_layouts = StdHashMap::new();
 
         for func in [ActivationFunction::ReLU, ActivationFunction::Sigmoid,
@@ -1104,7 +1104,7 @@ impl DeepNeuralNetwork {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             });
 
-            activation_pipelines.insert(func.clone(), pipeline);
+            activation_pipelinotes.insert(func.clone(), pipeline);
             activation_bind_group_layouts.insert(func, activation_bind_group_layout);
         }
 
@@ -1134,7 +1134,7 @@ impl DeepNeuralNetwork {
         self.queue = Some(queue);
         self.matmul_pipeline = Some(matmul_pipeline);
         self.matmul_bind_group_layout = Some(matmul_bind_group_layout);
-        self.activation_pipelines = activation_pipelines;
+        self.activation_pipelinotes = activation_pipelinotes;
         self.activation_bind_group_layouts = activation_bind_group_layouts;
         self.batch_size_buffer = Some(batch_size_buffer);
 
@@ -1247,7 +1247,7 @@ impl DeepNeuralNetwork {
                 &output_buffer
             );
 
-            let activation_pipeline = self.activation_pipelines
+            let activation_pipeline = self.activation_pipelinotes
                 .get(&layer.activation_func)
                 .unwrap();
 
@@ -1486,7 +1486,7 @@ impl DeepNeuralNetwork {
                 layer,
                 &output_buffer,
             );
-            let activation_pipeline = self.activation_pipelines
+            let activation_pipeline = self.activation_pipelinotes
                 .get(&layer.activation_func)
                 .expect("Activation pipeline not initialized");
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2286,13 +2286,15 @@ impl DeepNeuralNetwork {
 
                         layer.momentum_weights[i][j] =
                             self.momentum * layer.momentum_weights[i][j] - self.learning_rate * grad;
-                        *weight += layer.momentum_weights[i][j];
+                        let momentum_update = layer.momentum_weights[i][j];
+                        let clamped_momentum = momentum_update.clamp(-MAX_GRAD, MAX_GRAD);
 
+                        *weight += clamped_momentum;
+                        *weight = weight.clamp(-MAX_WEIGHT, MAX_WEIGHT);
                         if !weight.is_finite() {
                             eprintln!("[Gradient Safety] NaN/Inf weight detected at layer {}, weight[{}][{}], setting to 0.", layer_idx, i, j);
                             *weight = 0.0;
                         }
-                        *weight = weight.clamp(-MAX_WEIGHT, MAX_WEIGHT);
                     }
                 }
             }
@@ -2307,14 +2309,17 @@ impl DeepNeuralNetwork {
                     }
                     grad = grad.clamp(-MAX_GRAD, MAX_GRAD);
 
-                    layer.momentum_biases[i] =
-                        self.momentum * layer.momentum_biases[i] - self.learning_rate * grad;
-                    *bias += layer.momentum_biases[i];
+                    layer.momentum_biases[i] = self.momentum * layer.momentum_biases[i] - self.learning_rate * grad;
+                    let momentum_update = layer.momentum_biases[i];
+                    let clamped_momentum = momentum_update.clamp(-MAX_GRAD, MAX_GRAD);
+
+                    *bias += clamped_momentum;
+                    *bias = bias.clamp(-MAX_WEIGHT, MAX_WEIGHT);
+
                     if !bias.is_finite() {
                         eprintln!("[Gradient Safety] NaN/Inf bias detected at layer {}, bias[{}], setting to 0.", layer_idx, i);
                         *bias = 0.0;
                     }
-                    *bias = bias.clamp(-MAX_WEIGHT, MAX_WEIGHT);
                 }
             }
         }
@@ -2438,12 +2443,12 @@ impl FingerState {
         };
 
         // 添加随机波动，模拟真实表现
-        let randomness = (fastrand::f32() - 0.5) * 0.1;
+        let randomnotess = (fastrand::f32() - 0.5) * 0.1;
         self.performance_score = (
             recent_success_rate * 0.4 +
                 self.confidence * 0.35 +
                 (1.0 - self.fatigue) * 0.25 +
-                randomness
+                randomnotess
         ).clamp(0.1, 0.95);
 
         self.position = new_pos;
@@ -2532,8 +2537,8 @@ impl FingerState {
         let difficulty_factor = 1.0 - (note_difficulty - 1.0).max(0.0) * (1.0 - self.confidence) * 0.15;
         score *= difficulty_factor;
 
-        let randomness = (fastrand::f32() - 0.5) * 0.05;
-        score += randomness;
+        let randomnotess = (fastrand::f32() - 0.5) * 0.05;
+        score += randomnotess;
 
         score.clamp(0.0, 1.0)
     }
@@ -3272,7 +3277,7 @@ impl PhiTKAdvancedAI {
                     ai.target_network.queue = None;
                     ai.target_network.batch_size_buffer = None;
                     ai.target_network.matmul_pipeline = None;
-                    ai.target_network.activation_pipelines = HashMap::new();
+                    ai.target_network.activation_pipelinotes = HashMap::new();
                     ai.target_network.activation_bind_group_layouts = HashMap::new();
                     // 清除所有层的GPU缓冲区
                     for layer in &mut ai.target_network.layers {
@@ -3741,22 +3746,54 @@ impl PhiTKAdvancedAI {
             let mut features_batch = Vec::with_capacity(batch_indices.len());
             let mut note_data = Vec::with_capacity(batch_indices.len()); // 存储需要的数据
 
-            for &idx in batch_indices {
-                let start_idx = idx.saturating_sub(CONTEXT_WINDOW / 2);
-                let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
-                let context = &notes[start_idx..end_idx];
+            // 使用线程池并行处理特征提取
+            // 使用线程池并行处理特征提取
+            let results: Vec<_> = if let Some(pool) = &self.thread_pool {
+                // 并行处理特征提取
+                pool.install(|| {
+                    batch_indices.par_iter().map(|&idx| {
+                        let start_idx = idx.saturating_sub(CONTEXT_WINDOW / 2);
+                        let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
+                        let context = &notes[start_idx..end_idx];
+                        
+                        // 克隆feature_extractor以避免借用冲突
+                        let mut feature_extractor = self.feature_extractor.clone();
+                        let features = feature_extractor.extract_features(&context, CONTEXT_WINDOW, bpm_list);
+                        
+                        (
+                            features,
+                            idx,
+                            notes[idx].position.x,
+                            notes[idx].time,
+                            notes[idx].judge.clone(),
+                            notes[idx].kind.clone()
+                        )
+                    }).collect::<Vec<_>>()
+                })
+            } else {
+                // 如果没有线程池，使用串行处理
+                batch_indices.iter().map(|&idx| {
+                    let start_idx = idx.saturating_sub(CONTEXT_WINDOW / 2);
+                    let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
+                    let context = &notes[start_idx..end_idx];
+                    
+                    let features = self.feature_extractor.extract_features(&context, CONTEXT_WINDOW, bpm_list);
+                    
+                    (
+                        features,
+                        idx,
+                        notes[idx].position.x,
+                        notes[idx].time,
+                        notes[idx].judge.clone(),
+                        notes[idx].kind.clone()
+                    )
+                }).collect::<Vec<_>>()
+            };
 
-                let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
+            // 处理结果
+            for (features, idx, x, time, judge, kind) in results {
                 features_batch.push(features);
-
-                // 提前获取需要的数据，避免后续借用冲突
-                note_data.push((
-                    idx,
-                    notes[idx].position.x,
-                    notes[idx].time,
-                    notes[idx].judge.clone(),
-                    notes[idx].kind.clone()
-                ));
+                note_data.push((idx, x, time, judge, kind));
             }
 
             // 使用GPU批量推理
