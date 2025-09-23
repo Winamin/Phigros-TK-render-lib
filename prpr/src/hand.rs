@@ -714,7 +714,7 @@ impl DeepNeuralNetwork {
     fn new() -> Self {
         let mut network = Self {
             layers: Vec::new(),
-            learning_rate: 0.0001,
+            learning_rate: 0.001,
             momentum: 0.9,
             dropout_rate: 0.1,
             batch_size: 1024,
@@ -2095,12 +2095,12 @@ impl DeepNeuralNetwork {
     }
 
     fn adapt_learning_rate(&mut self, loss: f32) {
-        if loss < self.last_loss * 0.95 {
-            self.learning_rate = (self.learning_rate * 1.05).min(0.01);
+        if loss < self.last_loss * 0.98 {
+            self.learning_rate = (self.learning_rate * 1.02).min(0.005);
             self.bad_epochs = 0;
         }
-        else if loss > self.last_loss * 1.05 {
-            self.learning_rate = (self.learning_rate * 0.8).max(0.0001);
+        else if loss > self.last_loss * 1.02 {
+            self.learning_rate = (self.learning_rate * 0.8).max(0.00001);
             self.bad_epochs += 1;
             if self.bad_epochs >= 5 {
                 println!("连续{}个epoch表现不佳，执行网络重置", self.bad_epochs);
@@ -2109,9 +2109,9 @@ impl DeepNeuralNetwork {
             }
         }
         else {
+            // 损失变化不大时，保持稳定
             self.bad_epochs = 0;
         }
-
         self.last_loss = loss;
     }
 
@@ -4370,12 +4370,16 @@ impl PhiTKAdvancedAI {
     }
 
     fn adapt_parameters(&mut self, current_accuracy: f32) {
+        // 基于当前准确率调整学习率
         if current_accuracy < 0.3 {
-            self.main_network.learning_rate = (self.main_network.learning_rate * 1.5).clamp(0.001, 0.05);
+            // 表现极差时，大幅降低学习率
+            self.main_network.learning_rate = (self.main_network.learning_rate * 0.7).max(0.0001);
         } else if current_accuracy < self.average_reward {
-            self.main_network.learning_rate = (self.main_network.learning_rate * 1.1).min(0.03);
+            // 表现低于平均水平时，小幅降低学习率
+            self.main_network.learning_rate = (self.main_network.learning_rate * 0.95).max(0.0001);
         } else {
-            self.main_network.learning_rate = (self.main_network.learning_rate * 0.98).max(0.0005);
+            // 表现良好时，可以非常谨慎地增加学习率
+            self.main_network.learning_rate = (self.main_network.learning_rate * 1.01).min(0.01);
         }
 
         self.exploration_rate = if current_accuracy > 0.7 {
@@ -4384,6 +4388,7 @@ impl PhiTKAdvancedAI {
             0.3
         };
 
+        /*
         if self.main_network.epoch_count > 0 {
             if current_accuracy > self.average_reward {
                 self.main_network.learning_rate *= 1.02;
@@ -4392,7 +4397,9 @@ impl PhiTKAdvancedAI {
             }
             self.main_network.learning_rate = self.main_network.learning_rate.clamp(0.0001, 0.05);
         }
+        */
 
+        // 调整置信度阈值
         if current_accuracy > 0.85 {
             self.confidence_threshold = (self.confidence_threshold + 0.01).min(0.9);
         } else if current_accuracy < 0.65 {
