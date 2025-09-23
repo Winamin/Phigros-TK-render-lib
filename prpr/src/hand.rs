@@ -718,7 +718,7 @@ impl DeepNeuralNetwork {
             momentum: 0.9,
             dropout_rate: 0.1,
             batch_size: 1024,
-            max_grad_norm: 5.0,
+            max_grad_norm: 100.0,
             //weight_decay: 0.0001,
             last_loss: f32::INFINITY,
             bad_epochs: 0,
@@ -2051,6 +2051,17 @@ impl DeepNeuralNetwork {
         for b in bias_gradients.iter_mut() {
             for g in b.iter_mut() { *g *= scale; }
         }
+
+        if current_norm > self.max_grad_norm * 10.0 {
+            eprintln!("[GradClip][ALERT] huge norm {:.6} at epoch {}", current_norm, self.epoch_count);
+            for (li, layer_grad) in gradients.iter().enumerate() {
+                let mut max_abs = 0.0f32;
+                for row in layer_grad {
+                    for &g in row { if g.abs() > max_abs { max_abs = g.abs(); } }
+                }
+                eprintln!("[GradClip][ALERT] layer {} max_abs_grad = {:.6}", li, max_abs);
+            }
+        }
     }
 
     fn reset_problem_layers(&mut self) {
@@ -2238,7 +2249,7 @@ impl DeepNeuralNetwork {
 
     fn apply_gradients(&mut self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_size: usize) {
         let batch_size_f = batch_size as f32;
-        const MAX_GRAD: f32 = 50.0;
+        const MAX_GRAD: f32 = 100.0;
         const MAX_WEIGHT: f32 = 10.0;
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
@@ -2635,7 +2646,7 @@ impl AdvancedFeatureExtractor {
             current_time - self.last_logged_time > 1.0;
 
         if should_log {
-            println!("[BPM LOG] Time: {:.2}s, BPM: {:.1}", current_time, current_bpm);
+            //println!("[BPM LOG] Time: {:.2}s, BPM: {:.1}", current_time, current_bpm);
             self.last_logged_bpm = Some(current_bpm);
             self.last_logged_time = current_time;
         }
@@ -3403,7 +3414,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize) {
-        println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
+        //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
             return;
         }
