@@ -397,9 +397,9 @@ struct PhiTKAdvancedAI {
     #[serde(skip)]
     #[serde(default)]
     thread_pool: Option<Arc<ThreadPool>>,
-    #[serde(skip)]
-    #[serde(default)]
-    thread_count: usize,
+    //#[serde(skip)]
+    //#[serde(default)]
+    //thread_count: usize,
     feature_extractor: AdvancedFeatureExtractor,
     experience_replay: ExperienceReplay,
     left_hand_state: HandState,
@@ -509,8 +509,8 @@ struct DeepNeuralNetwork {
     batch_size: usize,
     #[serde(skip)]
     max_grad_norm: f32,
-    #[serde(skip)]
-    weight_decay: f32,
+    //#[serde(skip)]
+    //weight_decay: f32,
     #[serde(default)]
     last_loss: f32,          // 用于学习率调整
     #[serde(default)]
@@ -719,7 +719,7 @@ impl DeepNeuralNetwork {
             dropout_rate: 0.1,
             batch_size: 1024,
             max_grad_norm: 5.0,
-            weight_decay: 0.0001,
+            //weight_decay: 0.0001,
             last_loss: f32::INFINITY,
             bad_epochs: 0,
             epoch_count: 0,
@@ -1895,57 +1895,9 @@ impl DeepNeuralNetwork {
         output
     }
 
-    fn monitor_gradients(&self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_idx: usize) -> bool {
-        let mut all_gradients_zero = true;
-        let mut has_nan_or_inf = false;
-
-        'check_all: for (layer_idx, layer_grad) in gradients.iter().enumerate() {
-            for (i, row) in layer_grad.iter().enumerate() {
-                for (j, &g) in row.iter().enumerate() {
-                    if g.is_nan() || g.is_infinite() {
-                        has_nan_or_inf = true;
-                        eprintln!("[Gradient Monitor] NaN/Inf detected at layer {}, weight[{}][{}]", layer_idx, i, j);
-                        break 'check_all;
-                    }
-                    if g.abs() > 1e-8 {
-                        all_gradients_zero = false;
-                    }
-                }
-            }
-        }
-
-        'check_biases: for (layer_idx, bias_grad) in bias_gradients.iter().enumerate() {
-            for (i, &g) in bias_grad.iter().enumerate() {
-                if g.is_nan() || g.is_infinite() {
-                    has_nan_or_inf = true;
-                    eprintln!("[Gradient Monitor] NaN/Inf detected at layer {}, bias[{}]", layer_idx, i);
-                    break 'check_biases;
-                }
-                if g.abs() > 1e-8 {
-                    all_gradients_zero = false;
-                }
-            }
-        }
-
-        if has_nan_or_inf {
-            eprintln!("[Gradient Monitor] Batch {} aborted due to invalid gradients (NaN/Inf).", batch_idx);
-            return false;
-        }
-
-        if all_gradients_zero {
-            eprintln!("[Gradient Monitor] Warning: All gradients are zero in batch {}. This may indicate a problem.", batch_idx);
-            // 我们不立即返回 false，而是让后续的 `apply_gradients` 中的修复逻辑来处理。
-            // 因为零梯度可能是暂时的，修复后下个batch可能就正常了。
-        }
-
-        true // 梯度健康，可以继续
-    }
-
     fn get_momentum_range(&self) -> (f32, f32) {
         let mut min_momentum = f32::INFINITY;
         let mut max_momentum = f32::NEG_INFINITY;
-
-        // 检查权重动量
         for layer in &self.layers {
             for row in &layer.momentum_weights {
                 for &m in row {
@@ -1953,14 +1905,11 @@ impl DeepNeuralNetwork {
                     max_momentum = max_momentum.max(m);
                 }
             }
-            // 检查偏置动量
             for &m in &layer.momentum_biases {
                 min_momentum = min_momentum.min(m);
                 max_momentum = max_momentum.max(m);
             }
         }
-
-        // 如果没有找到有效值，返回0
         if min_momentum.is_infinite() {
             min_momentum = 0.0;
         }
@@ -1976,8 +1925,6 @@ impl DeepNeuralNetwork {
             eprintln!("警告: 训练数据为空，跳过训练");
             return;
         }
-
-        // 确保动量缓冲区结构正确 (原有代码保持不变)
         for layer in &mut self.layers {
             if !layer.weights.is_empty() && !layer.momentum_weights.is_empty() {
                 if layer.momentum_weights.len() != layer.weights.len() {
@@ -2004,12 +1951,9 @@ impl DeepNeuralNetwork {
             let start_idx = batch_idx * self.batch_size;
             let end_idx = start_idx + self.batch_size.min(training_data.len() - start_idx);
             let batch = &training_data[start_idx..end_idx];
-
-            // >>>>>>>>>>>>> 核心修改：使用 train_batch 替代单样本循环 <<<<<<<<<<<<<
-            // 首先，计算这个批次的总损失
             let mut batch_loss = 0.0;
             for (input, target) in batch {
-                let output = self.light_forward(input); // 临时用CPU计算损失，或者您也可以实现一个GPU版的损失计算
+                let output = self.light_forward(input);
                 let loss: f32 = output.iter().zip(target.iter())
                     .map(|(o, t)| (o - t).powi(2))
                     .sum();
@@ -2017,29 +1961,17 @@ impl DeepNeuralNetwork {
             }
             total_loss += batch_loss;
 
-            // 调用批量训练方法，它内部会使用 gpu_forward_batch
             self.train_batch(batch);
 
-            // >>>>>>>>>>>>> 修改日志打印 <<<<<<<<<<<<<
             if batch_idx == batch_count - 1 {
                 let avg_loss = total_loss / training_data.len() as f32;
                 self.adapt_learning_rate(avg_loss);
                 self.epoch_count += 1;
-                if self.epoch_count % 10 == 0 {
+                if self.epoch_count % 1 == 0 {
                     let (min_weight, max_weight) = self.get_weight_range();
                     let (min_momentum, max_momentum) = self.get_momentum_range();
                     println!("[训练状态] Epoch: {}, Loss: {:.6}, LR: {:.6}, 权重范围 [{:.4}, {:.4}], 动量范围 [{:.4}, {:.4}]",
                              self.epoch_count, avg_loss, self.learning_rate, min_weight, max_weight, min_momentum, max_momentum);
-                }
-            }
-        }
-    }
-
-    fn apply_weight_decay(&mut self) {
-        for layer in &mut self.layers {
-            for i in 0..layer.weights.len() {
-                for j in 0..layer.weights[i].len() {
-                    layer.weights[i][j] -= self.learning_rate * self.weight_decay * layer.weights[i][j];
                 }
             }
         }
@@ -2067,22 +1999,57 @@ impl DeepNeuralNetwork {
 
     fn clip_gradients(&self, gradients: &mut [Vec<Vec<f32>>], bias_gradients: &mut [Vec<f32>]) {
         let current_norm = self.calculate_gradient_norm(gradients, bias_gradients);
-        if current_norm > self.max_grad_norm {
-            let scale = self.max_grad_norm / current_norm;
 
-            for layer_grad in gradients {
-                for row in layer_grad {
-                    for g in row {
-                        *g *= scale;
-                    }
+        // Defensive checks
+        if !current_norm.is_finite() {
+            eprintln!("[GradClip][EMERGENCY] current_norm is not finite (NaN/Inf). Zeroing gradients and skipping this batch.");
+            for layer_grad in gradients.iter_mut() {
+                for row in layer_grad.iter_mut() {
+                    for g in row.iter_mut() { *g = 0.0; }
                 }
             }
+            for b in bias_gradients.iter_mut() { for g in b.iter_mut() { *g = 0.0; } }
+            return;
+        }
 
-            for bias_grad in bias_gradients {
-                for g in bias_grad {
-                    *g *= scale;
+        // If within limit, nothing to do
+        if current_norm <= self.max_grad_norm {
+            return;
+        }
+
+        // Compute desired scale (<= 1.0)
+        let desired_scale = self.max_grad_norm / current_norm;
+
+        // 如果 desired_scale 极小（说明 gradient too huge），直接丢弃该 batch 的梯度以防爆炸
+        const EMERGENCY_SCALE_FLOOR: f32 = 1e-6;
+        if desired_scale < EMERGENCY_SCALE_FLOOR {
+            eprintln!(
+                "[GradClip][EMERGENCY] current_norm={:.6}, max_grad_norm={:.6}, desired_scale={:.12} < EMERGENCY_SCALE_FLOOR. \
+            Zeroing gradients and skipping this batch to avoid catastrophic update.",
+                current_norm, self.max_grad_norm, desired_scale
+            );
+            for layer_grad in gradients.iter_mut() {
+                for row in layer_grad.iter_mut() {
+                    for g in row.iter_mut() { *g = 0.0; }
                 }
             }
+            for b in bias_gradients.iter_mut() { for g in b.iter_mut() { *g = 0.0; } }
+            return;
+        }
+
+        let scale = desired_scale.clamp(f32::MIN_POSITIVE, 1.0);
+        eprintln!(
+            "[GradClip] current_norm={:.6}, max_grad_norm={:.6}, applied_scale={:.9}",
+            current_norm, self.max_grad_norm, scale
+        );
+
+        for layer_grad in gradients.iter_mut() {
+            for row in layer_grad.iter_mut() {
+                for g in row.iter_mut() { *g *= scale; }
+            }
+        }
+        for b in bias_gradients.iter_mut() {
+            for g in b.iter_mut() { *g *= scale; }
         }
     }
 
@@ -2153,23 +2120,6 @@ impl DeepNeuralNetwork {
         (min_weight, max_weight)
     }
 
-    fn get_gradient_range(&self, gradients: &[Vec<Vec<f32>>]) -> (f32, f32) {
-        let mut min_grad = f32::INFINITY;
-        let mut max_grad = f32::NEG_INFINITY;
-
-        for layer_grad in gradients {
-            for row in layer_grad {
-                for &g in row {
-                    min_grad = min_grad.min(g);
-                    max_grad = max_grad.max(g);
-                }
-            }
-        }
-
-        (min_grad, max_grad)
-    }
-
-
     fn train_batch(&mut self, batch: &[(Vec<f32>, Vec<f32>)]) {
         let batch_size = batch.len();
 
@@ -2196,6 +2146,7 @@ impl DeepNeuralNetwork {
 
         for i in 0..batch_size {
             self.backward(
+                inputs[i],
                 &outputs[i],
                 targets[i],
                 &mut total_gradients,
@@ -2203,11 +2154,12 @@ impl DeepNeuralNetwork {
             );
         }
 
+        self.clip_gradients(&mut total_gradients, &mut total_bias_gradients);
         self.apply_gradients(&total_gradients, &total_bias_gradients, batch_size);
         println!("First weight value after update: {:.6}", self.layers[0].weights[0][0]);
     }
 
-    fn backward(&mut self, output: &[f32], target: &[f32], total_gradients: &mut [Vec<Vec<f32>>], total_bias_gradients: &mut [Vec<f32>]) {
+    fn backward(&mut self, input: &[f32], output: &[f32], target: &[f32], total_gradients: &mut [Vec<Vec<f32>>], total_bias_gradients: &mut [Vec<f32>]) {
         let mut layer_errors = vec![vec![0.0; 0]; self.layers.len()];
         if let Some(last_layer_idx) = self.layers.len().checked_sub(1) {
             let output_errors: Vec<f32> = output.iter()
@@ -2239,38 +2191,55 @@ impl DeepNeuralNetwork {
                 layer_errors[layer_idx] = current_errors;
             }
 
-            self.calculate_layer_gradients(layer_idx, &layer_errors[layer_idx],
-                                           &mut total_gradients[layer_idx],
-                                           &mut total_bias_gradients[layer_idx]);
+            let prev_acts: &[f32] = if layer_idx > 0 {
+                &self.layers[layer_idx - 1].activations[..]
+            } else {
+                input
+            };
+
+            self.calculate_layer_gradients(
+                layer_idx,
+                &layer_errors[layer_idx],
+                &mut total_gradients[layer_idx],
+                &mut total_bias_gradients[layer_idx],
+                prev_acts,
+            );
         }
     }
 
-    fn calculate_layer_gradients(&self, layer_idx: usize, errors: &[f32], gradients: &mut [Vec<f32>], bias_gradients: &mut [f32]) {
-        //let layer = &self.layers[layer_idx];
-        let prev_activations = if layer_idx > 0 {
-            &self.layers[layer_idx - 1].activations
-        } else {
-            return;
-        };
+    fn calculate_layer_gradients(
+        &self,
+        layer_idx: usize,
+        errors: &[f32],
+        gradients: &mut [Vec<f32>],
+        bias_gradients: &mut [f32],
+        prev_activations: &[f32],
+    ) {
+        // prev_activations 对应前一层的激活 (或者当 layer_idx==0 时为输入)
+        // 对每个输出单元 i，遍历所有输入 j 并累加梯度： grad[i][j] += error_i * activation_j
+        for (i, &error) in errors.iter().enumerate() {
+            // 若没有该输出单元对应的梯度行，则跳过（保持兼容）
+            if i >= gradients.len() {
+                continue;
+            }
 
-        for (i, error) in errors.iter().enumerate() {
-            if i < gradients.len() {
-                for (j, activation) in prev_activations.iter().enumerate() {
-                    if j < gradients[i].len() {
-                        gradients[i][j] += error * activation;
-                    }
-                }
-                if i < bias_gradients.len() {
-                    bias_gradients[i] += *error;
-                }
+            let grad_row = &mut gradients[i];
+            // 只遍历 prev_activations 和 grad_row 的重叠范围，避免索引越界
+            let common_len = std::cmp::min(prev_activations.len(), grad_row.len());
+            for j in 0..common_len {
+                grad_row[j] += error * prev_activations[j];
+            }
+
+            if i < bias_gradients.len() {
+                bias_gradients[i] += error;
             }
         }
     }
 
     fn apply_gradients(&mut self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_size: usize) {
         let batch_size_f = batch_size as f32;
-        const MAX_GRAD: f32 = 1.0; // <<<--- 将最大梯度限制从 5.0 降低到 1.0 或 0.5
-        const MAX_WEIGHT: f32 = 10.0; // <<<--- 新增：权重的最大绝对值限制
+        const MAX_GRAD: f32 = 50.0;
+        const MAX_WEIGHT: f32 = 10.0;
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             for (i, weight_row) in layer.weights.iter_mut().enumerate() {
@@ -3210,7 +3179,7 @@ impl PhiTKAdvancedAI {
             main_network: DeepNeuralNetwork::new(),
             target_network: DeepNeuralNetwork::new(),
             thread_pool: thread_pool.clone(),
-            thread_count: if thread_pool.is_some() { 32 } else { 1 },
+            //thread_count: if thread_pool.is_some() { 32 } else { 1 },
             feature_extractor: AdvancedFeatureExtractor::new(),
             experience_replay: ExperienceReplay::new(3000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad)),
