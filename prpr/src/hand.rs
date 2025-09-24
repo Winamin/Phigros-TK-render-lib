@@ -722,7 +722,7 @@ impl DeepNeuralNetwork {
             learning_rate: 0.001, //学习率
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size: 96, //批量训练
+            batch_size: 24, //批量训练
             max_grad_norm: 5.0, //最大梯度限制
             //weight_decay: 0.0001,
             last_loss: f32::INFINITY, //损失
@@ -954,7 +954,6 @@ impl DeepNeuralNetwork {
                 println!("[GPU] GPU initialization successful on first attempt");
             } else {
                 self.initialization_failed = true;
-                // 记录缺失的资源
                 let missing = format!("device: {}, queue: {}, batch_size: {}, pipeline: {}",
                                       self.device.is_some(),
                                       self.queue.is_some(),
@@ -998,6 +997,23 @@ impl DeepNeuralNetwork {
             "[GPU/CPU SWITCH] Adapter chosen: name=\"{}\", backend={:?}, vendor=0x{:x}, device=0x{:x}",
             adapter_info.name, adapter_info.backend, adapter_info.vendor, adapter_info.device
         );
+
+        let is_software_renderer = {
+            let name_lower = adapter_info.name.to_lowercase();
+            name_lower.contains("llvmpipe")
+                || name_lower.contains("swiftshader")
+                || name_lower.contains("software")
+                || name_lower.contains("virtual")
+                || adapter_info.vendor == 0x10005
+                || (adapter_info.vendor == 0x8086 && name_lower.contains("haswell"))
+        };
+
+        if is_software_renderer {
+            eprintln!(
+                "[GPU/CPU SWITCH] Detected software renderer (e.g., llvmpipe). Forcing CPU fallback."
+            );
+            return false;
+        }
 
         let (device, queue) = match adapter.request_device(&wgpu::DeviceDescriptor::default()).await {
             Ok((d, q)) => (d, q),
@@ -1092,9 +1108,13 @@ impl DeepNeuralNetwork {
 
         let mut activation_pipelinotes = StdHashMap::new();
         let mut activation_bind_group_layouts = StdHashMap::new();
-
-        for func in [ActivationFunction::ReLU, ActivationFunction::Sigmoid,
-            ActivationFunction::Tanh, ActivationFunction::Swish, ActivationFunction::GELU] {
+        for func in [
+            ActivationFunction::ReLU,
+            ActivationFunction::Sigmoid,
+            ActivationFunction::Tanh,
+            ActivationFunction::Swish,
+            ActivationFunction::GELU,
+        ] {
             let activation_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
@@ -1153,13 +1173,11 @@ impl DeepNeuralNetwork {
                 contents: bytemuck::cast_slice(&weights_flat),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             }));
-
             layer.biases_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::cast_slice(&layer.biases),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             }));
-
             layer.activations_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size: (layer.activations.len() * std::mem::size_of::<f32>()) as u64,
@@ -1177,7 +1195,6 @@ impl DeepNeuralNetwork {
         self.batch_size_buffer = Some(batch_size_buffer);
 
         true
-        //println!("Success");
     }
 
     fn get_activation_shader(&self, func: &ActivationFunction) -> String {
@@ -3330,7 +3347,7 @@ impl PhiTKAdvancedAI {
             thread_pool: thread_pool.clone(),
             //thread_count: if thread_pool.is_some() { 32 } else { 1 },
             feature_extractor: AdvancedFeatureExtractor::new(),
-            experience_replay: ExperienceReplay::new(3000),
+            experience_replay: ExperienceReplay::new(12000000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad)),
             right_hand_state: HandState::new(Hand::Right, Vector2::new(0.3, 0.0).rotate(rad)),
             rotation,
@@ -3340,7 +3357,7 @@ impl PhiTKAdvancedAI {
             total_notes_processed: 0,
             correct_predictions: 0,
             training_episodes: 0,
-            average_reward: 0.0,
+            average_reward: 0.7,
             difficulty_adaptation: 1.0,
             learning_momentum: 0.9,
             confidence_threshold: 0.7,
@@ -3573,7 +3590,7 @@ impl PhiTKAdvancedAI {
         }
         self.training_episodes += 1;
         self.last_save_episodes += 1;
-        if self.last_save_episodes >= 50 {
+        if self.last_save_episodes >= 256 {
             println!("Saving episodes to {}", self.last_save_episodes);
             println!("训练回合数，已保存: {}", self.training_episodes);
             self.save_model("phitk_ai_model.bin");
@@ -3847,8 +3864,8 @@ impl PhiTKAdvancedAI {
 
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
-        const CONTEXT_WINDOW: usize = 32;
-        const BATCH_SIZE: usize = 96;
+        const CONTEXT_WINDOW: usize = 8;
+        const BATCH_SIZE: usize = 24;
 
         // 收集需要处理的音符索引
         let mut unassigned_indices = Vec::new();
@@ -4133,26 +4150,22 @@ impl PhiTKAdvancedAI {
     fn calculate_reward(&self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
         let mut reward = 0.0;
 
-        let position_reward = if note.position.x < -0.1 {
-            if chosen_hand == Hand::Left { 1.0 } else { -0.6 }
-        } else if note.position.x > 0.1 {
-            if chosen_hand == Hand::Right { 1.0 } else { -0.6 }
+        let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+        let position_reward = if chosen_hand == ideal_hand {
+            1.0
         } else {
-            if chosen_hand == Hand::Right { 0.2 } else { 0.0 }
+            -0.8
         };
+
         reward += position_reward;
 
-        if confidence > 0.9 {
-            reward -= (confidence - 0.9) * 2.0; // 高信心惩罚
-        }
-
-        let difficulty_bonus = (note.difficulty - 1.0) * 0.3;
+        let difficulty_bonus = (note.difficulty - 1.0).max(0.0) * 0.3;
         reward += difficulty_bonus;
 
-        let noise = (fastrand::f32() - 0.5) * 0.2;
+        let noise = (fastrand::f32() - 0.5) * 0.1; // 减小噪声
         reward += noise;
 
-        reward.clamp(-2.0, 2.0)
+        reward.clamp(-1.0, 1.5) // 调整范围
     }
 
     fn smooth_hand_transitions(&self, notes: &mut [ProcessedNote]) {
@@ -4416,7 +4429,12 @@ impl PhiTKAdvancedAI {
             if let Some(hand) = processed.assigned_hand {
                 original_notes[i].hand = hand;
 
-                let success = processed.confidence > self.confidence_threshold;
+                let success = match processed.assigned_hand {
+                    Some(Hand::Left) => processed.position.x < 0.0,
+                    Some(Hand::Right) => processed.position.x >= 0.0,
+                    None => false,
+                };
+
                 total_predictions += 1;
                 if success {
                     correct_predictions += 1;
@@ -4508,28 +4526,22 @@ impl PhiTKAdvancedAI {
     }
 
     fn adapt_parameters(&mut self, current_accuracy: f32) {
-        if current_accuracy < 0.3 {
-            self.main_network.learning_rate = (self.main_network.learning_rate * 1.5).clamp(0.001, 0.05);
+        debug_assert!((0.0..=1.0).contains(&current_accuracy));
+
+        self.average_reward = 0.99 * self.average_reward + 0.01 * current_accuracy;
+        self.average_reward = self.average_reward.clamp(0.0, 1.0);
+
+        let lr = self.main_network.learning_rate;
+        let new_lr = if current_accuracy < 0.3 {
+            (lr * 1.2).clamp(0.0005, 0.01)   
         } else if current_accuracy < self.average_reward {
-            self.main_network.learning_rate = (self.main_network.learning_rate * 1.1).min(0.03);
+            (lr * 1.05).clamp(0.0005, 0.01)
         } else {
-            self.main_network.learning_rate = (self.main_network.learning_rate * 0.98).max(0.0005);
-        }
-
-        self.exploration_rate = if current_accuracy > 0.7 {
-            0.05 + (0.25 * (1.0 - current_accuracy))
-        } else {
-            0.3
+            (lr * 0.98).max(0.0001)
         };
+        self.main_network.learning_rate = new_lr;
 
-        if self.main_network.epoch_count > 0 {
-            if current_accuracy > self.average_reward {
-                self.main_network.learning_rate *= 1.02;
-            } else {
-                self.main_network.learning_rate *= 0.98;
-            }
-            self.main_network.learning_rate = self.main_network.learning_rate.clamp(0.0001, 0.05);
-        }
+        self.exploration_rate = (0.3 - 0.25 * current_accuracy).clamp(0.05, 0.3);
 
         if current_accuracy > 0.85 {
             self.confidence_threshold = (self.confidence_threshold + 0.01).min(0.9);
@@ -4539,7 +4551,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn train_network(&mut self) {
-        let batch_size = 96;
+        let batch_size = 24;
         let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
         //println!("Training network with experience replay size: {}, sampled: {}", self.experience_replay.len(), experiences.len());
         let mut training_data = Vec::with_capacity(batch_size);
