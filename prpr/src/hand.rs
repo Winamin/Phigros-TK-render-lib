@@ -370,6 +370,8 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
     drop(line_states_guard);
 }
 
+pub fn default_max_grad_norm() -> f32 { 5.0_f32 }
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Vector2 {
     x: f32,
@@ -507,7 +509,8 @@ struct DeepNeuralNetwork {
     #[serde(default)]momentum: f32,
     #[serde(default)]dropout_rate: f32,
     batch_size: usize,
-    #[serde(skip)]
+    //#[serde(skip)]
+    #[serde(default = "default_max_grad_norm")]
     max_grad_norm: f32,
     //#[serde(skip)]
     //weight_decay: f32,
@@ -716,13 +719,13 @@ impl DeepNeuralNetwork {
     fn new() -> Self {
         let mut network = Self {
             layers: Vec::new(),
-            learning_rate: 0.001,
+            learning_rate: 0.001, //学习率
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size:32,
-            max_grad_norm: 5.0,
+            batch_size: 96, //批量训练
+            max_grad_norm: 5.0, //最大梯度限制
             //weight_decay: 0.0001,
-            last_loss: f32::INFINITY,
+            last_loss: f32::INFINITY, //损失
             bad_epochs: 0,
             epoch_count: 0,
             device: None,
@@ -3844,8 +3847,8 @@ impl PhiTKAdvancedAI {
 
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
-        const CONTEXT_WINDOW: usize = 8;
-        const BATCH_SIZE: usize = 32;
+        const CONTEXT_WINDOW: usize = 32;
+        const BATCH_SIZE: usize = 96;
 
         // 收集需要处理的音符索引
         let mut unassigned_indices = Vec::new();
@@ -4536,7 +4539,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn train_network(&mut self) {
-        let batch_size = 32;
+        let batch_size = 96;
         let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
         //println!("Training network with experience replay size: {}, sampled: {}", self.experience_replay.len(), experiences.len());
         let mut training_data = Vec::with_capacity(batch_size);
