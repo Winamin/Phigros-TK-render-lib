@@ -539,6 +539,8 @@ struct NetworkLayer {
 
     #[serde(default)]
     activations: Vec<f32>,
+    #[serde(default)]
+    pre_activations: Vec<f32>,
 
     #[serde(default)]
     gradients: Vec<f32>,
@@ -717,8 +719,8 @@ impl DeepNeuralNetwork {
             learning_rate: 0.001,
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size: 1024,
-            max_grad_norm: 100.0,
+            batch_size:32,
+            max_grad_norm: 5.0,
             //weight_decay: 0.0001,
             last_loss: f32::INFINITY,
             bad_epochs: 0,
@@ -848,6 +850,39 @@ impl DeepNeuralNetwork {
             ActivationFunction::Tanh => x.tanh(),
             ActivationFunction::Swish => x * (1.0 / (1.0 + (-x).exp())),
             ActivationFunction::GELU => 0.5 * x * (1.0 + (x * 0.7978845608 * (1.0 + 0.044715 * x * x)).tanh()),
+        }
+    }
+
+    pub fn activate_derivative_from_z(x: f32, func: &ActivationFunction) -> f32 {
+        match func {
+            ActivationFunction::ReLU => {
+                if x > 0.0 { 1.0 } else { 0.0 }
+            }
+            ActivationFunction::Sigmoid => {
+                // s = sigmoid(x)
+                let s = 1.0 / (1.0 + (-x).exp());
+                s * (1.0 - s)
+            }
+            ActivationFunction::Tanh => {
+                let t = x.tanh();
+                1.0 - t * t
+            }
+            ActivationFunction::Swish => {
+                // swish(x) = x * sigmoid(x)
+                let sig = 1.0 / (1.0 + (-x).exp());
+                sig + x * sig * (1.0 - sig)
+            }
+            ActivationFunction::GELU => {
+                // derivative of GELU (approximation consistent with GELU definition used)
+                let sqrt_2_over_pi = 0.7978845608_f32;
+                let x3 = x * x * x;
+                let a = sqrt_2_over_pi * (x + 0.044715 * x3);
+                let tanh_a = a.tanh();
+                let left = 0.5 * (1.0 + tanh_a);
+                let sech2 = 1.0 - tanh_a * tanh_a;
+                let a_prime = sqrt_2_over_pi * (1.0 + 0.134145 * x * x); // 0.044715*3 = 0.134145
+                left + 0.5 * x * sech2 * a_prime
+            }
         }
     }
 
@@ -1423,7 +1458,7 @@ impl DeepNeuralNetwork {
     }
 
     fn gpu_forward_batch(&mut self, inputs: &[&[f32]], actual_batch_size: usize) -> Vec<Vec<f32>> {
-        println!("[GPU BATCH DEBUG] Processing batch with {} samples.", actual_batch_size);
+        //println!("[GPU BATCH DEBUG] Processing batch with {} samples.", actual_batch_size);
         if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
             println!("[GPU DEBUG] Critical GPU resource (device/queue/pipeline) is None. FALLING BACK TO CPU.");
             return inputs.iter().map(|input| self.light_forward(input)).collect();
@@ -1577,10 +1612,6 @@ impl DeepNeuralNetwork {
         self.add_dense_layer(128, 256, ActivationFunction::GELU);
         self.add_dense_layer(256, 256, ActivationFunction::GELU);
         self.add_dense_layer(256, 4, ActivationFunction::GELU);
-
-        println!("Network architecture built with {} layers", self.layers.len());
-        println!("Input size: 28 features");
-        println!("Output size: 4 (L/R decision, finger assignment, confidence)");
     }
 
     //TODO: 归一化输出
@@ -1591,7 +1622,7 @@ impl DeepNeuralNetwork {
                 normalized[0] = 0.5;
                 normalized[1] = 0.5;
             } else {
-                let temperature = 1.0;
+                let temperature = 1.4;
                 let left_exp = (normalized[0] / temperature).exp();
                 let right_exp = (normalized[1] / temperature).exp();
                 let sum = left_exp + right_exp;
@@ -1605,7 +1636,7 @@ impl DeepNeuralNetwork {
             }
         }
         if normalized.len() >= 4 {
-            normalized[3] = normalized[3].clamp(0.1, 0.96);
+            normalized[3] = normalized[3].clamp(0.3, 0.96);
         }
 
         normalized
@@ -1644,6 +1675,7 @@ impl DeepNeuralNetwork {
             weights,
             biases,
             activations: vec![0.0; output_size],
+            pre_activations: vec![0.0; output_size],
             gradients: vec![0.0; output_size],
             momentum_weights,
             momentum_biases: vec![0.0; output_size],
@@ -1667,6 +1699,7 @@ impl DeepNeuralNetwork {
             weights: vec![vec![0.0; input_size]; rows],
             biases: vec![0.0; rows],
             activations: vec![0.0; output_size * dir_mul],
+            pre_activations: vec![0.0; rows],
             gradients: vec![0.0; output_size * dir_mul],
             momentum_weights: vec![vec![0.0; input_size]; rows],
             momentum_biases: vec![0.0; rows],
@@ -1686,6 +1719,7 @@ impl DeepNeuralNetwork {
             weights: vec![vec![0.0; input_size]; output_size * 3],
             biases: vec![0.0; output_size],
             activations: vec![0.0; output_size],
+            pre_activations: vec![0.0; output_size],
             gradients: vec![0.0; output_size],
             momentum_weights: vec![vec![0.0; input_size]; output_size * 3],
             momentum_biases: vec![0.0; output_size],
@@ -1706,6 +1740,7 @@ impl DeepNeuralNetwork {
             weights: vec![vec![0.0; input_size]; output_size],
             biases: vec![0.0; output_size],
             activations: vec![0.0; output_size],
+            pre_activations: vec![0.0; output_size],
             gradients: vec![0.0; output_size],
             momentum_weights: vec![vec![0.0; input_size]; output_size],
             momentum_biases: vec![0.0; output_size],
@@ -1757,13 +1792,18 @@ impl DeepNeuralNetwork {
 
     fn dense_forward(layer: &mut NetworkLayer, input: &[f32]) -> Vec<f32> {
         let mut output = vec![0.0; layer.weights.len()];
+        let mut zs = vec![0.0; layer.weights.len()];
+
         for (i, (weights, bias)) in layer.weights.iter().zip(layer.biases.iter()).enumerate() {
             let mut sum = *bias;
             for (w, x) in weights.iter().zip(input.iter()) {
                 sum += w * x;
             }
+            zs[i] = sum;
             output[i] = DeepNeuralNetwork::activate(sum, &layer.activation_func);
         }
+
+        layer.pre_activations = zs;
         layer.activations = output.clone();
         output
     }
@@ -2095,12 +2135,12 @@ impl DeepNeuralNetwork {
     }
 
     fn adapt_learning_rate(&mut self, loss: f32) {
-        if loss < self.last_loss * 0.98 {
-            self.learning_rate = (self.learning_rate * 1.02).min(0.005);
+        if loss < self.last_loss * 0.95 {
+            self.learning_rate = (self.learning_rate * 1.05).min(0.01);
             self.bad_epochs = 0;
         }
-        else if loss > self.last_loss * 1.02 {
-            self.learning_rate = (self.learning_rate * 0.8).max(0.00001);
+        else if loss > self.last_loss * 1.05 {
+            self.learning_rate = (self.learning_rate * 0.8).max(0.0001);
             self.bad_epochs += 1;
             if self.bad_epochs >= 5 {
                 println!("连续{}个epoch表现不佳，执行网络重置", self.bad_epochs);
@@ -2109,9 +2149,9 @@ impl DeepNeuralNetwork {
             }
         }
         else {
-            // 损失变化不大时，保持稳定
             self.bad_epochs = 0;
         }
+
         self.last_loss = loss;
     }
 
@@ -2131,7 +2171,7 @@ impl DeepNeuralNetwork {
         (min_weight, max_weight)
     }
 
-    fn train_batch(&mut self, batch: &[(Vec<f32>, Vec<f32>)]) {
+    pub fn train_batch(&mut self, batch: &[(Vec<f32>, Vec<f32>)]) {
         let batch_size = batch.len();
 
         let mut inputs: Vec<&[f32]> = Vec::with_capacity(batch_size);
@@ -2142,6 +2182,7 @@ impl DeepNeuralNetwork {
             targets.push(target);
         }
         let outputs = self.gpu_forward_batch(&inputs, batch_size);
+
         let mut total_gradients: Vec<Vec<Vec<f32>>> = vec![vec![vec![0.0; 0]; 0]; self.layers.len()];
         let mut total_bias_gradients: Vec<Vec<f32>> = vec![vec![0.0; 0]; self.layers.len()];
 
@@ -2165,18 +2206,72 @@ impl DeepNeuralNetwork {
             );
         }
 
+        if batch_size > 0 {
+            let inv_batch = 1.0f32 / (batch_size as f32);
+            for layer_idx in 0..self.layers.len() {
+                let wg = &mut total_gradients[layer_idx];
+                for r in 0..wg.len() {
+                    for c in 0..wg[r].len() {
+                        wg[r][c] *= inv_batch;
+                    }
+                }
+                let bg = &mut total_bias_gradients[layer_idx];
+                for j in 0..bg.len() {
+                    bg[j] *= inv_batch;
+                }
+            }
+        }
         self.clip_gradients(&mut total_gradients, &mut total_bias_gradients);
         self.apply_gradients(&total_gradients, &total_bias_gradients, batch_size);
         println!("First weight value after update: {:.6}", self.layers[0].weights[0][0]);
     }
 
-    fn backward(&mut self, input: &[f32], output: &[f32], target: &[f32], total_gradients: &mut [Vec<Vec<f32>>], total_bias_gradients: &mut [Vec<f32>]) {
+
+    pub fn backward(&mut self, input: &[f32], output: &[f32], target: &[f32], total_gradients: &mut [Vec<Vec<f32>>], total_bias_gradients: &mut [Vec<f32>]) {
         let mut layer_errors = vec![vec![0.0; 0]; self.layers.len()];
         if let Some(last_layer_idx) = self.layers.len().checked_sub(1) {
-            let output_errors: Vec<f32> = output.iter()
+            let last_idx = self.layers.len() - 1;
+            let out_dim = output.len() as f32;
+            let mut output_errors: Vec<f32> = output.iter()
                 .zip(target.iter())
-                .map(|(o, t)| 2.0 * (o - t))
+                .map(|(o, t)| 2.0 * (o - t) / out_dim)
                 .collect();
+
+            // 转换：dL/da -> dL/dz（输出层）
+            for i in 0..output_errors.len() {
+                let z = if i < self.layers[last_idx].pre_activations.len() {
+                    self.layers[last_idx].pre_activations[i]
+                } else {
+                    // pre_activations 不足时，尝试使用 activation 值来近似导数（针对 Sigmoid/Tanh/ReLU 可行）
+                    // 如果既没有 z 也无法用 a 计算（比如 Swish/GELU），activate_derivative_from_z 的调用会作为最优路径；
+                    // TODO：这里先用 0.0 做占位（下面会用 activation 备选计算）。
+                    0.0
+                };
+
+                // 优先用 z（如果确实有合理的 z），否则尝试用 activation 值计算（见下面的派生逻辑）
+                let deriv = if i < self.layers[last_idx].pre_activations.len() {
+                    Self::activate_derivative_from_z(z, &self.layers[last_idx].activation_func)
+                } else {
+                    // fallback based on activation value
+                    let a = if i < self.layers[last_idx].activations.len() {
+                        self.layers[last_idx].activations[i]
+                    } else {
+                        0.0
+                    };
+                    match self.layers[last_idx].activation_func {
+                        ActivationFunction::ReLU => if a > 0.0 { 1.0 } else { 0.0 },
+                        ActivationFunction::Sigmoid => a * (1.0 - a),
+                        ActivationFunction::Tanh => 1.0 - a * a,
+                        // 对 Swish/GELU 没有简单的从 a 得到导数的方法 —— 打印警告并使用 1.0 的保守近似（避免进一步放大）
+                        ActivationFunction::Swish | ActivationFunction::GELU => {
+                            eprintln!("[Backward Warning] missing pre_activation for layer {}, using fallback derivative=1.0 for {:?}", last_idx, self.layers[last_idx].activation_func);
+                            1.0
+                        }
+                    }
+                };
+
+                output_errors[i] *= deriv; // 现在 output_errors 存的是 dL/dz
+            }
 
             if output_errors.iter().any(|&e| !e.is_finite()) {
                 eprintln!("[Gradient Safety] NaN/Inf detected in output errors, skipping backward pass for this sample.");
@@ -2186,12 +2281,23 @@ impl DeepNeuralNetwork {
             layer_errors[last_layer_idx] = output_errors;
         }
 
+        // activation a（不是 z）计算导数（可处理常见激活）
+        let derivative_from_activation = |a: f32, func: &ActivationFunction| -> f32 {
+            match func {
+                ActivationFunction::ReLU => if a > 0.0 { 1.0 } else { 0.0 },
+                ActivationFunction::Sigmoid => a * (1.0 - a),
+                ActivationFunction::Tanh => 1.0 - a * a,
+                // 对 Swish/GELU 无法从 a 得到精确导数，返回 1.0
+                ActivationFunction::Swish | ActivationFunction::GELU => 1.0,
+            }
+        };
 
         for layer_idx in (0..self.layers.len()).rev() {
             if layer_idx < self.layers.len() - 1 {
                 let next_layer = &self.layers[layer_idx + 1];
                 let mut current_errors = vec![0.0; self.layers[layer_idx].activations.len()];
 
+                // dL/da_i = sum_j w_j,i * dL/dz_j (next layer 的权重布局： next_layer.weights[j][i] )
                 for i in 0..current_errors.len() {
                     for (j, error) in layer_errors[layer_idx + 1].iter().enumerate() {
                         if j < next_layer.weights.len() && i < next_layer.weights[j].len() {
@@ -2199,6 +2305,33 @@ impl DeepNeuralNetwork {
                         }
                     }
                 }
+
+                // 把 dL/da -> dL/dz，通过乘上激活导数。
+                // 优先使用 pre_activations（z）；如果不存在对应 z，再尝试用 activation（a）来近似。
+                let func = &self.layers[layer_idx].activation_func;
+                let has_z = self.layers[layer_idx].pre_activations.len() >= current_errors.len();
+                for i in 0..current_errors.len() {
+                    let deriv = if has_z {
+                        Self::activate_derivative_from_z(self.layers[layer_idx].pre_activations[i], func)
+                    } else {
+                        if matches!(func, ActivationFunction::Swish | ActivationFunction::GELU) {
+                            eprintln!("[Backward Warning] layer {} missing pre_activations; using fallback derivative for {:?}", layer_idx, func);
+                        }
+                        let a = if i < self.layers[layer_idx].activations.len() {
+                            self.layers[layer_idx].activations[i]
+                        } else {
+                            0.0
+                        };
+                        derivative_from_activation(a, func)
+                    };
+                    current_errors[i] *= deriv;
+                }
+
+                if current_errors.iter().any(|&e| !e.is_finite()) {
+                    eprintln!("[Gradient Safety] NaN/Inf detected in current_errors at layer {}, skipping backward for this sample.", layer_idx);
+                    return;
+                }
+
                 layer_errors[layer_idx] = current_errors;
             }
 
@@ -2208,6 +2341,7 @@ impl DeepNeuralNetwork {
                 input
             };
 
+            // 计算权重梯度 calculate_layer_gradients 期望 errors 是 dL/dz
             self.calculate_layer_gradients(
                 layer_idx,
                 &layer_errors[layer_idx],
@@ -2217,6 +2351,7 @@ impl DeepNeuralNetwork {
             );
         }
     }
+
 
     fn calculate_layer_gradients(
         &self,
@@ -2249,7 +2384,7 @@ impl DeepNeuralNetwork {
 
     fn apply_gradients(&mut self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_size: usize) {
         let batch_size_f = batch_size as f32;
-        const MAX_GRAD: f32 = 100.0;
+        const MAX_GRAD: f32 = 5.0;
         const MAX_WEIGHT: f32 = 10.0;
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
@@ -2950,7 +3085,7 @@ impl AdvancedFeatureExtractor {
 
         x_positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
         y_positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         let x_range = if x_positions.is_empty() {
             0.0
         } else {
@@ -3709,8 +3844,8 @@ impl PhiTKAdvancedAI {
 
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
-        const CONTEXT_WINDOW: usize = 256;
-        const BATCH_SIZE: usize = 1024;
+        const CONTEXT_WINDOW: usize = 8;
+        const BATCH_SIZE: usize = 32;
 
         // 收集需要处理的音符索引
         let mut unassigned_indices = Vec::new();
@@ -3735,11 +3870,11 @@ impl PhiTKAdvancedAI {
                         let start_idx = idx.saturating_sub(CONTEXT_WINDOW / 2);
                         let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
                         let context = &notes[start_idx..end_idx];
-                        
+
                         // 克隆feature_extractor以避免借用冲突
                         let mut feature_extractor = self.feature_extractor.clone();
                         let features = feature_extractor.extract_features(&context, CONTEXT_WINDOW, bpm_list);
-                        
+
                         (
                             features,
                             idx,
@@ -3756,9 +3891,9 @@ impl PhiTKAdvancedAI {
                     let start_idx = idx.saturating_sub(CONTEXT_WINDOW / 2);
                     let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
                     let context = &notes[start_idx..end_idx];
-                    
+
                     let features = self.feature_extractor.extract_features(&context, CONTEXT_WINDOW, bpm_list);
-                    
+
                     (
                         features,
                         idx,
@@ -4370,16 +4505,12 @@ impl PhiTKAdvancedAI {
     }
 
     fn adapt_parameters(&mut self, current_accuracy: f32) {
-        // 基于当前准确率调整学习率
         if current_accuracy < 0.3 {
-            // 表现极差时，大幅降低学习率
-            self.main_network.learning_rate = (self.main_network.learning_rate * 0.7).max(0.0001);
+            self.main_network.learning_rate = (self.main_network.learning_rate * 1.5).clamp(0.001, 0.05);
         } else if current_accuracy < self.average_reward {
-            // 表现低于平均水平时，小幅降低学习率
-            self.main_network.learning_rate = (self.main_network.learning_rate * 0.95).max(0.0001);
+            self.main_network.learning_rate = (self.main_network.learning_rate * 1.1).min(0.03);
         } else {
-            // 表现良好时，可以非常谨慎地增加学习率
-            self.main_network.learning_rate = (self.main_network.learning_rate * 1.01).min(0.01);
+            self.main_network.learning_rate = (self.main_network.learning_rate * 0.98).max(0.0005);
         }
 
         self.exploration_rate = if current_accuracy > 0.7 {
@@ -4388,7 +4519,6 @@ impl PhiTKAdvancedAI {
             0.3
         };
 
-        /*
         if self.main_network.epoch_count > 0 {
             if current_accuracy > self.average_reward {
                 self.main_network.learning_rate *= 1.02;
@@ -4397,9 +4527,7 @@ impl PhiTKAdvancedAI {
             }
             self.main_network.learning_rate = self.main_network.learning_rate.clamp(0.0001, 0.05);
         }
-        */
 
-        // 调整置信度阈值
         if current_accuracy > 0.85 {
             self.confidence_threshold = (self.confidence_threshold + 0.01).min(0.9);
         } else if current_accuracy < 0.65 {
@@ -4408,16 +4536,19 @@ impl PhiTKAdvancedAI {
     }
 
     fn train_network(&mut self) {
-        let batch_size = 1024;
+        let batch_size = 32;
         let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
         //println!("Training network with experience replay size: {}, sampled: {}", self.experience_replay.len(), experiences.len());
         let mut training_data = Vec::with_capacity(batch_size);
 
         for exp in &experiences {
             let target_value = (exp.reward + self.discount_factor * self.estimate_future_value(&exp.next_state)).clamp(0.0, 1.0);
-            let mut target_output = vec![0.5, 0.5, 1.0, exp.reward.abs()];
+
+            let normalized_reward = (exp.reward.clamp(-1.0, 1.0) + 1.0) / 2.0;
+
+            let mut target_output = vec![0.5, 0.5, 1.0, normalized_reward];
             if exp.action < target_output.len() {
-                target_output[exp.action] = target_value.clamp(0.0, 1.0);
+                target_output[exp.action] = target_value;
             }
             training_data.push((exp.state.clone(), target_output));
         }
