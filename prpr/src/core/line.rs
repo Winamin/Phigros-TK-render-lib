@@ -313,10 +313,57 @@ impl JudgeLine {
             let config = Config::default();
             let rot = self.object.rotation.now();
             assign_hands(&mut self.notes, &config, index, rot, bpm_list);
-            self.height.set_time(res.time);
         }
     }
 
+    // 使用世界坐标进行手部分配的方法
+    pub fn update_hand_assign_with_world_pos(&mut self, res: &mut Resource, world_pos: Vector, bpm_list: &mut BpmList, index: usize) {
+        if !res.config.hand_split || self.notes.is_empty() {
+            return;
+        }
+        
+        let config = crate::config::Config::default();
+        let rot = self.object.rotation.now();
+        let rad = rot.to_radians();
+        let (cos, sin) = (rad.cos(), rad.sin());
+        
+        // 计算所有音符的世界坐标
+        let mut notes_with_world_pos = Vec::with_capacity(self.notes.len());
+        for note in &self.notes {
+            let local_x = note.object.translation.0.now();
+            let local_y = note.object.translation.1.now();
+            
+            // 应用判定线旋转
+            let rotated_x = local_x * cos - local_y * sin;
+            let rotated_y = local_x * sin + local_y * cos;
+            
+            // 计算世界坐标
+            let world_note_x = world_pos.x + rotated_x;
+            let world_note_y = world_pos.y + rotated_y;
+            
+            notes_with_world_pos.push((world_note_x, world_note_y));
+        }
+        
+        // 创建临时音符用于AI计算
+        let mut ai_notes: Vec<crate::core::Note> = self.notes
+            .iter()
+            .zip(&notes_with_world_pos)
+            .map(|(note, &(wx, wy))| {
+                let mut ai_note = note.clone();
+                ai_note.object.translation.0 = crate::core::AnimFloat::fixed(wx);
+                ai_note.object.translation.1 = crate::core::AnimFloat::fixed(wy);
+                ai_note
+            })
+            .collect();
+        
+        // 分配手
+        crate::hand::assign_hands(&mut ai_notes, &config, index, rot, bpm_list);
+        
+        // 将分配结果复制回原始音符
+        for (orig_note, ai_note) in self.notes.iter_mut().zip(ai_notes.iter()) {
+            orig_note.hand = ai_note.hand;
+        }
+    }
 
     pub fn fetch_pos(line: &JudgeLine, res: &Resource, lines: &[JudgeLine]) -> Vector {
         if let Some(parent) = line.parent {

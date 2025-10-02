@@ -897,7 +897,7 @@ impl Judge {
                 if (should_be_left && assigned_hand == Hand::Right) ||
                     (should_be_right && assigned_hand == Hand::Left)
                 {
-                    debug!(
+                    println!(
                     "可疑分配: time={:.2}, x={:.2}, 分配={:?}",
                     note.time,
                     x,

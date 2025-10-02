@@ -218,19 +218,7 @@ pub fn parse_pec_with_list(source: &str, extra: ChartExtra, _r: &mut BpmList) ->
             ensure_bpm(&mut r, &mut bpm_list)
         };
     }
-    macro_rules! last_note {
-        () => {{
-            let Some(last_line) = last_line else {
-                ptl!(bail "no-notes-inserted");
-            };
-            note.hand = if note.object.translation.0.now() < 0.0 {
-                Hand::Left
-            } else {
-                Hand::Right
-            };
-            note
-        }};
-    }
+    
     let mut inner = |line: &str| -> Result<()> {
         let mut it = line.split_whitespace();
         if offset.is_none() {

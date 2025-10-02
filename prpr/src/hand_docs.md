@@ -46,17 +46,34 @@
 
 #### 网络架构（当前配置）
 ```
-Input (28) → GELU(128) → GELU(256) → GELU(256) → Output(4)
+Input (28) → Bi-LSTM(64) → Attention(32) → GELU(64) → GELU(3) → Output(3)
 ```
+
+#### 权重初始化策略
+- **LSTM层**：使用Xavier/Glorot初始化，标准差为`(1.0 / input_size as f32).sqrt()`，适用于Tanh激活函数
+- **Attention层**：使用Xavier/Glorot初始化，标准差为`(2.0 / input_size as f32).sqrt()`，适用于GELU激活函数
+- **Dense层**：根据激活函数自动选择初始化策略（ReLU/GELU使用He初始化，Sigmoid/Tanh使用Xavier初始化）
 
 #### 层类型对比表
 
-| 层类型 | 适用场景 | 计算复杂度 | GPU加速收益 |
-|--------|----------|------------|-------------|
-| Dense | 基础特征处理 | O(n²) | 中等 (2-3x) |
-| LSTM | 时序模式识别 | O(n³) | 高 (5-8x) |
-| Attention | 复杂模式关联 | O(n²) | 高 (4-6x) |
-| Residual | 梯度稳定 | O(n) | 低 (1-2x) |
+| 层类型 | 适用场景 | 计算复杂度 | GPU加速收益 | 初始化策略 |
+|--------|----------|------------|-------------|------------|
+| Dense | 基础特征处理 | O(n²) | 中等 (2-3x) | He/Xavier (根据激活函数) |
+| LSTM | 时序模式识别 | O(n³) | 高 (5-8x) | Xavier (std_dev = sqrt(1/input_size)) |
+| Attention | 复杂模式关联 | O(n²) | 高 (4-6x) | Xavier (std_dev = sqrt(2/input_size)) |
+| Residual | 梯度稳定 | O(n) | 低 (1-2x) | He/Xavier (根据激活函数) |
+
+#### LSTM层实现细节
+- **双向处理**：支持双向LSTM，可同时处理前后文信息
+- **门控机制**：标准LSTM包含输入门、遗忘门、候选值和输出门
+- **序列处理**：自动处理可变长度序列，支持动态批处理
+- **权重布局**：权重矩阵布局为`[W_ih | W_hh]`拼接形式，其中`W_ih`为输入到隐藏层权重，`W_hh`为隐藏层到隐藏层权重
+
+#### Attention层实现细节
+- **QKV投影**：使用三个独立的权重矩阵分别计算Query、Key和Value
+- **缩放点积**：实现标准的缩放点积注意力机制
+- **多头支持**：通过调整输出维度可支持多头注意力
+- **位置编码**：结合输入序列的位置信息进行注意力计算
 
 **GPU加速实现**：
 - 使用WebGPU的Compute Shader实现矩阵乘法
@@ -83,7 +100,11 @@ graph TD
     D --> F[神经网络预测]
     E --> G[后处理优化]
     F --> G
-    G --> H[最终分配结果]
+    G --> H{跨越序列检测}
+    H -->|是| I[跨越序列优化]
+    H -->|否| J[常规优化]
+    I --> K[最终分配结果]
+    J --> K[最终分配结果]
 ```
 
 #### 同时音符分组算法
@@ -155,6 +176,122 @@ fn extract_spatial_features(&self, notes: &[ProcessedNote]) -> Vec<f32> {
 }
 ```
 
+#### 跨越序列特征提取
+```rust
+fn detect_crossing_pattern(&self, notes: &[ProcessedNote]) -> f32 {
+    if notes.len() < 2 {
+        return 0.0;
+    }
+    let mut crossing_score = 0.0;
+    let mut consecutive_crossings = 0;
+    let mut max_consecutive = 0;
+    
+    for i in 1..notes.len() {
+        let prev_x = notes[i-1].position.x;
+        let curr_x = notes[i].position.x;
+        // 检查是否从正到负或负到正
+        if prev_x * curr_x < 0.0 {
+            consecutive_crossings += 1;
+            crossing_score += 1.0;
+        } else {
+            max_consecutive = max_consecutive.max(consecutive_crossings);
+            consecutive_crossings = 0;
+        }
+    }
+    max_consecutive = max_consecutive.max(consecutive_crossings);
+    
+    // 如果有连续的跨越，给予更高的分数
+    let base_score = crossing_score / (notes.len() - 1) as f32;
+    if max_consecutive >= 2 {
+        // 连续跨越序列，提高检测分数
+        (base_score * 1.5).min(1.0)
+    } else {
+        base_score
+    }
+}
+```
+
+#### 跨越序列优化算法
+```rust
+fn optimize_crossing_pattern(&mut self, notes: &mut [ProcessedNote]) {
+    if notes.is_empty() {
+        return;
+    }
+    
+    // 检测是否为真正的跨越序列（从正到负或负到正的连续序列）
+    let mut is_crossing_sequence = false;
+    let mut crossing_start = 0;
+    let mut crossing_end = 0;
+    
+    // 查找跨越序列的开始和结束
+    for i in 0..notes.len() {
+        if i > 0 {
+            let prev_x = notes[i-1].position.x;
+            let curr_x = notes[i].position.x;
+            // 检查是否发生跨越（符号改变）
+            if prev_x * curr_x < 0.0 {
+                if !is_crossing_sequence {
+                    is_crossing_sequence = true;
+                    crossing_start = i.saturating_sub(1);
+                }
+                crossing_end = i;
+            } else if is_crossing_sequence {
+                // 如果跨越序列中断，结束检测
+                break;
+            }
+        }
+    }
+    
+    if is_crossing_sequence && crossing_end > crossing_start {
+        // 确定起始手：根据跨越序列开始前的音符位置
+        let start_hand = if notes[crossing_start].position.x < 0.0 { Hand::Left } else { Hand::Right };
+        let mut current_hand = start_hand;
+        
+        // 处理跨越序列之前的音符
+        for i in 0..=crossing_start {
+            notes[i].assigned_hand = Some(start_hand);
+            notes[i].confidence = 0.85;
+        }
+        
+        // 处理跨越序列：使用起始手完成整个跨越
+        for i in (crossing_start + 1)..=crossing_end {
+            notes[i].assigned_hand = Some(start_hand);
+            notes[i].confidence = 0.8;
+        }
+        
+        // 跨越完成后，根据最后一个音符的位置决定是否切换回默认手
+        let last_note_x = notes[crossing_end].position.x;
+        let ideal_hand_after_crossing = if last_note_x < 0.0 { Hand::Left } else { Hand::Right };
+        
+        // 如果跨越后的理想手与起始手不同，则切换
+        if ideal_hand_after_crossing != start_hand {
+            current_hand = ideal_hand_after_crossing;
+        }
+        
+        // 处理跨越序列之后的音符
+        for i in (crossing_end + 1)..notes.len() {
+            notes[i].assigned_hand = Some(current_hand);
+            notes[i].confidence = 0.85;
+        }
+    } else {
+        // 非跨越序列，使用原有逻辑
+        let start_hand = if notes[0].position.x < 0.0 { Hand::Left } else { Hand::Right };
+        let mut current_hand = start_hand;
+        for note in notes.iter_mut() {
+            note.assigned_hand = Some(current_hand);
+            note.confidence = 0.8;
+            // 如果位置与手部相反且距离较大，考虑切换
+            if note.position.x * current_hand.sign() < -2.4 {
+                current_hand = match current_hand {
+                    Hand::Left => Hand::Right,
+                    Hand::Right => Hand::Left,
+                };
+            }
+        }
+    }
+}
+```
+
 #### 时间特征提取关键指标
 | 特征 | 计算方式 | 作用 |
 |------|----------|------|
@@ -162,6 +299,24 @@ fn extract_spatial_features(&self, notes: &[ProcessedNote]) -> Vec<f32> {
 | 速度变化率 | ΔBPM/Δt | 检测变速段落 |
 | 时序熵 | -Σ p(t)log p(t) | 判断节奏规律性 |
 | 连打长度 | 最长连续音符数 | 优化连打分配 |
+| 跨越序列检测 | 连续符号变化计数 | 识别x到-x跨越模式 |
+
+#### 跨越序列处理机制
+当检测到从正x坐标跨越到负x坐标（或反之）的连续音符序列时，系统会：
+
+1. **识别跨越序列**：检测连续的符号变化（prev_x * curr_x < 0）
+2. **确定起始手**：根据跨越序列开始前的音符位置确定起始手
+3. **保持手部一致性**：使用起始手处理整个跨越序列，避免中途切换
+4. **智能恢复**：跨越完成后根据最终位置决定是否切换回默认手
+
+**触发条件**：
+- 连续跨越序列长度 ≥ 2
+- 检测分数阈值 > 0.4（已从0.6降低以提高灵敏度）
+
+**优势**：
+- 减少不必要的手部切换
+- 提高跨越序列的演奏流畅性
+- 保持手部分配的物理可行性
 
 ## 4. 高级配置指南
 

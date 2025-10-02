@@ -197,20 +197,17 @@ fn parse_events<T: Tweenable, V: Clone + Into<T>>(
         }
     }
     for e in rpe {
-        let tween_id = RPE_TWEEN_MAP.get(e.easing_type.max(1) as usize)
+        let tween = RPE_TWEEN_MAP.get(e.easing_type.max(1) as usize)
             .copied()
             .unwrap_or(RPE_TWEEN_MAP[0]);
         kfs.push(Keyframe {
             time: r.time(&e.start_time),
             value: e.start.clone().into(),
             tween: {
-                let tween = RPE_TWEEN_MAP.get(e.easing_type.max(1) as usize).copied().unwrap_or(RPE_TWEEN_MAP[0]);
                 if e.bezier != 0 {
-                    //Arc::clone(&bezier_map[&bezier_key(e)])
-                    bezier_map[&bezier_key(e)].clone()
+                    Arc::clone(&bezier_map[&bezier_key(e)])
                 } else if e.easing_left.abs() < EPS && (e.easing_right - 1.0).abs() < EPS {
-                    //Arc::new(StaticTween(tween))
-                    StaticTween::get_arc(tween_id)
+                    StaticTween::get_arc(tween)
                 } else {
                     Arc::new(ClampedTween::new(tween, e.easing_left..e.easing_right))
                 }

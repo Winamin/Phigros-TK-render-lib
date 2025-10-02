@@ -5,6 +5,8 @@ use macroquad::prelude::*;
 use std::cell::RefCell;
 use tracing::warn;
 
+//use rayon::prelude::*;
+
 #[derive(Default)]
 pub struct ChartExtra {
     pub effects: Vec<Effect>,
