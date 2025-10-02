@@ -113,16 +113,30 @@ impl Chart {
     }
 
     pub fn update(&mut self, res: &mut Resource) {
+        //TODO: 优化
         for line in &mut self.lines {
             line.object.set_time(res.time);
         }
-        // TODO optimize
-        let trs = self.lines.iter().map(|it| it.now_transform(res, &self.lines)).collect::<Vec<_>>();
+
+        let world_positions: Vec<Vector> = (0..self.lines.len())
+            .map(|i| JudgeLine::fetch_pos(&self.lines[i], res, &self.lines))
+            .collect();
+
+        let trs: Vec<Matrix> = self.lines
+            .iter()
+            .map(|line| line.now_transform(res, &self.lines))
+            .collect();
+
         let mut guard = self.bpm_list.borrow_mut();
         for (index, (line, tr)) in self.lines.iter_mut().zip(trs).enumerate() {
             line.update(res, tr, &mut guard, index);
+
+            if res.config.hand_split {
+                line.update_hand_assign_with_world_pos(res, world_positions[index], &mut guard, index);
+            }
         }
         drop(guard);
+
         for effect in &mut self.extra.effects {
             effect.update(res);
         }

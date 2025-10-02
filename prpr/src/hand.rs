@@ -271,12 +271,6 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
         return;
     }
 
-    // 如果 hand_split 为 false，使用智能密集区域分配
-    if !config.hand_split {
-        intelligent_density_based_assignment(notes, rotation);
-        return;
-    }
-
     start_ai_worker_if_needed();
 
     let now = Instant::now();
@@ -1668,10 +1662,10 @@ impl DeepNeuralNetwork {
     * 构建神经网络架构
      */
     fn build_architecture(&mut self) {
-        self.add_lstm_layer_bi(28, 64, false, 64);
-        self.add_attention_layer(64, 32);           // 聚焦关键信息
+        self.add_lstm_layer_bi(36, 64, false, 64);
+        self.add_attention_layer(64, 32);
         self.add_dense_layer(32, 64, ActivationFunction::GELU);
-        self.add_dense_layer(64, 3, ActivationFunction::GELU); // 保持4维输出
+        self.add_dense_layer(64, 3, ActivationFunction::GELU);
     }
 
     //TODO: 归一化输出
@@ -2914,6 +2908,71 @@ impl AdvancedFeatureExtractor {
         all_features
     }
 
+    fn extract_position_context_features(&self, note: &ProcessedNote, context: &[ProcessedNote]) -> Vec<f32> {
+        let mut features = Vec::new();
+
+        // 1. 相对位置特征 (4维)
+        if let Some(prev_note) = context.iter().rev().find(|n| n.time < note.time) {
+            let dx = note.position.x - prev_note.position.x;
+            let dy = note.position.y - prev_note.position.y;
+            features.push(dx);
+            features.push(dy);
+            features.push((dx * dx + dy * dy).sqrt()); // 距离
+            features.push(dy.atan2(dx)); // 方向角度
+        } else {
+            features.extend(vec![0.0; 4]);
+        }
+
+        // 2. 局部密度特征 (3维)
+        let nearby_notes: Vec<_> = context.iter()
+            .filter(|n| (n.time - note.time).abs() < 0.5)
+            .collect();
+
+        let left_density = nearby_notes.iter()
+            .filter(|n| n.position.x < -0.1)
+            .count() as f32;
+        let right_density = nearby_notes.iter()
+            .filter(|n| n.position.x > 0.1)
+            .count() as f32;
+
+        features.push(left_density);
+        features.push(right_density);
+
+        let total_density = left_density + right_density;
+        if total_density > 0.0 {
+            features.push((right_density - left_density) / total_density);
+        } else {
+            features.push(0.0);
+        }
+
+        // 3. 时间序列特征 (1维): 当前手部连续分配次数
+        let mut streak = 0;
+        let mut last_hand = None;
+
+        // 按时间逆序查找最近的手部分配
+        let mut past_notes: Vec<_> = context.iter()
+            .filter(|n| n.time < note.time && n.assigned_hand.is_some())
+            .collect();
+        past_notes.sort_by(|a, b| b.time.partial_cmp(&a.time).unwrap());
+
+        for n in past_notes {
+            if let Some(hand) = n.assigned_hand {
+                if last_hand.is_none() {
+                    last_hand = Some(hand);
+                    streak = 1;
+                } else if last_hand == Some(hand) {
+                    streak += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        features.push(streak as f32);
+
+        features
+    }
+
     fn extract_position_features(&self, notes: &[ProcessedNote]) -> Vec<f32> {
         if notes.is_empty() {
             return vec![0.0; 4];
@@ -3704,11 +3763,15 @@ impl PhiTKAdvancedAI {
     }
 
     fn detect_and_switch_mode(&mut self, notes: &[Note]) {
-        if notes.len() < 8 {
+        if notes.len() < 12 {  // 最小音符数量要求
             return;
         }
 
         let time_window = notes.last().unwrap().time - notes[0].time;
+        if time_window < 1.0 {  //时间窗口要求
+            return;
+        }
+
         let note_density = notes.len() as f32 / time_window.max(0.1);
 
         let mut max_simultaneous = 1;
@@ -3716,7 +3779,7 @@ impl PhiTKAdvancedAI {
         let mut current_group_size = 1;
 
         for i in 1..notes.len() {
-            if notes[i].time == current_time {
+            if (notes[i].time - current_time).abs() < 0.001 {  //同时判定
                 current_group_size += 1;
                 max_simultaneous = max_simultaneous.max(current_group_size);
             } else {
@@ -3725,19 +3788,28 @@ impl PhiTKAdvancedAI {
             }
         }
 
-        let should_switch = note_density > 8.0 || max_simultaneous > 2;
+        // 提高切换阈值
+        let should_switch = (note_density > 48.0 && max_simultaneous >= 3) ||  // 提高密度要求
+            (note_density > 8.0 && max_simultaneous >= 3) ||    // 同时音符要求更高
+            max_simultaneous >= 4;                              // 只有4个以上同时音符才切换
 
         if should_switch && self.game_mode != GameMode::FourFinger {
+            println!("[模式切换] 检测到高密度谱面，切换到四指模式。密度: {:.1}, 最大同时音符: {}",
+                     note_density, max_simultaneous);
             self.game_mode = GameMode::FourFinger;
             self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
         } else if !should_switch && self.game_mode != GameMode::TwoFinger {
-            self.game_mode = GameMode::TwoFinger;
-            self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
+            // 只有当条件明显不满足时才切换回二指模式
+            if note_density < 6.0 && max_simultaneous <= 2 {
+                println!("[模式切换] 谱面密度降低，切换回二指模式");
+                self.game_mode = GameMode::TwoFinger;
+                self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
+            }
         }
     }
 
     fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize) {
-        println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
+        //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
             return;
         }
@@ -3943,12 +4015,24 @@ impl PhiTKAdvancedAI {
             } else {
                 // 分离度较小的情况，使用AI决策
                 for &note_idx in group {
+                    let start_idx = note_idx.saturating_sub(8);
+                    let end_idx = (note_idx + 8).min(notes.len());
+                    let context = &notes[start_idx..end_idx];
+
                     let features = self.feature_extractor.extract_features(
-                        &notes[note_idx..note_idx + 1],
+                        &notes[note_idx..note_idx + 1], // 单个音符
                         1,
                         bpm_list
                     );
-                    let ai_decision = self.make_ai_decision(&features, &notes[note_idx], line_id);
+
+                    // 新增：提取位置上下文特征
+                    let position_context = self.feature_extractor.extract_position_context_features(&notes[note_idx], context);
+
+                    // 合并特征
+                    let mut all_features = features;
+                    all_features.extend(position_context);
+
+                    let ai_decision = self.make_ai_decision(&all_features, &notes[note_idx], line_id);
 
                     notes[note_idx].assigned_hand = Some(ai_decision.0);
                     notes[note_idx].confidence = ai_decision.1;
@@ -4107,7 +4191,6 @@ impl PhiTKAdvancedAI {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
         const CONTEXT_WINDOW: usize = 64;
         const BATCH_SIZE: usize = 24;
-        const DENSITY_RATIO_THRESHOLD: f32 = 2.0; // 右/左 或 左/右 ≥ 2:1 视为偏移
 
         let mut unassigned_indices = Vec::new();
         for i in 0..notes.len() {
@@ -4117,10 +4200,8 @@ impl PhiTKAdvancedAI {
         }
 
         for batch_indices in unassigned_indices.chunks(BATCH_SIZE) {
-            //let mut features_batch = Vec::with_capacity(batch_indices.len());
             let mut features_batch: Vec<Vec<f32>> = Vec::with_capacity(batch_indices.len());
             let mut note_data: Vec<(usize, f32, f32, JudgeStatus, NoteKind)> = Vec::with_capacity(batch_indices.len());
-            //let mut note_data = Vec::with_capacity(batch_indices.len());
 
             let results: Vec<_> = if let Some(pool) = &self.thread_pool {
                 pool.install(|| {
@@ -4129,7 +4210,7 @@ impl PhiTKAdvancedAI {
                         let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
                         let context = &notes[start_idx..end_idx];
 
-                        // ===== 新增：计算局部密度偏移 =====
+                        // 计算局部密度偏移（保留原有逻辑）
                         let mut left_count = 0;
                         let mut right_count = 0;
                         for note in context {
@@ -4138,12 +4219,11 @@ impl PhiTKAdvancedAI {
                             } else if note.position.x > 0.1 {
                                 right_count += 1;
                             }
-                            // 中线区域 (-0.1 ~ 0.1) 不计入密度统计，避免干扰
                         }
                         let dominant_side = if left_count > 0 && right_count > 0 {
-                            if (right_count as f32) / (left_count as f32) >= DENSITY_RATIO_THRESHOLD {
+                            if (right_count as f32) / (left_count as f32) >= 2.0 {
                                 Some(Hand::Right)
-                            } else if (left_count as f32) / (right_count as f32) >= DENSITY_RATIO_THRESHOLD {
+                            } else if (left_count as f32) / (right_count as f32) >= 2.0 {
                                 Some(Hand::Left)
                             } else {
                                 None
@@ -4156,10 +4236,19 @@ impl PhiTKAdvancedAI {
                             None
                         };
 
+                        // 提取基础特征
                         let mut feature_extractor = self.feature_extractor.clone();
                         let features = feature_extractor.extract_features(&context, CONTEXT_WINDOW, bpm_list);
+
+                        // 新增：提取位置上下文特征
+                        let position_context = feature_extractor.extract_position_context_features(&notes[idx], &context);
+
+                        // 合并特征
+                        let mut all_features = features;
+                        all_features.extend(position_context);
+
                         (
-                            features,
+                            all_features,  // 使用合并后的特征
                             idx,
                             notes[idx].position.x,
                             notes[idx].time,
@@ -4175,16 +4264,20 @@ impl PhiTKAdvancedAI {
                     let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
                     let context = &notes[start_idx..end_idx];
 
+                    // 计算局部密度偏移（保留原有逻辑）
                     let mut left_count = 0;
                     let mut right_count = 0;
                     for note in context {
-                        if note.position.x < -0.1 { left_count += 1; }
-                        else if note.position.x > 0.1 { right_count += 1; }
+                        if note.position.x < -0.1 {
+                            left_count += 1;
+                        } else if note.position.x > 0.1 {
+                            right_count += 1;
+                        }
                     }
                     let dominant_side = if left_count > 0 && right_count > 0 {
-                        if (right_count as f32) / (left_count as f32) >= DENSITY_RATIO_THRESHOLD {
+                        if (right_count as f32) / (left_count as f32) >= 2.0 {
                             Some(Hand::Right)
-                        } else if (left_count as f32) / (right_count as f32) >= DENSITY_RATIO_THRESHOLD {
+                        } else if (left_count as f32) / (right_count as f32) >= 2.0 {
                             Some(Hand::Left)
                         } else {
                             None
@@ -4197,9 +4290,18 @@ impl PhiTKAdvancedAI {
                         None
                     };
 
+                    // 提取基础特征
                     let features = self.feature_extractor.extract_features(&context, CONTEXT_WINDOW, bpm_list);
+
+                    // 新增：提取位置上下文特征
+                    let position_context = self.feature_extractor.extract_position_context_features(&notes[idx], &context);
+
+                    // 合并特征
+                    let mut all_features = features;
+                    all_features.extend(position_context);
+
                     (
-                        features,
+                        all_features,  // 使用合并后的特征
                         idx,
                         notes[idx].position.x,
                         notes[idx].time,
@@ -4219,80 +4321,58 @@ impl PhiTKAdvancedAI {
 
             for (i, output) in outputs.iter().enumerate() {
                 let (features, note_idx, position_x, time, judge, kind, dominant_side) = &results[i];
-                let note = &mut notes[*note_idx];
-                note.features = features.clone();
 
-                let (chosen_hand, confidence, chosen_finger) = self.make_ai_decision_with_density(
-                    output, note, line_id, *dominant_side
+                // 先克隆当前note用于AI决策（避免借用冲突）
+                let current_note = notes[*note_idx].clone();
+
+                // 使用增强的特征进行决策
+                let ai_decision = self.make_ai_decision_with_density(
+                    output, &current_note, line_id, *dominant_side
                 );
 
-                note.assigned_hand = Some(chosen_hand);
-                note.confidence = confidence;
+                // 然后获取可变引用进行修改
+                let note = &mut notes[*note_idx];
+                note.features = features.clone();
+                note.assigned_hand = Some(ai_decision.0);
+                note.confidence = ai_decision.1;
 
-                self.recent_assignments.push_back((chosen_hand, *position_x, *time));
+                self.recent_assignments.push_back((ai_decision.0, *position_x, *time));
                 if self.recent_assignments.len() > 78 {
                     self.recent_assignments.pop_front();
                 }
 
-                if let Some(finger_state) = self.finger_states.iter_mut().find(|fs| fs.finger == chosen_finger) {
+                if let Some(finger_state) = self.finger_states.iter_mut().find(|fs| fs.finger == ai_decision.2) {
                     let success = *judge == JudgeStatus::Judged;
                     finger_state.update_state(note.position, note.time, success, &kind);
                 }
 
                 let success = *judge == JudgeStatus::Judged;
-                match chosen_hand {
+                match ai_decision.0 {
                     Hand::Left => self.left_hand_state.update_state(note.position, note.time, success, &kind),
                     Hand::Right => self.right_hand_state.update_state(note.position, note.time, success, &kind),
                 }
 
-                self.record_experience(&features, note, chosen_hand, confidence);
+                self.record_experience(&features, note, ai_decision.0, ai_decision.1);
             }
         }
     }
 
-    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, _line_id: usize) -> (Hand, f32, Finger) {
-        //println!("[Token Usage] AI Decision - Features: {}, Time: {:.2}", features.len(), note.time);
+    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, line_id: usize) -> (Hand, f32, Finger) {
         let token = TOTAL_TOKENS_USED.fetch_add(1, Ordering::Relaxed);
-        if token % 1000 == 0 {
-            println!("Token: {}", token + 1);
-        }
-        let mut safe_features = Vec::with_capacity(features.len());
-        let mut has_invalid = false;
-
-        for (i, &feat) in features.iter().enumerate() {
-            if !feat.is_finite() {
-                eprintln!("警告: 无效的特征输入[{}]={}", i, feat);
-                safe_features.push(0.0);
-                has_invalid = true;
-            } else {
-                safe_features.push(feat);
-            }
+        if token % 500 == 0 {
+            println!("Decision数量: {}", token + 1);
         }
 
-        // 如果发现无效值，使用修复后的特征
-        let features_to_use = if has_invalid {
-            &safe_features
-        } else {
-            features
-        };
+        // AI推理
+        let output = self.main_network.forward(features);
 
-        // 网络前向传播
-        let raw_output = self.main_network.forward(features_to_use);
-        //println!("Raw network output: {:?}", raw_output);
+        let left_prob = output.get(0).copied().unwrap_or(0.5);
+        let right_prob = output.get(1).copied().unwrap_or(0.5);
+        let confidence = output.get(3).copied().unwrap_or(0.7);
 
-        // 输出归一化处理
-        let network_output = self.main_network.normalize_output(&raw_output);
-
-        let left_ai_confidence = network_output.get(0).copied().unwrap_or(0.4);
-        let right_ai_confidence = network_output.get(1).copied().unwrap_or(0.5);
-        let certainty = network_output.get(3).copied().unwrap_or(0.6);
-
-        // 添加网络输出日志（改进后的值）
-         //println!("[AI决策] 线路{} 时间{:.2}s 位置({:.2},{:.2}) 网络输出: L:{:.3} R:{:.3} 确定性:{:.3}",
-         //        line_id, note.time, note.position.x, note.position.y,
-          //       left_ai_confidence, right_ai_confidence, certainty);
-
-        // 计算手指评分
+        let position_hand = if left_prob > right_prob { Hand::Left } else { Hand::Right };
+        let position_confidence = confidence;
+        
         let mut finger_scores: Vec<(Finger, f32)> = self.finger_states.iter()
             .map(|fs| {
                 let score = fs.calculate_assignment_score(
@@ -4304,98 +4384,18 @@ impl PhiTKAdvancedAI {
             .collect();
 
         finger_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-
-        for (_i, (finger, _score)) in finger_scores.iter().enumerate() {
-            let state = self.finger_states.iter().find(|fs| fs.finger == *finger).unwrap();
-            //println!("  {}: {:?} 评分:{:.3} 位置({:.2},{:.2}) 疲劳:{:.2} 信心:{:.2} 繁忙:{}",
-            //         i, finger, score, state.position.x, state.position.y,
-            //         state.fatigue, state.confidence, state.is_busy);
-        }
-
         let best_finger = finger_scores[0].0;
-        let best_score = finger_scores[0].1;
-        let chosen_hand = best_finger.to_hand();
-        let position_weight = match chosen_hand {
-            Hand::Left => {
-                if note.position.x < -0.2 { 0.3 }
-                else if note.position.x > 0.1 { -0.4 }
-                else { -0.1 }
-            },
-            Hand::Right => {
-                if note.position.x > 0.1 { 0.35 }
-                else if note.position.x < -0.2 { -0.3 }
-                else { 0.05 }
-            },
-        };
-        let initial_hand = best_finger.to_hand();
-        let mut final_hand = initial_hand;
+        let finger_hand = best_finger.to_hand();
 
-        if !self.recent_assignments.is_empty() {
-            let last_assigned_hand = self.recent_assignments.back()
-                .map(|(hand, _, _)| *hand)
-                .unwrap_or(initial_hand);
-
-            let mut consecutive_same_hand = 0;
-            for (hand, _, _) in self.recent_assignments.iter().rev() {
-                if *hand == last_assigned_hand {
-                    consecutive_same_hand += 1;
-                } else {
-                    break;
-                }
-            }
-
-            if consecutive_same_hand >= 2 {
-                let opposite_hand = match last_assigned_hand {
-                    Hand::Left => Hand::Right,
-                    Hand::Right => Hand::Left,
-                };
-
-                let opposite_hand_score = finger_scores.iter()
-                    .find(|(finger, _)| finger.to_hand() == opposite_hand)
-                    .map(|(_, score)| *score)
-                    .unwrap_or(0.0);
-
-                let position_suitable = match opposite_hand {
-                    Hand::Left => note.position.x < 0.0,
-                    Hand::Right => note.position.x > 0.0,
-                };
-
-                if opposite_hand_score > best_score * 0.6 && position_suitable {
-                    final_hand = opposite_hand;
-                    if let Some((_opposite_finger, _)) = finger_scores.iter()
-                        .find(|(finger, _)| finger.to_hand() == opposite_hand)
-                    {
-                        //TODO: 这里可以更新 best_finger
-                    }
-                }
-            }
-        }
-
-        let base_certainty = certainty.clamp(0.3, 0.85);
-        let ai_weight = base_certainty * self.pattern_recognition_strength * 0.7;
-        let heuristic_weight = 1.0 - ai_weight;
-
-        let hand_ai_confidence = if chosen_hand == Hand::Left {
-            left_ai_confidence
+        // 融合位置决策和手指决策
+        let final_hand = if position_confidence > 0.7 {
+            position_hand
         } else {
-            right_ai_confidence
+            finger_hand
         };
 
-        let final_confidence = (
-            hand_ai_confidence * ai_weight +
-                best_score * heuristic_weight +
-                position_weight * 0.1
-        ).clamp(0.2, 0.92);
-
-        let adjusted_exploration = self.exploration_rate * 0.6;
-        let final_hand = if fastrand::f32() < adjusted_exploration {
-            if fastrand::bool() { Hand::Left } else { Hand::Right }
-        } else {
-            chosen_hand
-        };
-
-        //println!("[最终决策] 线路{} 时间{:.2}s 选择:{:?} 信心:{:.3} 探索:{:.3}",
-               //  line_id, note.time, final_hand, final_confidence, adjusted_exploration);
+        let final_confidence = (position_confidence * 0.6 + finger_scores[0].1 * 0.4)
+            .clamp(0.2, 0.95);
 
         (final_hand, final_confidence, best_finger)
     }

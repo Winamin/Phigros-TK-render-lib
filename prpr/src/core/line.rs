@@ -309,14 +309,13 @@ impl JudgeLine {
             }
             true
         });
-        if res.config.hand_split {
-            let config = Config::default();
-            let rot = self.object.rotation.now();
-            assign_hands(&mut self.notes, &config, index, rot, bpm_list);
-        }
+        //if res.config.hand_split {
+        //    let config = Config::default();
+        //    let rot = self.object.rotation.now();
+        //    assign_hands(&mut self.notes, &config, index, rot, bpm_list);
+        //}
     }
 
-    // 使用世界坐标进行手部分配的方法
     pub fn update_hand_assign_with_world_pos(&mut self, res: &mut Resource, world_pos: Vector, bpm_list: &mut BpmList, index: usize) {
         if !res.config.hand_split || self.notes.is_empty() {
             return;
