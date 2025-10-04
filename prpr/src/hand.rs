@@ -67,14 +67,14 @@ impl Default for LineState {
 
 static AI_REQ_TX: OnceCell<CbSender<AiRequest>> = OnceCell::new();
 static AI_RESP_RX: OnceCell<CbReceiver<AiResponse>> = OnceCell::new();
-static AI_SYSTEM: OnceCell<Mutex<PhiTKAdvancedAI>> = OnceCell::new();
+//static AI_SYSTEM: OnceCell<Mutex<PhiTKAdvancedAI>> = OnceCell::new();
 static LINE_STATES: OnceCell<Mutex<HashMap<usize, LineState>>> = OnceCell::new();
 static LINE_RESP_QUEUES: OnceCell<Mutex<HashMap<usize, VecDeque<AiResponse>>>> = OnceCell::new();
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(1);
 static VERSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static TOTAL_TOKENS_USED: AtomicU64 = AtomicU64::new(0);
 
-const LIGHT_UPDATE_INTERVAL_MS: u64 = 16;
+//const LIGHT_UPDATE_INTERVAL_MS: u64 = 16;
 const FULL_UPDATE_INTERVAL_MS: u64 = 20;
 const REQUEST_TIMEOUT_MS: u64 = 5000;
 
@@ -104,10 +104,9 @@ fn calculate_checksum(notes: &[Note]) -> u64 {
 
 fn match_and_merge_notes(original: &mut [Note], updated: &[Note]) -> bool {
     const TIME_THRESHOLD_SEC: f32 = 0.05; // 50 ms
-    const POS_THRESHOLD_SQ: f32 = 400.0; // 20^2 避免开方运算
+    const POS_THRESHOLD_SQ: f32 = 400.0; // 20^2，避免开方运算
 
     let mut used = vec![false; updated.len()];
-    
     // 预计算 updated 音符的索引，按时间排序以优化匹配
     let mut updated_indices: Vec<usize> = (0..updated.len()).collect();
     updated_indices.sort_by(|&a, &b| {
@@ -117,33 +116,32 @@ fn match_and_merge_notes(original: &mut [Note], updated: &[Note]) -> bool {
     for orig in original.iter_mut() {
         let mut best_idx: Option<usize> = None;
         let mut best_score = std::f64::INFINITY;
-        
-        // 使用二分查找找到时间相近的音符
+
         let orig_time = orig.time;
         let search_start = updated_indices.partition_point(|&i| updated[i].time < orig_time - TIME_THRESHOLD_SEC);
         let search_end = updated_indices.partition_point(|&i| updated[i].time <= orig_time + TIME_THRESHOLD_SEC);
-        
+
         // 只检查时间窗口内的音符
         for &idx in &updated_indices[search_start..search_end] {
-            if used[idx] { continue; }
+            if used[idx] {
+                continue;
+            }
             if std::mem::discriminant(&orig.kind) != std::mem::discriminant(&updated[idx].kind) {
                 continue;
             }
-            
-            // 优化：避免重复调用 now()
+
             let ox = orig.object.translation.0.now();
             let oy = orig.object.translation.1.now();
             let ux = updated[idx].object.translation.0.now();
             let uy = updated[idx].object.translation.1.now();
-            
-            // 优化：使用平方距离避免开方
+
             let dx = ox - ux;
             let dy = oy - uy;
             let dist_sq = dx * dx + dy * dy;
             if dist_sq > POS_THRESHOLD_SQ {
                 continue;
             }
-            
+
             let dt = (orig_time - updated[idx].time).abs();
             let score = (dt as f64) * 1000.0 + (dist_sq as f64).sqrt();
             if score < best_score {
@@ -151,16 +149,13 @@ fn match_and_merge_notes(original: &mut [Note], updated: &[Note]) -> bool {
                 best_idx = Some(idx);
             }
         }
-        
+
         if let Some(i) = best_idx {
             orig.hand = updated[i].hand;
             used[i] = true;
-        } else {
-            // 优化：减少错误日志
-            return false;
         }
+        // 否则：跳过该音符，不中断整个合并过程
     }
-
     true
 }
 
@@ -202,7 +197,11 @@ fn start_ai_worker_if_needed() {
 
 
         thread::spawn(move || {
-            let mut worker_ai = PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", 0.0);
+            let config = Config::default();
+            let mut worker_ai = PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", 0.0, &config);
+            println!("[GPU] Initializing GPU in AI worker thread...");
+            worker_ai.main_network.init_gpu_sync();
+            worker_ai.target_network.init_gpu_sync();
 
             while let Ok(req) = rx_req.recv() {
                 let start_time = Instant::now();
@@ -318,7 +317,7 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
         }
     }
 
-    // 优化：减少频繁的 AI 更新
+    /*
     let should_light_update = now.duration_since(line_state.last_light_update) >= Duration::from_millis(LIGHT_UPDATE_INTERVAL_MS);
     if should_light_update {
         line_state.last_light_update = now;
@@ -332,6 +331,8 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
             }
         }
     }
+
+     */
 
     // 优化：减少全量更新的频率
     let should_full_update = now.duration_since(line_state.last_full_update) >= Duration::from_millis(FULL_UPDATE_INTERVAL_MS);
@@ -597,6 +598,7 @@ enum ActivationFunction {
     Tanh,
     Swish,
     GELU,
+    Linear,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -737,8 +739,8 @@ impl DeepNeuralNetwork {
             learning_rate: 0.001, //学习率
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size: 24, //批量训练
-            max_grad_norm: 5.0, //最大梯度限制
+            batch_size: 256, //批量训练
+            max_grad_norm: 10.0, //最大梯度限制
             //weight_decay: 0.0001,
             last_loss: f32::INFINITY, //损失
             bad_epochs: 0,
@@ -756,7 +758,7 @@ impl DeepNeuralNetwork {
         };
 
         network.build_architecture();
-        network.init_gpu_sync();
+        //network.init_gpu_sync();
         network
     }
 
@@ -868,6 +870,7 @@ impl DeepNeuralNetwork {
             ActivationFunction::Tanh => x.tanh(),
             ActivationFunction::Swish => x * (1.0 / (1.0 + (-x).exp())),
             ActivationFunction::GELU => 0.5 * x * (1.0 + (x * 0.7978845608 * (1.0 + 0.044715 * x * x)).tanh()),
+            ActivationFunction::Linear => x,
         }
     }
 
@@ -901,6 +904,7 @@ impl DeepNeuralNetwork {
                 let a_prime = sqrt_2_over_pi * (1.0 + 0.134145 * x * x); // 0.044715*3 = 0.134145
                 left + 0.5 * x * sech2 * a_prime
             }
+            ActivationFunction::Linear => 1.0,
         }
     }
 
@@ -1148,6 +1152,7 @@ impl DeepNeuralNetwork {
             ActivationFunction::Tanh,
             ActivationFunction::Swish,
             ActivationFunction::GELU,
+            ActivationFunction::Linear, //thread '<unnamed>' panicked called `Option::unwrap()` on a `None` value
         ] {
             let activation_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -1238,6 +1243,7 @@ impl DeepNeuralNetwork {
             ActivationFunction::Tanh => "return tanh(val);",
             ActivationFunction::Swish => "return val * (1.0 / (1.0 + exp(-val)));",
             ActivationFunction::GELU => "return 0.5 * val * (1.0 + tanh(val * 0.7978845608 * (1.0 + 0.044715 * val * val)));",
+            ActivationFunction::Linear => "return val;",
         };
 
         format!(r#"
@@ -1290,7 +1296,7 @@ impl DeepNeuralNetwork {
         });
 
         let mut current_input_buffer = input_buffer;
-        let mut current_input_size = input.len();
+        //let mut current_input_size = input.len();
 
         for i in 0..self.layers.len() {
             let layer = &self.layers[i];
@@ -1382,7 +1388,7 @@ impl DeepNeuralNetwork {
 
                 queue.submit(Some(encoder.finish()));
                 current_input_buffer = next_input_buffer;
-                current_input_size = output_size;
+                //current_input_size = output_size;
             } else {
                 // 最后一层，直接使用输出缓冲区
                 current_input_buffer = output_buffer;
@@ -1662,13 +1668,62 @@ impl DeepNeuralNetwork {
     * 构建神经网络架构
      */
     fn build_architecture(&mut self) {
-        self.add_lstm_layer_bi(36, 64, false, 64);
-        self.add_attention_layer(64, 32);
-        self.add_dense_layer(32, 64, ActivationFunction::GELU);
-        self.add_dense_layer(64, 3, ActivationFunction::GELU);
+        const FEATURE_DIM: usize = 40;    // input_dim = 40
+        const SEQ_LEN: usize = 64;        // sequence_length = 64
+        // ============ 第一部分：堆叠 3 层 BiLSTM ============
+        // Layer 1: BiLSTM (40 → 128 hidden → 256 output)
+        self.add_lstm_layer_bi(FEATURE_DIM, 128, true, SEQ_LEN);
+        // Layer 2: BiLSTM (256 → 128 hidden → 256 output)
+        self.add_lstm_layer_bi(256, 128, true, SEQ_LEN);
+        // Layer 3: BiLSTM (256 → 128 hidden → 256 output)
+        self.add_lstm_layer_bi(256, 128, true, SEQ_LEN);
+        // Layer 4: Attention (256 → 128)
+        // Q/K/V: 256*128*3 + 128*3 = 98,304 + 384 = 98,688
+        self.add_attention_layer(256, 128);
+        // Layer 5: Attention (128 → 64)
+        // Q/K/V: 128*64*3 + 64*3 = 24,576 + 192 = 24,768
+        self.add_attention_layer(128, 64);
+        // Layer 6: Dense (64 → 512)
+        self.add_dense_layer(64, 512, ActivationFunction::GELU);
+        // Layer 7: Dense (512 → 256)
+        self.add_dense_layer(512, 256, ActivationFunction::GELU);
+        // Layer 8: Dense (256 → 256)
+        self.add_dense_layer(256, 256, ActivationFunction::GELU);
+        // Layer 9: Dense (256 → 128)
+        self.add_dense_layer(256, 128, ActivationFunction::GELU);
+        // Layer 10: Dense (128 → 128)
+        self.add_dense_layer(128, 128, ActivationFunction::GELU);
+        // Layer 11: Dense (128 → 64)
+        self.add_dense_layer(128, 64, ActivationFunction::GELU);
+        // Layer 12: Output (64 → 5)
+        // 注意：输出层使用 Linear（无激活），由损失函数处理 softmax
+        self.add_dense_layer(64, 5, ActivationFunction::Linear);
+
+        // BiLSTM ×3:
+        //   L1: 4*(128*(40+128)+128)*2 ≈ 173,056
+        //   L2/L3: 4*(128*(256+128)+128)*2 ≈ 394,240 each → ×2 = 788,480
+        //   BiLSTM total ≈ 173k + 788k = 961,536
+        //
+        // Attention ×2:
+        //   Att1 (256→128): 256*128*3 + 128*3 = 98,688
+        //   Att2 (128→64):  128*64*3 + 64*3 = 24,768
+        //   Total ≈ 123,456
+        //
+        // Dense ×6 + output:
+        //   64*512+512 = 33,280
+        //   512*256+256 = 131,328
+        //   256*256+256 = 65,792
+        //   256*128+128 = 32,896
+        //   128*128+128 = 16,512
+        //   128*64+64 = 8,256
+        //   64*5+5 = 325
+        //   Dense total ≈ 288,389
+        //
+        // GRAND TOTAL ≈ 961,536 + 123,456 + 288,389 ≈ **1,373,381 参数**
     }
 
     //TODO: 归一化输出
+    /*
     fn normalize_output(&self, raw_output: &[f32]) -> Vec<f32> {
         let mut normalized = raw_output.to_vec();
         if normalized.len() >= 2 {
@@ -1696,6 +1751,8 @@ impl DeepNeuralNetwork {
         normalized
     }
 
+     */
+
     fn add_dense_layer(&mut self, input_size: usize, output_size: usize, activation: ActivationFunction) {
         let mut weights = Vec::with_capacity(output_size);
         let mut biases = Vec::with_capacity(output_size);
@@ -1705,7 +1762,7 @@ impl DeepNeuralNetwork {
             ActivationFunction::ReLU | ActivationFunction::GELU | ActivationFunction::Swish => {
                 (2.0 / input_size as f32).sqrt()
             }
-            ActivationFunction::Sigmoid | ActivationFunction::Tanh => {
+            ActivationFunction::Sigmoid | ActivationFunction::Tanh | ActivationFunction::Linear => {
                 (1.0 / input_size as f32).sqrt()
             }
         };
@@ -2000,47 +2057,72 @@ impl DeepNeuralNetwork {
 
     fn lstm_forward(layer: &mut NetworkLayer, input: &[f32]) -> Vec<f32> {
         let seq_len = layer.seq_len;
-        if seq_len <= 1 {
+        let feature_dim = if seq_len > 0 { input.len() / seq_len } else { input.len() };
+        let output_size = layer.activations.len() / (if layer.bidirectional { 2 } else { 1 });
+        let dir_mul = if layer.bidirectional { 2 } else { 1 };
+
+        if seq_len <= 1 || feature_dim == 0 {
             return Self::dense_forward(layer, input);
         }
 
-        let total_input_len = input.len();
-        let input_size = total_input_len / seq_len;
-        let hidden_size = layer.activations.len();
-
-        // 权重布局: [W_ih | W_hh] 每行长度 = input_size + hidden_size
         let weights = &layer.weights;
         let biases = &layer.biases;
 
-        // 初始化隐藏状态和细胞状态
-        let mut h_t = vec![0.0; hidden_size];
-        let mut c_t = vec![0.0; hidden_size];
-
-        // 分离权重矩阵
-        let weights_ih: Vec<_> = weights.iter()
-            .map(|row| row[0..input_size].to_vec())
+        let weights_ih_fwd: Vec<Vec<f32>> = weights[..4 * output_size]
+            .iter()
+            .map(|row| row[..feature_dim].to_vec())
             .collect();
-        let weights_hh: Vec<_> = weights.iter()
-            .map(|row| row[input_size..].to_vec())
+        let weights_hh_fwd: Vec<Vec<f32>> = weights[..4 * output_size]
+            .iter()
+            .map(|row| row[feature_dim..(feature_dim + output_size)].to_vec())
             .collect();
+        let biases_fwd = &biases[..4 * output_size];
 
-        // 处理每个时间步
+        let mut h_fwd = vec![0.0; output_size];
+        let mut c_fwd = vec![0.0; output_size];
         for t in 0..seq_len {
-            let start = t * input_size;
-            if start >= total_input_len {
-                break;
-            }
-            let end = (start + input_size).min(total_input_len);
+            let start = t * feature_dim;
+            let end = start + feature_dim;
+            if end > input.len() { break; }
             let x_t = &input[start..end];
-
-            // 使用 lstm_cell 函数处理当前时间步
-            let (new_h, new_c) = Self::lstm_cell(x_t, &h_t, &c_t, &weights_ih, &weights_hh, biases);
-            h_t = new_h;
-            c_t = new_c;
+            let (new_h, new_c) = Self::lstm_cell(x_t, &h_fwd, &c_fwd, &weights_ih_fwd, &weights_hh_fwd, biases_fwd);
+            h_fwd = new_h;
+            c_fwd = new_c;
         }
 
-        layer.activations = h_t.clone();
-        h_t
+        if !layer.bidirectional {
+            layer.activations = h_fwd.clone();
+            return h_fwd;
+        }
+
+        let weights_ih_bwd: Vec<Vec<f32>> = weights[4 * output_size..]
+            .iter()
+            .map(|row| row[..feature_dim].to_vec())
+            .collect();
+        let weights_hh_bwd: Vec<Vec<f32>> = weights[4 * output_size..]
+            .iter()
+            .map(|row| row[feature_dim..(feature_dim + output_size)].to_vec())
+            .collect();
+        let biases_bwd = &biases[4 * output_size..];
+
+        let mut h_bwd = vec![0.0; output_size];
+        let mut c_bwd = vec![0.0; output_size];
+        for t in (0..seq_len).rev() {
+            let start = t * feature_dim;
+            let end = start + feature_dim;
+            if end > input.len() { continue; }
+            let x_t = &input[start..end];
+            let (new_h, new_c) = Self::lstm_cell(x_t, &h_bwd, &c_bwd, &weights_ih_bwd, &weights_hh_bwd, biases_bwd);
+            h_bwd = new_h;
+            c_bwd = new_c;
+        }
+
+        // 拼接正向 + 反向
+        let mut output = Vec::with_capacity(2 * output_size);
+        output.extend(h_fwd);
+        output.extend(h_bwd);
+        layer.activations = output.clone();
+        output
     }
 
     // TODO: 更复杂的注意力机制
@@ -2177,7 +2259,7 @@ impl DeepNeuralNetwork {
             let mut batch_loss = 0.0;
             for (input, target) in batch {
                 let output = self.light_forward(input);
-                let loss: f32 = output.iter().zip(target.iter())
+                let loss: f32 = output.iter().zip(target.iter()).take(2) // 只取 hand Q 值
                     .map(|(o, t)| (o - t).powi(2))
                     .sum();
                 batch_loss += loss;
@@ -2323,7 +2405,7 @@ impl DeepNeuralNetwork {
             self.bad_epochs = 0;
         }
         else if loss > self.last_loss * 1.05 {
-            self.learning_rate = (self.learning_rate * 0.8).max(0.0001);
+            self.learning_rate = (self.learning_rate * 0.8).max(0.005);
             self.bad_epochs += 1;
             if self.bad_epochs >= 5 {
                 println!("连续{}个epoch表现不佳，执行网络重置", self.bad_epochs);
@@ -2446,7 +2528,7 @@ impl DeepNeuralNetwork {
                         ActivationFunction::Sigmoid => a * (1.0 - a),
                         ActivationFunction::Tanh => 1.0 - a * a,
                         // 对 Swish/GELU 没有简单的从 a 得到导数的方法 —— 打印警告并使用 1.0 的保守近似（避免进一步放大）
-                        ActivationFunction::Swish | ActivationFunction::GELU => {
+                        ActivationFunction::Swish | ActivationFunction::GELU | ActivationFunction::Linear => {
                             eprintln!("[Backward Warning] missing pre_activation for layer {}, using fallback derivative=1.0 for {:?}", last_idx, self.layers[last_idx].activation_func);
                             1.0
                         }
@@ -2464,14 +2546,14 @@ impl DeepNeuralNetwork {
             layer_errors[last_layer_idx] = output_errors;
         }
 
-        // activation a（不是 z）计算导数（可处理常见激活）
+        // activation a（不是 z）计算导数
         let derivative_from_activation = |a: f32, func: &ActivationFunction| -> f32 {
             match func {
                 ActivationFunction::ReLU => if a > 0.0 { 1.0 } else { 0.0 },
                 ActivationFunction::Sigmoid => a * (1.0 - a),
                 ActivationFunction::Tanh => 1.0 - a * a,
                 // 对 Swish/GELU 无法从 a 得到精确导数，返回 1.0
-                ActivationFunction::Swish | ActivationFunction::GELU => 1.0,
+                ActivationFunction::Swish | ActivationFunction::GELU | ActivationFunction::Linear=> 1.0,
             }
         };
 
@@ -2538,7 +2620,7 @@ impl DeepNeuralNetwork {
 
     fn calculate_layer_gradients(
         &self,
-        layer_idx: usize,
+        _layer_idx: usize,
         errors: &[f32],
         gradients: &mut [Vec<f32>],
         bias_gradients: &mut [f32],
@@ -2567,8 +2649,8 @@ impl DeepNeuralNetwork {
 
     fn apply_gradients(&mut self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_size: usize) {
         let batch_size_f = batch_size as f32;
-        const MAX_GRAD: f32 = 5.0;
-        const MAX_WEIGHT: f32 = 10.0;
+        const MAX_GRAD: f32 = 10.0;
+        const MAX_WEIGHT: f32 = 25.0;
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             for (i, weight_row) in layer.weights.iter_mut().enumerate() {
@@ -2869,32 +2951,58 @@ impl AdvancedFeatureExtractor {
         let mut all_features = Vec::new();
         let actual_len = notes.len().min(window_size);
 
-        // 对窗口中的每个 note 提取 28 维特征
+        // 全局上下文（每个音符重复）
+        let (note_density, max_simul, global_bpm) = if !notes.is_empty() {
+            let time_span = notes.last().unwrap().time - notes.first().unwrap().time + 0.001;
+            let density = notes.len() as f32 / time_span;
+            let max_simul = self.max_simultaneous_in_window(notes);
+            let bpm = bpm_list.now_bpm(notes[0].time);
+            (density, max_simul, bpm)
+        } else {
+            (0.0, 0, 0.0)
+        };
+        let four_finger_hint = if (note_density > 48.0 && max_simul >= 3) || max_simul >= 4 { 1.0 } else { 0.0 };
+
         for i in 0..actual_len {
-            let note_slice = &notes[i..i+1]; // 只传当前 note
+            let note = &notes[i]; // 当前音符
+
+            // 构造上下文窗口：前后各 16 个音符
+            let context_start = i.saturating_sub(16);
+            let context_end = (i + 16).min(notes.len());
+            let context = &notes[context_start..context_end];
+
             let mut features = Vec::new();
-            features.extend(self.extract_position_features(note_slice));
-            features.extend(self.extract_temporal_features(note_slice, 1, bpm_list.clone()));
-            features.extend(self.extract_pattern_features(note_slice));
-            features.extend(self.extract_difficulty_features(note_slice));
-            features.extend(self.extract_velocity_features(note_slice));
-            features.extend(self.extract_spatial_features(note_slice));
-            debug_assert_eq!(features.len(), 28, "Single note feature dimension must be 28");
+            features.extend(self.extract_position_features(&[note.clone()]));
+            //features.extend(self.extract_temporal_features(&[note.clone()], 1, bpm_list));
+            features.extend(self.extract_temporal_features(note, context, bpm_list));
+            features.extend(self.extract_pattern_features(&[note.clone()]));
+            features.extend(self.extract_difficulty_features(&[note.clone()]));
+            features.extend(self.extract_velocity_features(&[note.clone()]));
+            features.extend(self.extract_spatial_features(&[note.clone()]));
+
+            //  context 特征
+            features.extend(self.extract_position_context_features(note, context));
+
+            // 全局上下文特征
+            features.push(note_density / 100.0);
+            features.push(max_simul as f32 / 8.0);
+            features.push(global_bpm / 300.0);
+            features.push(four_finger_hint);
+
+            // 32 + 8 = 40
+            debug_assert_eq!(features.len(), 40, "Single note feature dimension must be 40");
             all_features.extend(features);
         }
 
-        // 填充到 window_size × 28
-        let target_len = window_size * 28;
+        let target_len = window_size * 40; //  40个特征维度
         if all_features.len() < target_len {
             all_features.resize(target_len, 0.0);
         }
 
-        // 清理 NaN/Inf
+        // 归一化（保持不变）
         for f in &mut all_features {
             if !f.is_finite() { *f = 0.0; }
         }
-
-        // 归一化（保持与原逻辑一致）
         let min_val = all_features.iter().cloned().fold(f32::INFINITY, f32::min);
         let max_val = all_features.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         if (max_val - min_val).abs() < f32::EPSILON {
@@ -2904,57 +3012,62 @@ impl AdvancedFeatureExtractor {
                 *f = 2.0 * (*f - min_val) / (max_val - min_val) - 1.0;
             }
         }
-
         all_features
+    }
+
+    fn max_simultaneous_in_window(&self, notes: &[ProcessedNote]) -> usize {
+        if notes.is_empty() { return 0; }
+        let mut max_simul = 1;
+        let mut i = 0;
+        while i < notes.len() {
+            let base_time = notes[i].time;
+            let mut count = 1;
+            let mut j = i + 1;
+            while j < notes.len() && (notes[j].time - base_time).abs() <= 0.03 {
+                count += 1;
+                j += 1;
+            }
+            max_simul = max_simul.max(count);
+            i = j;
+        }
+        max_simul
     }
 
     fn extract_position_context_features(&self, note: &ProcessedNote, context: &[ProcessedNote]) -> Vec<f32> {
         let mut features = Vec::new();
 
-        // 1. 相对位置特征 (4维)
         if let Some(prev_note) = context.iter().rev().find(|n| n.time < note.time) {
             let dx = note.position.x - prev_note.position.x;
             let dy = note.position.y - prev_note.position.y;
             features.push(dx);
             features.push(dy);
-            features.push((dx * dx + dy * dy).sqrt()); // 距离
-            features.push(dy.atan2(dx)); // 方向角度
+            features.push((dx * dx + dy * dy).sqrt());
+            features.push(dy.atan2(dx));
         } else {
             features.extend(vec![0.0; 4]);
         }
 
-        // 2. 局部密度特征 (3维)
-        let nearby_notes: Vec<_> = context.iter()
-            .filter(|n| (n.time - note.time).abs() < 0.5)
-            .collect();
-
-        let left_density = nearby_notes.iter()
-            .filter(|n| n.position.x < -0.1)
-            .count() as f32;
-        let right_density = nearby_notes.iter()
-            .filter(|n| n.position.x > 0.1)
-            .count() as f32;
-
-        features.push(left_density);
-        features.push(right_density);
-
-        let total_density = left_density + right_density;
-        if total_density > 0.0 {
-            features.push((right_density - left_density) / total_density);
-        } else {
-            features.push(0.0);
+        let mut left_density = 0;
+        let mut right_density = 0;
+        for other in context {
+            if (other.time - note.time).abs() <= 0.3 {
+                if other.position.x < 0.0 {
+                    left_density += 1;
+                } else {
+                    right_density += 1;
+                }
+            }
         }
+        features.push(left_density as f32 / 10.0);
+        features.push(right_density as f32 / 10.0);
+        features.push((right_density as f32 - left_density as f32) / 10.0);
 
-        // 3. 时间序列特征 (1维): 当前手部连续分配次数
         let mut streak = 0;
         let mut last_hand = None;
-
-        // 按时间逆序查找最近的手部分配
         let mut past_notes: Vec<_> = context.iter()
             .filter(|n| n.time < note.time && n.assigned_hand.is_some())
             .collect();
         past_notes.sort_by(|a, b| b.time.partial_cmp(&a.time).unwrap());
-
         for n in past_notes {
             if let Some(hand) = n.assigned_hand {
                 if last_hand.is_none() {
@@ -2967,10 +3080,9 @@ impl AdvancedFeatureExtractor {
                 }
             }
         }
-
         features.push(streak as f32);
 
-        features
+        features // 总共 4 + 3 + 1 = 8 维
     }
 
     fn extract_position_features(&self, notes: &[ProcessedNote]) -> Vec<f32> {
@@ -2987,55 +3099,55 @@ impl AdvancedFeatureExtractor {
         ]
     }
 
-    fn extract_temporal_features(&mut self, notes: &[ProcessedNote], window_size: usize, bpm_list: BpmList) -> Vec<f32> {
-        if notes.is_empty() {
+    fn extract_temporal_features(&self, note: &ProcessedNote, context: &[ProcessedNote], bpm_list: &BpmList) -> Vec<f32> {
+        if context.len() < 2 {
             return vec![0.0; 6];
         }
 
-        let window_end = window_size.min(notes.len());
-        let window = &notes[0..window_end];
+        // 使用上下文窗口计算时间特征
+        let intervals: Vec<f32> = context.windows(2)
+            .map(|w| w[1].time - w[0].time)
+            .collect();
 
-        let mut intervals = Vec::new();
-        for i in 1..window.len() {
-            intervals.push(window[i].time - window[i-1].time);
-        }
-
-        let avg_interval = if !intervals.is_empty() {
-            intervals.iter().sum::<f32>() / intervals.len() as f32
-        } else {
-            0.0
-        };
-
-        let interval_variance = if intervals.len() > 1 {
-            let mean = avg_interval;
-            intervals.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / intervals.len() as f32
-        } else {
-            0.0
-        };
-
+        let (avg_interval, variance) = Self::calculate_interval_stats(&intervals);
         let rhythm_complexity = self.calculate_rhythm_complexity(&intervals);
+        let current_bpm = bpm_list.now_bpm(note.time);
 
-        let current_time = notes[0].time;
-        let current_bpm = bpm_list.now_bpm(current_time);
-
-        let should_log = self.last_logged_bpm.is_none() ||
-            current_bpm != self.last_logged_bpm.unwrap() ||
-            current_time - self.last_logged_time > 1.0;
-
-        if should_log {
-            //println!("[BPM LOG] Time: {:.2}s, BPM: {:.1}", current_time, current_bpm);
-            self.last_logged_bpm = Some(current_bpm);
-            self.last_logged_time = current_time;
-        }
+        // 计算局部密度（使用上下文窗口）
+        let time_span = context.last().unwrap().time - context.first().unwrap().time;
+        let density = if time_span > 0.0 {
+            context.len() as f32 / time_span
+        } else {
+            0.0
+        };
 
         vec![
             avg_interval,
-            interval_variance,
+            variance,
             rhythm_complexity,
             current_bpm,
             intervals.len() as f32,
-            window.len() as f32 / (window.last().unwrap().time - window[0].time + 0.001),
+            density,
         ]
+    }
+
+    fn calculate_interval_stats(intervals: &[f32]) -> (f32, f32) {
+        if intervals.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let sum: f32 = intervals.iter().sum();
+        let avg = sum / intervals.len() as f32;
+
+        let variance = if intervals.len() > 1 {
+            intervals.iter()
+                .map(|&x| (x - avg).powi(2))
+                .sum::<f32>() / intervals.len() as f32
+        } else {
+            0.0
+        };
+
+        (avg, variance)
     }
 
     fn calculate_rhythm_complexity(&self, intervals: &[f32]) -> f32 {
@@ -3569,13 +3681,13 @@ impl PhiTKAdvancedAI {
             thread_pool: thread_pool.clone(),
             //thread_count: if thread_pool.is_some() { 32 } else { 1 },
             feature_extractor: AdvancedFeatureExtractor::new(),
-            experience_replay: ExperienceReplay::new(8000),
+            experience_replay: ExperienceReplay::new(200000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad)),
             right_hand_state: HandState::new(Hand::Right, Vector2::new(0.3, 0.0).rotate(rad)),
             rotation,
             exploration_rate: 0.05,
             discount_factor: 0.95,
-            target_update_frequency: 1000,
+            target_update_frequency: 500,
             total_notes_processed: 0,
             correct_predictions: 0,
             training_episodes: 0,
@@ -3584,7 +3696,7 @@ impl PhiTKAdvancedAI {
             learning_momentum: 0.9,
             confidence_threshold: 0.7,
             pattern_memory: BTreeMap::new(),
-            performance_history: VecDeque::with_capacity(50000),
+            performance_history: VecDeque::with_capacity(500000),
             version: Self::CURRENT_VERSION,
             last_save_episodes: 0,
             last_update_time: -1.0,
@@ -3592,9 +3704,9 @@ impl PhiTKAdvancedAI {
             game_mode,
             finger_states,
             stability_factor: 0.85,
-            hand_switch_penalty: 0.4,
+            hand_switch_penalty: 0.01,
             consistency_bonus: 0.3,
-            adaptive_learning_rate: 0.001,
+            adaptive_learning_rate: 0.005,
             pattern_recognition_strength: 1.0,
             memory_consolidation_rate: 0.1,
             recent_assignments: VecDeque::with_capacity(50),
@@ -3603,83 +3715,84 @@ impl PhiTKAdvancedAI {
         };
 
         ai.target_network = DeepNeuralNetwork::new(); // 创建新实例
-        ai.target_network.build_architecture();       // 构建相同架构
-        ai.target_network.init_gpu_sync();
+        //ai.target_network.build_architecture();       // 构建相同架构
+        //ai.target_network.init_gpu_sync();
 
         ai.warm_thread_pool();
         ai
     }
 
-    fn load_or_create(filepath: &str, rotation: f32) -> Self {
+    fn load_or_create(filepath: &str, rotation: f32, config: &Config) -> Self {
         let path = Path::new(filepath);
-        if let Ok(bytes) = fs::read(path) {
-            if let Ok(mut ai) = bincode::deserialize::<Self>(&bytes) {
-                if ai.validate_for_serialization() {
-                    println!("[Model] 从文件加载模型: {}, 训练回合数: {}", filepath, ai.training_episodes);
-                    ai.rotation = rotation;
-                    ai.update_hand_positions();
+        if config.hand_split == true {
+            // 尝试加载已有模型
+            if let Ok(bytes) = fs::read(path) {
+                if let Ok(mut ai) = bincode::deserialize::<Self>(&bytes) {
+                    if ai.validate_for_serialization() {
+                        println!("[Model] 从文件加载模型: {}, 训练回合数: {}", filepath, ai.training_episodes);
+                        ai.rotation = rotation;
+                        ai.update_hand_positions();
 
-                    // 为 main_network 设置状态，强制重新初始化 GPU
-                    ai.main_network.initialization_attempted = false;
-                    ai.main_network.initialization_failed = false;
-                    ai.main_network.gpu_initialized = false;
-                    println!("[GPU/CPU SWITCH] Beginning GPU init for main_network...");
+                        // 重置并初始化 main_network GPU
+                        ai.main_network.initialization_attempted = false;
+                        ai.main_network.initialization_failed = false;
+                        ai.main_network.gpu_initialized = false;
+                        println!("[GPU/CPU SWITCH] Beginning GPU init for main_network...");
+                        ai.main_network.init_gpu_sync();
 
-                    // 尝试初始化 GPU，失败则回退到 CPU
-                    println!("[GPU/CPU SWITCH] Beginning GPU init for main_network...");
-                    ai.main_network.init_gpu_sync();
-                    
-                    if ai.main_network.gpu_initialized {
-                        println!("[GPU/CPU SWITCH] main_network GPU initialized successfully.");
-                    } else {
-                        println!("[GPU/CPU SWITCH] main_network GPU initialization failed, using CPU fallback.");
+                        if ai.main_network.gpu_initialized {
+                            println!("[GPU/CPU SWITCH] main_network GPU initialized successfully.");
+                        } else {
+                            println!("[GPU/CPU SWITCH] main_network GPU initialization failed, using CPU fallback.");
+                        }
+
+                        // 重置并初始化 target_network GPU
+                        ai.target_network.device = None;
+                        ai.target_network.queue = None;
+                        ai.target_network.batch_size_buffer = None;
+                        ai.target_network.matmul_pipeline = None;
+                        ai.target_network.activation_pipelinotes = HashMap::new();
+                        ai.target_network.activation_bind_group_layouts = HashMap::new();
+                        for layer in &mut ai.target_network.layers {
+                            layer.weights_buffer = None;
+                            layer.biases_buffer = None;
+                            layer.activations_buffer = None;
+                        }
+                        ai.target_network.initialization_attempted = false;
+                        ai.target_network.initialization_failed = false;
+                        ai.target_network.gpu_initialized = false;
+
+                        println!("[GPU/CPU SWITCH] Beginning GPU init for target_network...");
+                        ai.target_network.init_gpu_sync();
+
+                        if ai.target_network.gpu_initialized && ai.target_network.device.is_some() && ai.target_network.queue.is_some() {
+                            println!("[GPU/CPU SWITCH] target_network GPU initialized successfully.");
+                        } else {
+                            println!("[GPU/CPU SWITCH] target_network GPU initialization failed, using CPU fallback.");
+                        }
+
+                        return ai;
                     }
-
-                    // 为 target_network 清除所有 GPU 资源并重新初始化
-                    ai.target_network.device = None;
-                    ai.target_network.queue = None;
-                    ai.target_network.batch_size_buffer = None;
-                    ai.target_network.matmul_pipeline = None;
-                    ai.target_network.activation_pipelinotes = HashMap::new();
-                    ai.target_network.activation_bind_group_layouts = HashMap::new();
-                    // 清除所有层的GPU缓冲区
-                    for layer in &mut ai.target_network.layers {
-                        layer.weights_buffer = None;
-                        layer.biases_buffer = None;
-                        layer.activations_buffer = None;
-                    }
-
-                    // 重置 GPU 初始化状态
-                    ai.target_network.initialization_attempted = false;
-                    ai.target_network.initialization_failed = false;
-                    ai.target_network.gpu_initialized = false;
-
-                    println!("[GPU/CPU SWITCH] Beginning GPU init for target_network...");
-                    ai.target_network.init_gpu_sync();
-
-                    // 添加验证检查
-                    if ai.target_network.gpu_initialized && ai.target_network.device.is_some() && ai.target_network.queue.is_some() {
-                        println!("[GPU/CPU SWITCH] target_network GPU initialized successfully.");
-                    } else {
-                        println!("[GPU/CPU SWITCH] target_network GPU initialization failed, using CPU fallback.");
-                    }
-
-                    return ai;
                 }
             }
+
+            // 加载失败：创建新模型并保存
+            let mut ai = Self::new(rotation);
+            println!("[GPU/CPU SWITCH] Beginning GPU init for new model...");
+            ai.main_network.init_gpu_sync();
+            ai.target_network.init_gpu_sync();
+            println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
+            ai.save_model(filepath); // 只在 hand_split=true 且加载失败时保存
+            ai
+        } else {
+            // hand_split == false：不加载，不保存，直接创建新模型
+            let mut ai = Self::new(rotation);
+            println!("[GPU/CPU SWITCH] Beginning GPU init for new model (hand_split disabled)...");
+            ai.main_network.init_gpu_sync();
+            ai.target_network.init_gpu_sync();
+            println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
+            ai // 不调用 save_model
         }
-
-        // 创建新模型时也强制使用 GPU
-        let mut ai = Self::new(rotation);
-
-        // 初始化 GPU
-        println!("[GPU/CPU SWITCH] Beginning GPU init for new model...");
-        ai.main_network.init_gpu_sync();
-        ai.target_network.init_gpu_sync();
-        println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
-
-        ai.save_model(filepath);
-        ai
     }
 
     fn save_model(&mut self, filepath: &str) {
@@ -3746,6 +3859,7 @@ impl PhiTKAdvancedAI {
         self.right_hand_state.position = Vector2::new(0.3, 0.0).rotate(rad);
     }
 
+    /*
     fn light_update_hand_states(&mut self, notes: &[Note]) {
         for note in notes {
             // 在chart.rs中已经进行了坐标转换，这里直接使用转换后的坐标
@@ -3762,8 +3876,10 @@ impl PhiTKAdvancedAI {
         }
     }
 
+     */
+
     fn detect_and_switch_mode(&mut self, notes: &[Note]) {
-        if notes.len() < 12 {  // 最小音符数量要求
+        if notes.len() < 541 {  // 最小音符数量要求
             return;
         }
 
@@ -3808,7 +3924,7 @@ impl PhiTKAdvancedAI {
         }
     }
 
-    fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize) {
+    fn analyze_and_assign(&mut self, notes: &mut [Note], config: &Config, bpm_list: &BpmList, line_id: usize) {
         //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
             return;
@@ -3875,26 +3991,22 @@ impl PhiTKAdvancedAI {
     fn detect_simultaneous_groups(&self, notes: &[ProcessedNote]) -> Vec<Vec<usize>> {
         let mut groups = Vec::new();
         let mut used = vec![false; notes.len()];
-        const SIMULTANEOUS_THRESHOLD: f32 = 0.03;
+        const SIMULTANEOUS_THRESHOLD: f32 = 0.05; // 50ms，统一阈值
 
         for i in 0..notes.len() {
-            if used[i] {
-                continue;
-            }
-
+            if used[i] { continue; }
             let mut group = vec![i];
             let base_time = notes[i].time;
-
             for j in i + 1..notes.len() {
-                if used[j] {
-                    continue;
-                }
-
+                if used[j] { continue; }
                 let time_diff = (notes[j].time - base_time).abs();
 
-                let threshold = if matches!(notes[i].kind, NoteKind::Hold { .. }) ||
+                let threshold = if matches!(notes[i].kind, NoteKind::Hold { .. }) &&
                     matches!(notes[j].kind, NoteKind::Hold { .. }) {
-                    SIMULTANEOUS_THRESHOLD * 0.5
+                    SIMULTANEOUS_THRESHOLD
+                } else if matches!(notes[i].kind, NoteKind::Hold { .. }) ||
+                    matches!(notes[j].kind, NoteKind::Hold { .. }) {
+                    SIMULTANEOUS_THRESHOLD * 0.7
                 } else {
                     SIMULTANEOUS_THRESHOLD
                 };
@@ -3904,141 +4016,50 @@ impl PhiTKAdvancedAI {
                     used[j] = true;
                 }
             }
-
             if group.len() > 1 {
                 groups.push(group);
             }
             used[i] = true;
         }
-
         groups
     }
 
     fn assign_simultaneous_groups(&mut self, notes: &mut [ProcessedNote], groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
+        const CONTEXT_WINDOW: usize = 64;
         for group in groups {
             if group.len() < 2 {
                 continue;
             }
 
-            if self.game_mode == GameMode::TwoFinger && group.len() > 2 {
-                let left_notes: Vec<_> = group.iter().filter(|&&i| notes[i].position.x < 0.0).collect();
-                let right_notes: Vec<_> = group.iter().filter(|&&i| notes[i].position.x >= 0.0).collect();
+            if self.game_mode == GameMode::TwoFinger {
+                let mut sorted_group: Vec<_> = group.iter().map(|&i| (notes[i].position.x, i)).collect();
+                sorted_group.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-                // 如果左右都有，且总数 > 2 → 触发重分配
-                if !left_notes.is_empty() && !right_notes.is_empty() {
-                    // 计算哪一侧更密集
-                    let dominant_side = if right_notes.len() > left_notes.len() {
-                        true // right dominant
-                    } else {
-                        false // left dominant
-                    };
-
-                    // 全部分配到密集侧，按 x 排序后交替分配
-                    let mut all_indices: Vec<_> = group.iter().copied().collect();
-                    all_indices.sort_by(|&a, &b| notes[a].position.x.partial_cmp(&notes[b].position.x).unwrap_or(std::cmp::Ordering::Equal));
-
-                    for (idx, &note_idx) in all_indices.iter().enumerate() {
-                        let hand = if dominant_side {
-                            // 全在右侧：按排序交替分配（模拟2指在右区）
-                            if idx % 2 == 0 { Hand::Right } else { Hand::Left }
-                        } else {
-                            // 全在左侧
-                            if idx % 2 == 0 { Hand::Left } else { Hand::Right }
-                        };
-                        notes[note_idx].assigned_hand = Some(hand);
-                        notes[note_idx].confidence = 0.85;
-                        self.recent_assignments.push_back((hand, notes[note_idx].position.x, notes[note_idx].time));
-                    }
+                for (idx, &(_, note_idx)) in sorted_group.iter().enumerate() {
+                    let hand = if idx % 2 == 0 { Hand::Left } else { Hand::Right };
+                    notes[note_idx].assigned_hand = Some(hand);
+                    notes[note_idx].confidence = 0.92;
+                    self.recent_assignments.push_back((hand, notes[note_idx].position.x, notes[note_idx].time));
                     if self.recent_assignments.len() > 50 {
                         self.recent_assignments.pop_front();
                     }
-                    continue; // 跳过原有逻辑
                 }
-            }
-
-            if group.len() == 4 {
-                let mut sorted_group: Vec<_> = group.iter()
-                    .map(|&i| (i, notes[i].position.x))
-                    .collect();
-                sorted_group.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-                for (idx, (note_idx, _)) in sorted_group.iter().enumerate() {
-                    let hand = if idx < 2 { Hand::Left } else { Hand::Right };
-                    notes[*note_idx].assigned_hand = Some(hand);
-                    notes[*note_idx].confidence = 0.9;
-                    self.recent_assignments.push_back((hand, notes[*note_idx].position.x, notes[*note_idx].time));
-                    if self.recent_assignments.len() > 78 {
-                        self.recent_assignments.pop_front();
-                    }
-                }
+                self.update_hand_states_for_group(notes, group);
                 continue;
             }
-
-            let mut sorted_group: Vec<_> = group.iter()
-                .map(|&i| (i, notes[i].position.x))
-                .collect();
-            sorted_group.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let mid_point = sorted_group.len() / 2;
-
-            let leftmost_x = sorted_group[0].1;
-            let rightmost_x = sorted_group[sorted_group.len() - 1].1;
-            let separation = rightmost_x - leftmost_x;
-
-            if separation > 0.4 && group.len() >= 2 {
-                let mut assigned_left = 0;
-                let mut assigned_right = 0;
-
-                for (pos, (note_idx, _)) in sorted_group.iter().enumerate() {
-                    let hand = if pos < mid_point { Hand::Left } else { Hand::Right };
-
-                    match hand {
-                        Hand::Left if assigned_left < (group.len() + 1) / 2 => {
-                            notes[*note_idx].assigned_hand = Some(Hand::Left);
-                            assigned_left += 1;
-                        }
-                        Hand::Right if assigned_right < group.len() / 2 => {
-                            notes[*note_idx].assigned_hand = Some(Hand::Right);
-                            assigned_right += 1;
-                        }
-                        _ => {
-                            let features = self.feature_extractor.extract_features(&notes[*note_idx..*note_idx + 1], 1, bpm_list);
-                            let ai_decision = self.make_ai_decision(&features, &notes[*note_idx], line_id);
-                            notes[*note_idx].assigned_hand = Some(ai_decision.0);
-                        }
-                    }
-                    notes[*note_idx].confidence = 0.9;
-                    self.recent_assignments.push_back((hand, notes[*note_idx].position.x, notes[*note_idx].time));
-                    if self.recent_assignments.len() > 50 {
-                        self.recent_assignments.pop_front();
-                    }
-                }
-            } else {
-                // 分离度较小的情况，使用AI决策
-                for &note_idx in group {
-                    let start_idx = note_idx.saturating_sub(8);
-                    let end_idx = (note_idx + 8).min(notes.len());
-                    let context = &notes[start_idx..end_idx];
-
-                    let features = self.feature_extractor.extract_features(
-                        &notes[note_idx..note_idx + 1], // 单个音符
-                        1,
-                        bpm_list
-                    );
-
-                    // 新增：提取位置上下文特征
-                    let position_context = self.feature_extractor.extract_position_context_features(&notes[note_idx], context);
-
-                    // 合并特征
-                    let mut all_features = features;
-                    all_features.extend(position_context);
-
-                    let ai_decision = self.make_ai_decision(&all_features, &notes[note_idx], line_id);
-
-                    notes[note_idx].assigned_hand = Some(ai_decision.0);
-                    notes[note_idx].confidence = ai_decision.1;
+            for &note_idx in group {
+                let start = note_idx.saturating_sub(CONTEXT_WINDOW / 2);
+                let end = (note_idx + CONTEXT_WINDOW / 2).min(notes.len());
+                let context = &notes[start..end];
+                let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
+                let ai_decision = self.make_ai_decision(&features, &notes[note_idx], line_id);
+                notes[note_idx].assigned_hand = Some(ai_decision.0);
+                notes[note_idx].confidence = ai_decision.1;
+                self.recent_assignments.push_back((ai_decision.0, notes[note_idx].position.x, notes[note_idx].time));
+                if self.recent_assignments.len() > 50 {
+                    self.recent_assignments.pop_front();
                 }
             }
-
             self.update_hand_states_for_group(notes, group);
         }
     }
@@ -4049,11 +4070,10 @@ impl PhiTKAdvancedAI {
         self.optimize_recognized_patterns(notes);
 
         self.ensure_alternating_pattern(notes);
-        self.correct_position_mismatches(notes);
+        //self.correct_position_mismatches(notes);
         self.check_hand_consistency(notes);
-        self.correct_position_mismatches(notes);
     }
-
+    /*
     fn correct_position_mismatches(&self, notes: &mut [ProcessedNote]) {
         for note in notes {
             if let Some(hand) = note.assigned_hand {
@@ -4073,6 +4093,8 @@ impl PhiTKAdvancedAI {
             }
         }
     }
+
+     */
 
     fn ensure_alternating_pattern(&mut self, notes: &mut [ProcessedNote]) {
         const MAX_CONSECUTIVE: usize = 3;
@@ -4148,49 +4170,10 @@ impl PhiTKAdvancedAI {
         }
     }
 
-    fn make_ai_decision_with_density(
-        &mut self,
-        features: &[f32],
-        note: &ProcessedNote,
-        _line_id: usize,
-        dominant_side: Option<Hand>,
-    ) -> (Hand, f32, Finger) {
-        // 如果存在显著密度偏移，直接使用排序交替逻辑（2指模式）
-        if self.game_mode == GameMode::TwoFinger && dominant_side.is_some() {
-            // 在偏移区域，两只手都进该侧，按 x 排序交替分配
-            let hand = match dominant_side.unwrap() {
-                Hand::Left => {
-                    // 在左区：x 越小越靠前，先左后右
-                    if note.position.x <= -0.15 {
-                        Hand::Left
-                    } else {
-                        Hand::Right
-                    }
-                }
-                Hand::Right => {
-                    // 在右区：x 越大越靠前，先右后左
-                    if note.position.x >= 0.15 {
-                        Hand::Right
-                    } else {
-                        Hand::Left
-                    }
-                }
-            };
-            // 返回高置信度（因为这是策略性分配）
-            return (hand, 0.88, match hand {
-                Hand::Left => Finger::LeftIndex,
-                Hand::Right => Finger::RightIndex,
-            });
-        }
-
-        // 否则，走原有 AI 决策逻辑
-        self.make_ai_decision(features, note, _line_id)
-    }
-
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
         const CONTEXT_WINDOW: usize = 64;
-        const BATCH_SIZE: usize = 24;
+        const BATCH_SIZE: usize = 256;
 
         let mut unassigned_indices = Vec::new();
         for i in 0..notes.len() {
@@ -4200,9 +4183,6 @@ impl PhiTKAdvancedAI {
         }
 
         for batch_indices in unassigned_indices.chunks(BATCH_SIZE) {
-            let mut features_batch: Vec<Vec<f32>> = Vec::with_capacity(batch_indices.len());
-            let mut note_data: Vec<(usize, f32, f32, JudgeStatus, NoteKind)> = Vec::with_capacity(batch_indices.len());
-
             let results: Vec<_> = if let Some(pool) = &self.thread_pool {
                 pool.install(|| {
                     batch_indices.par_iter().map(|&idx| {
@@ -4210,45 +4190,47 @@ impl PhiTKAdvancedAI {
                         let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
                         let context = &notes[start_idx..end_idx];
 
-                        // 计算局部密度偏移（保留原有逻辑）
                         let mut left_count = 0;
                         let mut right_count = 0;
                         for note in context {
-                            if note.position.x < -0.1 {
-                                left_count += 1;
-                            } else if note.position.x > 0.1 {
-                                right_count += 1;
-                            }
+                            if note.position.x < -0.1 { left_count += 1; }
+                            else if note.position.x > 0.1 { right_count += 1; }
                         }
-                        let dominant_side = if left_count > 0 && right_count > 0 {
-                            if (right_count as f32) / (left_count as f32) >= 2.0 {
-                                Some(Hand::Right)
-                            } else if (left_count as f32) / (right_count as f32) >= 2.0 {
+                        let current_note_time = notes[idx].time;
+
+                        let dominant_side = if self.game_mode == GameMode::TwoFinger {
+                            let density_threshold = 2; // 保持2个音符就触发
+                            let time_window_notes: Vec<_> = context.iter()
+                                .filter(|n| (n.time - current_note_time).abs() <= 0.5)
+                                .collect();
+
+                            let left_count = time_window_notes.iter().filter(|n| n.position.x < -0.05).count();
+                            let right_count = time_window_notes.iter().filter(|n| n.position.x > 0.05).count();
+
+                            // 修复类型转换问题
+                            if left_count >= density_threshold && (left_count as f32) > (right_count as f32) * 1.5 {
                                 Some(Hand::Left)
+                            } else if right_count >= density_threshold && (right_count as f32) > (left_count as f32) * 1.5 {
+                                Some(Hand::Right)
                             } else {
                                 None
                             }
-                        } else if left_count > 0 {
-                            Some(Hand::Left)
-                        } else if right_count > 0 {
-                            Some(Hand::Right)
                         } else {
-                            None
+                            // 4指模式：保持原有比例逻辑
+                            if left_count > 0 && right_count > 0 {
+                                if (right_count as f32) / (left_count as f32) >= 2.0 { Some(Hand::Right) }
+                                else if (left_count as f32) / (right_count as f32) >= 2.0 { Some(Hand::Left) }
+                                else { None }
+                            } else if left_count > 0 { Some(Hand::Left) }
+                            else if right_count > 0 { Some(Hand::Right) }
+                            else { None }
                         };
 
-                        // 提取基础特征
                         let mut feature_extractor = self.feature_extractor.clone();
-                        let features = feature_extractor.extract_features(&context, CONTEXT_WINDOW, bpm_list);
-
-                        // 新增：提取位置上下文特征
-                        let position_context = feature_extractor.extract_position_context_features(&notes[idx], &context);
-
-                        // 合并特征
-                        let mut all_features = features;
-                        all_features.extend(position_context);
+                        let features = feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
 
                         (
-                            all_features,  // 使用合并后的特征
+                            features,
                             idx,
                             notes[idx].position.x,
                             notes[idx].time,
@@ -4264,44 +4246,45 @@ impl PhiTKAdvancedAI {
                     let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
                     let context = &notes[start_idx..end_idx];
 
-                    // 计算局部密度偏移（保留原有逻辑）
                     let mut left_count = 0;
                     let mut right_count = 0;
                     for note in context {
-                        if note.position.x < -0.1 {
-                            left_count += 1;
-                        } else if note.position.x > 0.1 {
-                            right_count += 1;
-                        }
+                        if note.position.x < -0.1 { left_count += 1; }
+                        else if note.position.x > 0.1 { right_count += 1; }
                     }
-                    let dominant_side = if left_count > 0 && right_count > 0 {
-                        if (right_count as f32) / (left_count as f32) >= 2.0 {
-                            Some(Hand::Right)
-                        } else if (left_count as f32) / (right_count as f32) >= 2.0 {
+                    let current_note_time = notes[idx].time;
+
+                    let dominant_side = if self.game_mode == GameMode::TwoFinger {
+                        let density_threshold = 2; // 保持2个音符就触发
+                        let time_window_notes: Vec<_> = context.iter()
+                            .filter(|n| (n.time - current_note_time).abs() <= 0.5) // 使用 current_note_time 而不是 note.time
+                            .collect();
+
+                        let left_count = time_window_notes.iter().filter(|n| n.position.x < -0.05).count();
+                        let right_count = time_window_notes.iter().filter(|n| n.position.x > 0.05).count();
+
+                        // 修复类型转换问题
+                        if left_count >= density_threshold && (left_count as f32) > (right_count as f32) * 1.5 {
                             Some(Hand::Left)
+                        } else if right_count >= density_threshold && (right_count as f32) > (left_count as f32) * 1.5 {
+                            Some(Hand::Right)
                         } else {
                             None
                         }
-                    } else if left_count > 0 {
-                        Some(Hand::Left)
-                    } else if right_count > 0 {
-                        Some(Hand::Right)
                     } else {
-                        None
+                        if left_count > 0 && right_count > 0 {
+                            if (right_count as f32) / (left_count as f32) >= 2.0 { Some(Hand::Right) }
+                            else if (left_count as f32) / (right_count as f32) >= 2.0 { Some(Hand::Left) }
+                            else { None }
+                        } else if left_count > 0 { Some(Hand::Left) }
+                        else if right_count > 0 { Some(Hand::Right) }
+                        else { None }
                     };
 
-                    // 提取基础特征
-                    let features = self.feature_extractor.extract_features(&context, CONTEXT_WINDOW, bpm_list);
-
-                    // 新增：提取位置上下文特征
-                    let position_context = self.feature_extractor.extract_position_context_features(&notes[idx], &context);
-
-                    // 合并特征
-                    let mut all_features = features;
-                    all_features.extend(position_context);
+                    let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
 
                     (
-                        all_features,  // 使用合并后的特征
+                        features,
                         idx,
                         notes[idx].position.x,
                         notes[idx].time,
@@ -4321,16 +4304,12 @@ impl PhiTKAdvancedAI {
 
             for (i, output) in outputs.iter().enumerate() {
                 let (features, note_idx, position_x, time, judge, kind, dominant_side) = &results[i];
-
-                // 先克隆当前note用于AI决策（避免借用冲突）
                 let current_note = notes[*note_idx].clone();
 
-                // 使用增强的特征进行决策
-                let ai_decision = self.make_ai_decision_with_density(
-                    output, &current_note, line_id, *dominant_side
-                );
+                let ai_decision = self.make_ai_decision(output, &current_note, line_id);
+                let ideal_hand = if current_note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                let network_correct = ai_decision.0 == ideal_hand;
 
-                // 然后获取可变引用进行修改
                 let note = &mut notes[*note_idx];
                 note.features = features.clone();
                 note.assigned_hand = Some(ai_decision.0);
@@ -4352,27 +4331,118 @@ impl PhiTKAdvancedAI {
                     Hand::Right => self.right_hand_state.update_state(note.position, note.time, success, &kind),
                 }
 
-                self.record_experience(&features, note, ai_decision.0, ai_decision.1);
+                self.record_experience(&features, note, ai_decision.0, ai_decision.1, network_correct);
             }
         }
     }
 
-    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, line_id: usize) -> (Hand, f32, Finger) {
-        let token = TOTAL_TOKENS_USED.fetch_add(1, Ordering::Relaxed);
-        if token % 500 == 0 {
-            println!("Decision数量: {}", token + 1);
+    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, _line_id: usize) -> (Hand, f32, Finger) {
+        if self.game_mode == GameMode::TwoFinger {
+            let mut recent_left = 0;
+            let mut recent_right = 0;
+            const TIME_WINDOW: f32 = 0.5; // 扩大时间窗口，检测更长时间的密集区
+
+            // 统计近期音符分布
+            for (_, x, t) in &self.recent_assignments {
+                if (note.time - t).abs() <= TIME_WINDOW {
+                    if *x < -0.05 {
+                        recent_left += 1;
+                    } else if *x > 0.05 {
+                        recent_right += 1;
+                    }
+                }
+            }
+
+            // 检测单侧密集：如果一侧音符明显多于另一侧
+            let total_recent = recent_left + recent_right;
+            let is_left_dense = recent_left > 0 && (recent_left as f32) / (total_recent as f32) > 0.6;
+            let is_right_dense = recent_right > 0 && (recent_right as f32) / (total_recent as f32) > 0.6;
+
+            // 单侧密集时的积极交替策略
+            if is_left_dense {
+                // 左侧密集：两只手都在左侧交替打
+                let left_hand_assigns = self.recent_assignments
+                    .iter()
+                    .rev()
+                    .take(8) // 看更近的分配
+                    .filter(|(h, x, t)| *x < -0.05 && (note.time - t).abs() <= TIME_WINDOW)
+                    .map(|(h, _, _)| *h)
+                    .collect::<Vec<_>>();
+
+                // 统计左右手在左侧的分配次数
+                let left_hand_count = left_hand_assigns.iter().filter(|&&h| h == Hand::Left).count();
+                let right_hand_count = left_hand_assigns.iter().filter(|&&h| h == Hand::Right).count();
+
+                // 选择使用较少的手来平衡负荷
+                let hand = if left_hand_count <= right_hand_count {
+                    Hand::Left
+                } else {
+                    Hand::Right
+                };
+
+                return (hand, 0.92, if hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
+            }
+
+            if is_right_dense {
+                // 右侧密集：两只手都在右侧交替打
+                let right_hand_assigns = self.recent_assignments
+                    .iter()
+                    .rev()
+                    .take(8)
+                    .filter(|(h, x, t)| *x > 0.05 && (note.time - t).abs() <= TIME_WINDOW)
+                    .map(|(h, _, _)| *h)
+                    .collect::<Vec<_>>();
+
+                let left_hand_count = right_hand_assigns.iter().filter(|&&h| h == Hand::Left).count();
+                let right_hand_count = right_hand_assigns.iter().filter(|&&h| h == Hand::Right).count();
+
+                let hand = if right_hand_count <= left_hand_count {
+                    Hand::Right
+                } else {
+                    Hand::Left
+                };
+
+                return (hand, 0.92, if hand == Hand::Right { Finger::RightIndex } else { Finger::LeftIndex });
+            }
+
+            // 非密集区：使用原有逻辑，但降低切换阈值
+            let mut left_count = 0;
+            let mut right_count = 0;
+            for (_, x, t) in &self.recent_assignments {
+                if (note.time - t).abs() <= TIME_WINDOW {
+                    if *x < 0.0 { left_count += 1; }
+                    else { right_count += 1; }
+                }
+            }
+
+            // 降低不平衡检测阈值，更容易触发交替
+            let imbalance_threshold = 1.8; // 从2.5降低到1.8
+            let severe_imbalance = (left_count > 0 && right_count > 0) &&
+                ((left_count as f32) / (right_count as f32) >= imbalance_threshold ||
+                    (right_count as f32) / (left_count as f32) >= imbalance_threshold);
+
+            if severe_imbalance {
+                let overloaded_hand = if left_count > right_count { Hand::Left } else { Hand::Right };
+                let underloaded_hand = if overloaded_hand == Hand::Left { Hand::Right } else { Hand::Left };
+
+                // 放宽距离限制，让另一只手更容易介入
+                let hand_state = if underloaded_hand == Hand::Left { &self.left_hand_state } else { &self.right_hand_state };
+                let distance = note.position.distance_to(&hand_state.position);
+
+                if distance < 1.2 { // 增加距离阈值
+                    return (underloaded_hand, 0.85,
+                            if underloaded_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
+                }
+            }
         }
 
-        // AI推理
+        // 原有网络决策逻辑
         let output = self.main_network.forward(features);
-
         let left_prob = output.get(0).copied().unwrap_or(0.5);
         let right_prob = output.get(1).copied().unwrap_or(0.5);
         let confidence = output.get(3).copied().unwrap_or(0.7);
+        let network_hand = if left_prob > right_prob { Hand::Left } else { Hand::Right };
 
-        let position_hand = if left_prob > right_prob { Hand::Left } else { Hand::Right };
-        let position_confidence = confidence;
-        
         let mut finger_scores: Vec<(Finger, f32)> = self.finger_states.iter()
             .map(|fs| {
                 let score = fs.calculate_assignment_score(
@@ -4382,25 +4452,13 @@ impl PhiTKAdvancedAI {
                 (fs.finger, score)
             })
             .collect();
-
         finger_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let best_finger = finger_scores[0].0;
-        let finger_hand = best_finger.to_hand();
 
-        // 融合位置决策和手指决策
-        let final_hand = if position_confidence > 0.7 {
-            position_hand
-        } else {
-            finger_hand
-        };
-
-        let final_confidence = (position_confidence * 0.6 + finger_scores[0].1 * 0.4)
-            .clamp(0.2, 0.95);
-
-        (final_hand, final_confidence, best_finger)
+        (network_hand, confidence, best_finger)
     }
 
-    fn record_experience(&mut self, features: &[f32], note: &ProcessedNote, chosen_hand: Hand, confidence: f32) {
+    fn record_experience(&mut self, features: &[f32], note: &ProcessedNote, chosen_hand: Hand, confidence: f32, network_correct: bool) {
         //println!("Recording experience, replay size now: {}", self.experience_replay.len());
         let reward = self.calculate_reward(note, chosen_hand, confidence);
         let feature_diversity = features.iter().map(|&x| (x - 0.5).abs()).sum::<f32>() / features.len() as f32;
@@ -4414,29 +4472,91 @@ impl PhiTKAdvancedAI {
             done: false,
             timestamp: note.time,
         };
-
         self.experience_replay.push(experience);
+        self.last_assigned_hand = Some(chosen_hand);
+
+        if network_correct {
+            self.correct_predictions += 1;
+        }
+        self.total_notes_processed += 1;
     }
 
-    fn calculate_reward(&self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
-        let mut reward = 0.0;
+    fn calculate_reward(&mut self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
+        let mut reward: f32 = 0.0;
 
-        let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
-        let position_reward = if chosen_hand == ideal_hand {
-            1.0
+        if self.game_mode == GameMode::TwoFinger {
+            let mut recent_left = 0;
+            let mut recent_right = 0;
+            let time_window = 0.5;
+
+            for (_, x, t) in &self.recent_assignments {
+                if (note.time - t).abs() <= time_window {
+                    if *x < -0.05 { recent_left += 1; }
+                    else if *x > 0.05 { recent_right += 1; }
+                }
+            }
+
+            let total_recent = recent_left + recent_right;
+            let is_left_dense = recent_left > 0 && (recent_left as f32) / (total_recent as f32) > 0.6;
+            let is_right_dense = recent_right > 0 && (recent_right as f32) / (total_recent as f32) > 0.6;
+            let is_dense = is_left_dense || is_right_dense;
+
+            if is_dense {
+                let note_in_dense_side = if is_left_dense { note.position.x < -0.05 } else { note.position.x > 0.05 };
+
+                if note_in_dense_side {
+                    // 在密集区内积极交替：大幅奖励交替，大幅惩罚连续同手
+                    if self.last_assigned_hand == Some(chosen_hand) {
+                        reward -= 0.8; // 增加惩罚
+                    } else {
+                        reward += 0.7; // 增加奖励
+                    }
+
+                    // 额外奖励：如果另一只手进入密集区帮助
+                    let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                    if chosen_hand != ideal_hand {
+                        reward += 0.3; // 奖励"跨区支援"
+                    }
+                } else {
+                    // 密集区外的音符：使用原有逻辑
+                    let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                    if chosen_hand == ideal_hand {
+                        reward += 0.3;
+                    } else {
+                        reward -= 0.2;
+                    }
+                }
+            } else {
+                // 非密集区：原有逻辑
+                let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                if chosen_hand == ideal_hand {
+                    reward += 0.3;
+                } else {
+                    reward -= 0.2;
+                }
+            }
         } else {
-            -0.8
-        };
+            // 4指模式保持原有逻辑
+            let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+            if chosen_hand == ideal_hand {
+                reward += 0.5;
+            } else {
+                reward -= 0.3;
+            }
+        }
 
-        reward += position_reward;
+        // 物理可行性检查（保持不变）
+        let hand_state = if chosen_hand == Hand::Left { &self.left_hand_state } else { &self.right_hand_state };
+        let distance = note.position.distance_to(&hand_state.position);
+        let time_since_last = note.time - hand_state.last_time;
 
-        let difficulty_bonus = (note.difficulty - 1.0).max(0.0) * 0.3;
-        reward += difficulty_bonus;
+        if time_since_last > 0.001 {
+            let speed = distance / time_since_last;
+            if speed > 12.0 { reward -= 0.6; }
+            else if speed < 4.0 { reward += 0.1; }
+        }
 
-        let noise = (fastrand::f32() - 0.5) * 0.1; // 减小噪声
-        reward += noise;
-
-        reward.clamp(-1.0, 1.5) // 调整范围
+        reward.clamp(-1.0, 1.0)
     }
 
     fn smooth_hand_transitions(&self, notes: &mut [ProcessedNote]) {
@@ -4774,11 +4894,8 @@ impl PhiTKAdvancedAI {
             if let Some(hand) = processed.assigned_hand {
                 original_notes[i].hand = hand;
 
-                let success = match processed.assigned_hand {
-                    Some(Hand::Left) => processed.position.x < 0.0,
-                    Some(Hand::Right) => processed.position.x >= 0.0,
-                    None => false,
-                };
+                let reward = self.calculate_reward(processed, processed.assigned_hand.unwrap(), processed.confidence);
+                let success = reward > 0.0;
 
                 total_predictions += 1;
                 if success {
@@ -4870,63 +4987,92 @@ impl PhiTKAdvancedAI {
         patterns
     }
 
-    fn adapt_parameters(&mut self, current_accuracy: f32) {
-        debug_assert!((0.0..=1.0).contains(&current_accuracy));
+    fn adapt_parameters(&mut self, _current_accuracy: f32) {
+        // 不再传入 current_accuracy，而是自己计算
+        let true_accuracy = if self.total_notes_processed > 0 {
+            self.correct_predictions as f32 / self.total_notes_processed as f32
+        } else {
+            0.5
+        };
 
-        self.average_reward = 0.99 * self.average_reward + 0.01 * current_accuracy;
+        self.average_reward = 0.99 * self.average_reward + 0.01 * true_accuracy;
         self.average_reward = self.average_reward.clamp(0.0, 1.0);
 
         let lr = self.main_network.learning_rate;
-        let new_lr = if current_accuracy < 0.3 {
-            (lr * 1.2).clamp(0.0005, 0.01)   
-        } else if current_accuracy < self.average_reward {
-            (lr * 1.05).clamp(0.0005, 0.01)
+        let new_lr = if true_accuracy < 0.6 {
+            (lr * 1.1).clamp(0.0005, 0.01)   // 准确率低 → 增大学习率
+        } else if true_accuracy > 0.85 {
+            (lr * 0.95).max(0.0001)          // 准确率高 → 缓慢衰减
         } else {
-            (lr * 0.98).max(0.0001)
+            lr
         };
         self.main_network.learning_rate = new_lr;
 
-        self.exploration_rate = (0.3 - 0.25 * current_accuracy).clamp(0.05, 0.3);
+        // 探索率：准确率低 → 多探索
+        self.exploration_rate = (0.4 - 0.3 * true_accuracy).clamp(0.05, 0.3);
 
-        if current_accuracy > 0.85 {
-            self.confidence_threshold = (self.confidence_threshold + 0.01).min(0.9);
-        } else if current_accuracy < 0.65 {
+        // 置信度阈值：准确率高才提高
+        if true_accuracy > 0.8 {
+            self.confidence_threshold = (self.confidence_threshold + 0.005).min(0.85);
+        } else if true_accuracy < 0.6 {
             self.confidence_threshold = (self.confidence_threshold - 0.01).max(0.5);
         }
     }
 
     fn train_network(&mut self) {
-        let batch_size = 24;
+        let batch_size = 256;
         let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
-        //println!("Training network with experience replay size: {}, sampled: {}", self.experience_replay.len(), experiences.len());
-        let mut training_data = Vec::with_capacity(batch_size);
-
-        for exp in &experiences {
-            let target_value = (exp.reward + self.discount_factor * self.estimate_future_value(&exp.next_state)).clamp(0.0, 1.0);
-
-            let normalized_reward = (exp.reward.clamp(-1.0, 1.0) + 1.0) / 2.0;
-
-            let mut target_output = vec![0.5, 0.5, 1.0, normalized_reward];
-            if exp.action < target_output.len() {
-                target_output[exp.action] = target_value;
-            }
-            training_data.push((exp.state.clone(), target_output));
+        if experiences.is_empty() {
+            return;
         }
-       // println!("Training network with experience replay size: {}", self.experience_replay.len());
 
-        println!("网络训练完成: Epoch {}, 学习率: {:.6}, 探索率: {:.3}, 准确率: {:.3}",
-                 self.main_network.epoch_count,
-                 self.main_network.learning_rate,
-                 self.exploration_rate,
-                 self.average_reward);
+        let mut training_data = Vec::with_capacity(batch_size);
+        for exp in &experiences {
+            // 当前 Q 值（用 main network 预测）
+            let current_q = self.main_network.forward(&exp.state); // [Q_left, Q_right, _, _, _]
+
+            // 计算 target Q 值
+            let mut target_q = current_q.clone();
+            let reward = exp.reward;
+
+            if exp.done {
+                // 终止状态：Q_target = reward
+                target_q[exp.action] = reward;
+            } else {
+                // 非终止状态：Q_target = reward + γ * max_a Q_target(next_state, a)
+                let next_q_target = self.target_network.forward(&exp.next_state);
+                let max_next_q = next_q_target[0].max(next_q_target[1]); // 只考虑 hand 0/1
+                let target_value = (reward + self.discount_factor * max_next_q).clamp(-0.6, 0.6);
+                target_q[exp.action] = target_value;
+            }
+
+            // 3. 保留 confidence 和 four_finger 输出（可选冻结或微调）
+            if target_q.len() >= 5 {
+                target_q[3] = 0.9; // 或从 exp.state 推断
+                target_q[4] = current_q.get(4).copied().unwrap_or(0.0);
+            }
+
+            training_data.push((exp.state.clone(), target_q));
+        }
+
+        println!(
+            "【DQN训练】Epoch {}, LR: {:.6}, Replay Size: {}, Avg Reward: {:.3}",
+            self.main_network.epoch_count,
+            self.main_network.learning_rate,
+            self.experience_replay.len(),
+            self.average_reward
+        );
 
         self.main_network.train(&training_data);
     }
 
+    /*
     fn estimate_future_value(&mut self, state: &[f32]) -> f32 {
         let output = self.target_network.forward(state);
         output.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
     }
+
+     */
 
     pub fn warm_thread_pool(&self) {
         if let Some(pool) = &self.thread_pool {

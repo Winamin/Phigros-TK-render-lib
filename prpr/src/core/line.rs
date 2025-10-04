@@ -4,7 +4,7 @@ use crate::{
     ext::{draw_text_aligned, get_viewport, NotNanExt, SafeTexture},
     judge::{JudgeStatus, LIMIT_BAD},
     ui::Ui,
-    hand::assign_hands,
+    //hand::assign_hands,
     info::ChartFormat,
 };
 use macroquad::prelude::*;
@@ -15,7 +15,7 @@ use once_cell::sync::OnceCell;
 use std::sync::{Mutex, Arc, RwLock};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use crate::config::Config;
+//use crate::config::Config;
 
 // 只对纹理缓存进行线程安全优化
 static TEXTURE_CACHE: Lazy<RwLock<HashMap<usize, Texture2D>>> = Lazy::new(|| {
