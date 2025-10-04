@@ -1670,7 +1670,6 @@ impl DeepNeuralNetwork {
     fn build_architecture(&mut self) {
         const FEATURE_DIM: usize = 40;    // input_dim = 40
         const SEQ_LEN: usize = 64;        // sequence_length = 64
-        // ============ 第一部分：堆叠 3 层 BiLSTM ============
         // Layer 1: BiLSTM (40 → 128 hidden → 256 output)
         self.add_lstm_layer_bi(FEATURE_DIM, 128, true, SEQ_LEN);
         // Layer 2: BiLSTM (256 → 128 hidden → 256 output)
@@ -1696,7 +1695,6 @@ impl DeepNeuralNetwork {
         // Layer 11: Dense (128 → 64)
         self.add_dense_layer(128, 64, ActivationFunction::GELU);
         // Layer 12: Output (64 → 5)
-        // 注意：输出层使用 Linear（无激活），由损失函数处理 softmax
         self.add_dense_layer(64, 5, ActivationFunction::Linear);
 
         // BiLSTM ×3:
@@ -5000,9 +4998,9 @@ impl PhiTKAdvancedAI {
 
         let lr = self.main_network.learning_rate;
         let new_lr = if true_accuracy < 0.6 {
-            (lr * 1.1).clamp(0.0005, 0.01)   // 准确率低 → 增大学习率
+            (lr * 1.1).clamp(0.05, 0.1)   // 准确率低 → 增大学习率
         } else if true_accuracy > 0.85 {
-            (lr * 0.95).max(0.0001)          // 准确率高 → 缓慢衰减
+            (lr * 0.95).max(0.05)          // 准确率高 → 缓慢衰减
         } else {
             lr
         };
