@@ -60,6 +60,13 @@ impl NoteKind {
     }
 }
 
+#[derive(Clone,Copy)]
+pub struct NoteInstance {
+    pub texture_id: u32,      // texture.gl_internal_id()
+    pub order: i8,
+    pub vertices: [Vertex; 4],
+}
+
 #[derive(Clone)]
 pub struct Note {
     pub time: f32,
@@ -259,243 +266,275 @@ impl Note {
     }
 
     pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
-        if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
+    if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
+        return;
+    }
+
+    if config.appear_before.is_finite() {
+        let beat = bpm_list.beat(self.time);
+        let time = bpm_list.time_beats(beat - config.appear_before);
+        if time > res.time {
             return;
         }
+    }
 
-        if config.appear_before.is_finite() {
-            //if config.appear_before.is_finite() && !matches!(self.kind, NoteKind::Hold { .. }) {
-            let beat = bpm_list.beat(self.time);
-            let time = bpm_list.time_beats(beat - config.appear_before);
-            if time > res.time {
-                return;
-            }
-        }
+    if config.invisible_time.is_finite() && self.time - config.invisible_time < res.time {
+        return;
+    }
 
-        if config.invisible_time.is_finite() && self.time - config.invisible_time < res.time {
+    let y_factor = config.ctrl_obj.y.now_opt().unwrap_or(1.);
+    let spd = self.speed * y_factor * config.global_speed_factor;
+    let inv_aspect = 1.0 / res.aspect_ratio;
+    let line_height = config.line_height * inv_aspect * spd;
+    let height = self.height * inv_aspect * spd;
+    let base = height - line_height;
+
+    if res.config.aggressive && matches!(self.kind, NoteKind::Hold { .. }) {
+        let h = if self.time <= res.time { line_height } else { height };
+        let bottom = h + self.object.translation.1.now() - line_height;
+        if bottom - line_height > 1. / res.config.chart_ratio {
             return;
         }
-        let scale = res.note_width * if self.multiple_hint {
-            res.res_pack.note_style_mh.click.width() / res.res_pack.note_style.click.width()
-        } else {
-            1.0
-        };
-        let ctrl_obj = &mut config.ctrl_obj;
-        self.init_ctrl_obj(ctrl_obj, config.line_height);
-        let mut color = self.object.now_color();
+    }
 
-        if res.config.hand_split {
-            match self.hand {
-                Hand::Left => {
-                    color.r = 0.2;
-                    color.g = 0.5;
-                    color.b = 1.0;
-                }
-                Hand::Right => {
-                    color.r = 1.0;
-                    color.g = 0.6;
-                    color.b = 0.7;
-                }
-            }
-            const BASE_LUMINANCE: f32 = 0.9;
-            let luminance = color.r * 0.299 + color.g * 0.587 + color.b * 0.114;
-            let adjust_factor = BASE_LUMINANCE / luminance.max(0.001);
-            color.r = (color.r * adjust_factor).min(1.0);
-            color.g = (color.g * adjust_factor).min(1.0);
-            color.b = (color.b * adjust_factor).min(1.0);
+    let should_skip = !config.draw_below && (
+        (res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) ||
+        (self.time > res.time && base <= -0.001)
+    ) && self.speed != 0.;
+
+    if should_skip && !res.config.chart_debug {
+        return;
+    }
+
+    let scale = res.note_width * if self.multiple_hint {
+        res.res_pack.note_style_mh.click.width() / res.res_pack.note_style.click.width()
+    } else {
+        1.0
+    };
+
+    self.init_ctrl_obj(&mut config.ctrl_obj, config.line_height);
+    let mut color = self.object.now_color();
+
+    // Hand split color
+    if res.config.hand_split {
+        match self.hand {
+            Hand::Left => { color.r = 0.2; color.g = 0.5; color.b = 1.0; }
+            Hand::Right => { color.r = 1.0; color.g = 0.6; color.b = 0.7; }
         }
+        const BASE_LUMINANCE: f32 = 0.9;
+        let luminance = color.r * 0.299 + color.g * 0.587 + color.b * 0.114;
+        let adjust = BASE_LUMINANCE / luminance.max(0.001);
+        color.r = (color.r * adjust).min(1.0);
+        color.g = (color.g * adjust).min(1.0);
+        color.b = (color.b * adjust).min(1.0);
+    }
 
-        color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
-        let y_factor = ctrl_obj.y.now_opt().unwrap_or(1.);
-        /*
-        let spd = self.speed * y_factor;
-        let end_spd = self.end_speed * y_factor;
+    // Alpha
+    let ctrl_alpha = match config.ctrl_obj.alpha.now_opt() {
+        Some(a) => a,
+        None if self.object.is_default() && !res.config.chart_debug => 0.0,
+        _ => 1.0,
+    };
+    color.a *= res.alpha * ctrl_alpha;
 
-        let inv_aspect = 1.0 / res.aspect_ratio;
-        let line_height = config.line_height * inv_aspect * spd;
-        let height = self.height * inv_aspect * spd;
-        let base = height - line_height;
-        //let base = (self.height - config.line_height) / res.aspect_ratio * spd;
+    if should_skip && res.config.chart_debug {
+        color.a *= 0.2;
+    }
 
-         */
-        let spd = self.speed * y_factor * config.global_speed_factor;
-        let end_spd = self.end_speed * y_factor * config.global_speed_factor;
+    let order = self.kind.order();
+    let style = if res.config.double_hint && self.multiple_hint {
+        &res.res_pack.note_style_mh
+    } else {
+        &res.res_pack.note_style
+    };
 
-        let inv_aspect = 1.0 / res.aspect_ratio;
-        let line_height = config.line_height * inv_aspect * spd;
-        let height = self.height * inv_aspect * spd;
-        let base = height - line_height;
+    // Fade out for non-hold
+    if !config.draw_below && !matches!(self.kind, NoteKind::Hold { .. }) {
+        let fade = (self.time - res.time).min(0.0) / FADEOUT_TIME + 1.0;
+        color.a *= fade;
+    }
 
-        if res.config.aggressive && matches!(self.kind, NoteKind::Hold { .. }) {
+    match &self.kind {
+        NoteKind::Click => {
+            if self.fake && res.time >= self.time { return; }
+            self.render_quad(
+                res, config, base, scale, color, order,
+                *style.click, Rect::new(0., 0., 1., 1.)
+            );
+        }
+        NoteKind::Flick => {
+            if self.fake && res.time >= self.time { return; }
+            self.render_quad(
+                res, config, base, scale, color, order,
+                *style.flick, Rect::new(0., 0., 1., 1.)
+            );
+        }
+        NoteKind::Drag => {
+            if self.fake && res.time >= self.time { return; }
+            self.render_quad(
+                res, config, base, scale, color, order,
+                *style.drag, Rect::new(0., 0., 1., 1.)
+            );
+        }
+        NoteKind::Hold { end_time, end_height } => {
+            if self.fake && res.time >= *end_time { return; }
+            if res.time >= *end_time { return; }
+
+            let tex = &style.hold;
+            let ratio = style.hold_ratio();
+            let clip = !config.draw_below && config.settings.hold_partial_cover;
+            let end_h = *end_height / res.aspect_ratio * spd;
+            let start_h = self.start_height / res.aspect_ratio * spd;
+            let hold_h = end_h - start_h;
+            let current_time = self.time.max(res.time);
+            let hold_line_h = (current_time - self.time) * (self.end_speed * y_factor * config.global_speed_factor)
+                / res.aspect_ratio / HEIGHT_RATIO;
+
             let h = if self.time <= res.time { line_height } else { height };
-            let bottom = h + self.object.translation.1.now() - line_height;
-            if bottom - line_height > 1. / res.config.chart_ratio {
-                return;
-            }
-        }
-
-        // 无分支渲染决策
-        let should_skip = !config.draw_below && (
-            (res.time - FADEOUT_TIME >= self.time && !matches!(self.kind, NoteKind::Hold { .. })) ||
-                (self.time > res.time && base <= -0.0075)
-        ) && self.speed != 0.;
-
-        if should_skip {
-            if res.config.chart_debug {
-                color.a *= 0.2;
-                //println!("{}", base);
+            let bottom = h - line_height;
+            let top = if self.format {
+                bottom + hold_h - hold_line_h
             } else {
+                end_h - line_height
+            };
+
+            if self.format && self.end_speed == 0. {
+                if !res.config.chart_debug { return; }
+                let mut debug_color = color;
+                debug_color.a *= 0.2;
+                color = debug_color;
+            }
+
+            if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !self.format) {
                 return;
             }
+
+            if matches!(self.judge, JudgeStatus::Judged) {
+                color.a *= 0.5;
+            }
+
+            let body_tex = if res.res_pack.info.hold_repeat {
+                style.hold_body.as_ref().unwrap()
+            } else {
+                tex
+            };
+            let body_source = if res.res_pack.info.hold_repeat {
+                let w = body_tex.width();
+                let h = body_tex.height();
+                Rect::new(0., 0., 1., (top - bottom) / scale / 2. * w / h)
+            } else {
+                style.hold_body_rect()
+            };
+            self.render_quad_raw(
+                res, config, 0., scale, color, order,
+                **body_tex, body_source,
+                vec2(scale * 2., top - bottom), clip, bottom
+            );
+
+            if res.time < self.time || res.res_pack.info.hold_keep_head {
+                let r = style.hold_head_rect();
+                let hf = vec2(scale, r.h / r.w * scale * ratio);
+                let head_y = bottom - if res.res_pack.info.hold_compact { hf.y } else { hf.y * 2. };
+                self.render_quad_raw(
+                    res, config, 0., scale, color, order,
+                    **tex, r, hf * 2., clip, head_y
+                );
+            }
+
+            let r = style.hold_tail_rect();
+            let hf = vec2(scale, r.h / r.w * scale * ratio);
+            let tail_y = top - if res.res_pack.info.hold_compact { hf.y } else { 0. };
+            self.render_quad_raw(
+                res, config, 0., scale, color, order,
+                **tex, r, hf * 2., clip, tail_y
+            );
         }
-        let order = self.kind.order();
-        let style = if res.config.double_hint && self.multiple_hint {
-            &res.res_pack.note_style_mh
-        } else {
-            &res.res_pack.note_style
-        };
+    }
+}
 
-        let draw = |res: &mut Resource, tex: Texture2D| {
-            let mut color = color;
-            if !config.draw_below {
-                let fade_factor = (self.time - res.time).min(0.0) / FADEOUT_TIME + 1.0;
-                color.a *= fade_factor;
-            }
-            res.with_model(self.now_transform(res, ctrl_obj, base, config.incline_sin), |res| {
-                draw_center(res, tex, order, scale, color);
-            });
-        };
+    // 渲染居中 quad
+    fn render_quad(&self, res: &Resource, config: &RenderConfig, base: f32, scale: f32, color: Color, order: i8, tex: Texture2D, source: Rect) {
+        let hf = vec2(scale, tex.height() * scale / tex.width());
+        self.render_quad_raw(res, config, base, scale, color, order, tex, source, hf * 2., false, -hf.y);
+    }
 
-        match self.kind {
-            NoteKind::Click => {
-                if self.fake && res.time >= self.time {return};
-                draw(res, *style.click);
-            }
-            NoteKind::Hold { end_time, end_height } => {
-                if self.fake && res.time >= end_time {return};
-                res.with_model(self.now_transform(res, ctrl_obj, 0., 0.), |res| {
-                    let style = if res.config.double_hint && self.multiple_hint {
-                        &res.res_pack.note_style_mh
-                    } else {
-                        &res.res_pack.note_style
-                    };
-                    if matches!(self.judge, JudgeStatus::Judged) {
-                        // miss
-                        color.a *= 0.5;
-                    }
-                    if res.time >= end_time {
-                        return;
-                    }
-                    let end_height = end_height / res.aspect_ratio * spd;
-                    let start_height = self.start_height / res.aspect_ratio * spd;
-                    let hold_height = end_height - start_height;
-                    let time = if res.time >= self.time {res.time} else {self.time};
-                    let hold_line_height = (time - self.time) * end_spd / res.aspect_ratio / HEIGHT_RATIO;
+    // 底层 quad 提交
+    fn render_quad_raw(
+        &self,
+        res: &Resource,
+        config: &RenderConfig,
+        base: f32,
+        scale: f32,
+        color: Color,
+        order: i8,
+        tex: Texture2D,
+        source: Rect,
+        dest_size: Vec2,
+        clip: bool,
+        y_offset: f32,
+    ) {
+        let x = -scale;
+        let y = y_offset;
+        let w = dest_size.x;
+        let h = dest_size.y;
 
-                    let clip = !config.draw_below && config.settings.hold_partial_cover;
-
-
-                    let h = if self.time <= res.time { line_height } else { height };
-                    let bottom = h - line_height; //StartY
-                    let top = if self.format {
-                        bottom + hold_height - hold_line_height
-                    } else {
-                        end_height - line_height
-                    };
-
-                    //let max_hold_height = 3. / res.config.chart_ratio / res.aspect_ratio;
-                    //let top = if res.config.aggressive && hold_height - hold_line_height >= max_hold_height { bottom + max_hold_height } else { top };
-
-                    if self.format && end_spd == 0. {
-                        if res.config.chart_debug {
-                            color.a *= 0.2;
-                        } else {
-                            return;
-                        }
-                    }
-
-
-                    if res.time < self.time && bottom < -1e-6 && (!config.settings.hold_partial_cover && !self.format) {
-                        return;
-                    }
-                    let tex = &style.hold;
-                    let ratio = style.hold_ratio();
-                    // body
-                    // TODO (end_height - height) is not always total height
-                    draw_tex(
-                        res,
-                        **(if res.res_pack.info.hold_repeat {
-                            style.hold_body.as_ref().unwrap()
-                        } else {
-                            tex
-                        }),
-                        order,
-                        -scale,
-                        bottom,
-                        color,
-                        DrawTextureParams {
-                            source: Some({
-                                if res.res_pack.info.hold_repeat {
-                                    let hold_body = style.hold_body.as_ref().unwrap();
-                                    let width = hold_body.width();
-                                    let height = hold_body.height();
-                                    Rect::new(0., 0., 1., (top - bottom) / scale / 2. * width / height)
-                                } else {
-                                    style.hold_body_rect()
-                                }
-                            }),
-                            dest_size: Some(vec2(scale * 2., top - bottom)),
-                            ..Default::default()
-                        },
-                        clip,
-                    );
-                    // head
-                    if res.time < self.time || res.res_pack.info.hold_keep_head {
-                        let r = style.hold_head_rect();
-                        let hf = vec2(scale, r.h / r.w * scale * ratio);
-                        draw_tex(
-                            res,
-                            **tex,
-                            order,
-                            -scale,
-                            bottom - if res.res_pack.info.hold_compact { hf.y } else { hf.y * 2. },
-                            color,
-                            DrawTextureParams {
-                                source: Some(r),
-                                dest_size: Some(hf * 2.),
-                                ..Default::default()
-                            },
-                            clip,
-                        );
-                    }
-                    // tail
-                    let r = style.hold_tail_rect();
-                    let hf = vec2(scale, r.h / r.w * scale * ratio);
-                    draw_tex(
-                        res,
-                        **tex,
-                        order,
-                        -scale,
-                        top - if res.res_pack.info.hold_compact { hf.y } else { 0. },
-                        color,
-                        DrawTextureParams {
-                            source: Some(r),
-                            dest_size: Some(hf * 2.),
-                            ..Default::default()
-                        },
-                        clip,
-                    );
-                });
-            }
-            NoteKind::Flick => {
-                if self.fake && res.time >= self.time {return};
-                draw(res, *style.flick);
-            }
-            NoteKind::Drag => {
-                if self.fake && res.time >= self.time {return};
-                draw(res, *style.drag);
-            }
+        if h <= 0. || (clip && y + h <= 0.) {
+            return;
         }
+
+        let mut final_source = source;
+        if clip && y < 0. {
+            let visible = y + h;
+            if visible <= 0. { return; }
+            let ratio = (-y) / visible;
+            final_source.y += final_source.h * ratio;
+            final_source.h *= 1.0 - ratio;
+        }
+
+        // Compute world positions
+        let p = [
+            Point::new(x, y),
+            Point::new(x + w, y),
+            Point::new(x + w, y + h),
+            Point::new(x, y + h),
+        ];
+
+        // Apply transform
+        let transform = self.now_transform(res, &config.ctrl_obj, base, config.incline_sin);
+        let p_world = p.map(|pt| transform.transform_point(&pt));
+
+        // Convert to screen
+        let p_screen = p_world.map(|pt| res.world_to_screen(pt));
+
+        // Frustum culling
+        let chart_ratio_inv = 1.0 / res.config.chart_ratio;
+        let (min_x, max_x) = p_screen.iter().fold((f32::MAX, f32::MIN), |(a,b), pt| (a.min(pt.x), b.max(pt.x)));
+        let (min_y, max_y) = p_screen.iter().fold((f32::MAX, f32::MIN), |(a,b), pt| (a.min(pt.y), b.max(pt.y)));
+        if min_x > chart_ratio_inv || max_x < -chart_ratio_inv || min_y > chart_ratio_inv || max_y < -chart_ratio_inv {
+            return;
+        }
+
+        // Flip if needed (your original logic)
+        let mut p_final = p_screen;
+        // flip_y is always true in your code
+        p_final.swap(0, 3);
+        p_final.swap(1, 2);
+
+        // Build vertices
+        let sx1 = final_source.x + final_source.w;
+        let sy1 = final_source.y + final_source.h;
+        let vertices = [
+            Vertex::new(p_final[0].x, p_final[0].y, 0., final_source.x, final_source.y, color),
+            Vertex::new(p_final[1].x, p_final[1].y, 0., sx1, final_source.y, color),
+            Vertex::new(p_final[2].x, p_final[2].y, 0., sx1, sy1, color),
+            Vertex::new(p_final[3].x, p_final[3].y, 0., final_source.x, sy1, color),
+        ];
+
+        // Submit to batch buffer
+        res.note_buffer.borrow_mut().push(
+            (order, tex.raw_miniquad_texture_handle().gl_internal_id()),
+            vertices
+        );
     }
 }
 
