@@ -14,7 +14,7 @@ impl<T> Keyframe<T> {
         Self {
             time,
             value,
-            tween: Arc::new(StaticTween(tween))
+            tween: StaticTween::get_arc(tween)
         }
     }
 }
@@ -53,7 +53,7 @@ impl<T: Tweenable> Anim<T> {
 
     pub fn fixed(value: T) -> Self {
         Self {
-            keyframes: Box::new([Keyframe::new(0.0, value, 0)]),
+            keyframes: Box::new([Keyframe::new(0.0, value, 2)]),
             time: 0.0,
             cursor: 0,
             next: None,

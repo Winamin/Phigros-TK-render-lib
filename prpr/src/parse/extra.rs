@@ -66,7 +66,7 @@ impl<V> ExtAnim<V> {
                         tween: {
                             let tween = RPE_TWEEN_MAP.get(e.easing_type.max(1) as usize).copied().unwrap_or(RPE_TWEEN_MAP[0]);
                             if e.easing_left.abs() < EPS && (e.easing_right - 1.0).abs() < EPS {
-                                Arc::new(StaticTween(tween))
+                                StaticTween::get_arc(tween)
                             } else {
                                 Arc::new(ClampedTween::new(tween, e.easing_left..e.easing_right))
                             }

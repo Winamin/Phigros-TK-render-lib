@@ -138,7 +138,13 @@ impl TweenFunction for StaticTween {
 
 impl StaticTween {
     pub fn get_arc(id: TweenId) -> Arc<dyn TweenFunction> {
-        Arc::new(StaticTween(id))
+        // Add bounds checking to prevent panic from invalid tween IDs
+        if id < TWEEN_FUNCTIONS.len() as u8 {
+            Arc::new(StaticTween(id))
+        } else {
+            // Fallback to linear tween (id = 2) for invalid IDs
+            Arc::new(StaticTween(2))
+        }
     }
 }
 

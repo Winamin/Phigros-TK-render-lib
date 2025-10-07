@@ -169,7 +169,10 @@ fn cleanup_expired_requests(line_states: &mut HashMap<usize, LineState>) {
     }
 }
 
-fn start_ai_worker_if_needed() {
+fn start_ai_worker_if_needed(config: &Config) {
+    static HAND_SPLIT: OnceCell<bool> = OnceCell::new();
+    HAND_SPLIT.get_or_init(|| config.hand_split);
+    
     START_ONCE.call_once(|| {
         let (tx_req, rx_req) = unbounded::<AiRequest>();
         let (tx_resp, rx_resp) = unbounded::<AiResponse>();
@@ -197,8 +200,10 @@ fn start_ai_worker_if_needed() {
 
 
         thread::spawn(move || {
-            let config = Config::default();
-            let mut worker_ai = PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", 0.0, &config);
+            let hand_split = *HAND_SPLIT.get().unwrap_or(&false);
+            let mut worker_config = Config::default();
+            worker_config.hand_split = hand_split;
+            let mut worker_ai = PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", 0.0, &worker_config);
             println!("[GPU] Initializing GPU in AI worker thread...");
             worker_ai.main_network.init_gpu_sync();
             worker_ai.target_network.init_gpu_sync();
@@ -270,7 +275,7 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
         return;
     }
 
-    start_ai_worker_if_needed();
+    start_ai_worker_if_needed(config);
 
     let now = Instant::now();
 
@@ -1013,7 +1018,7 @@ impl DeepNeuralNetwork {
         }
 
         let instance_desc = wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+            backends: wgpu::Backends::GL,
             ..Default::default()
         };
         let instance = wgpu::Instance::new(&instance_desc);
@@ -1970,14 +1975,7 @@ impl DeepNeuralNetwork {
         output
     }
 
-    fn lstm_cell(
-        x_t: &[f32],
-        h_prev: &[f32],
-        c_prev: &[f32],
-        weights_ih: &[Vec<f32>],
-        weights_hh: &[Vec<f32>],
-        biases: &[f32]
-    ) -> (Vec<f32>, Vec<f32>) {
+    fn lstm_cell(x_t: &[f32], h_prev: &[f32], c_prev: &[f32], weights_ih: &[Vec<f32>], weights_hh: &[Vec<f32>], biases: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let hidden_size = h_prev.len();
         let input_size = x_t.len();
 
@@ -2066,6 +2064,22 @@ impl DeepNeuralNetwork {
         let weights = &layer.weights;
         let biases = &layer.biases;
 
+        // 检查weights和biases数组大小
+        let required_weights = if layer.bidirectional { 8 * output_size } else { 4 * output_size };
+        let required_biases = if layer.bidirectional { 8 * output_size } else { 4 * output_size };
+        
+        if weights.len() < required_weights || biases.len() < required_biases {
+            // 如果数组大小不够，回退到dense层
+            return Self::dense_forward(layer, input);
+        }
+
+        let min_row_size = feature_dim + output_size;
+        for row in weights.iter().take(required_weights) {
+            if row.len() < min_row_size {
+                return Self::dense_forward(layer, input);
+            }
+        }
+
         let weights_ih_fwd: Vec<Vec<f32>> = weights[..4 * output_size]
             .iter()
             .map(|row| row[..feature_dim].to_vec())
@@ -2093,15 +2107,15 @@ impl DeepNeuralNetwork {
             return h_fwd;
         }
 
-        let weights_ih_bwd: Vec<Vec<f32>> = weights[4 * output_size..]
+        let weights_ih_bwd: Vec<Vec<f32>> = weights[4 * output_size..8 * output_size]
             .iter()
             .map(|row| row[..feature_dim].to_vec())
             .collect();
-        let weights_hh_bwd: Vec<Vec<f32>> = weights[4 * output_size..]
+        let weights_hh_bwd: Vec<Vec<f32>> = weights[4 * output_size..8 * output_size]
             .iter()
             .map(|row| row[feature_dim..(feature_dim + output_size)].to_vec())
             .collect();
-        let biases_bwd = &biases[4 * output_size..];
+        let biases_bwd = &biases[4 * output_size..8 * output_size];
 
         let mut h_bwd = vec![0.0; output_size];
         let mut c_bwd = vec![0.0; output_size];
@@ -2399,11 +2413,11 @@ impl DeepNeuralNetwork {
 
     fn adapt_learning_rate(&mut self, loss: f32) {
         if loss < self.last_loss * 0.95 {
-            self.learning_rate = (self.learning_rate * 1.05).min(0.01);
+            self.learning_rate = (self.learning_rate * 1.05).min(0.5);
             self.bad_epochs = 0;
         }
         else if loss > self.last_loss * 1.05 {
-            self.learning_rate = (self.learning_rate * 0.8).max(0.005);
+            self.learning_rate = (self.learning_rate * 0.8).max(0.1);
             self.bad_epochs += 1;
             if self.bad_epochs >= 5 {
                 println!("连续{}个epoch表现不佳，执行网络重置", self.bad_epochs);
@@ -2970,29 +2984,29 @@ impl AdvancedFeatureExtractor {
             let context = &notes[context_start..context_end];
 
             let mut features = Vec::new();
-            features.extend(self.extract_position_features(&[note.clone()]));
+            features.extend(self.extract_position_features(&[note.clone()]));// 4维 位置特征
             //features.extend(self.extract_temporal_features(&[note.clone()], 1, bpm_list));
-            features.extend(self.extract_temporal_features(note, context, bpm_list));
-            features.extend(self.extract_pattern_features(&[note.clone()]));
-            features.extend(self.extract_difficulty_features(&[note.clone()]));
-            features.extend(self.extract_velocity_features(&[note.clone()]));
-            features.extend(self.extract_spatial_features(&[note.clone()]));
+            features.extend(self.extract_temporal_features(note, context, bpm_list)); // 6维 时间特征
+            features.extend(self.extract_pattern_features(&[note.clone()])); // 14维 模式特征
+            features.extend(self.extract_difficulty_features(&[note.clone()])); // 4维 难度特征
+            features.extend(self.extract_velocity_features(&[note.clone()])); // 4维 速度特征
+            features.extend(self.extract_spatial_features(&[note.clone()])); // 4维 空间特征
 
             //  context 特征
             features.extend(self.extract_position_context_features(note, context));
 
             // 全局上下文特征
-            features.push(note_density / 100.0);
+            features.push(note_density / 100.0); // 归一化到 [0, 1]
             features.push(max_simul as f32 / 8.0);
-            features.push(global_bpm / 300.0);
-            features.push(four_finger_hint);
+            features.push(global_bpm / 1000.0);
+            features.push(four_finger_hint); // 1维
 
             // 32 + 8 = 40
             debug_assert_eq!(features.len(), 40, "Single note feature dimension must be 40");
             all_features.extend(features);
         }
 
-        let target_len = window_size * 40; //  40个特征维度
+        let target_len = window_size * 40; // 每个音符40维
         if all_features.len() < target_len {
             all_features.resize(target_len, 0.0);
         }
@@ -3679,7 +3693,7 @@ impl PhiTKAdvancedAI {
             thread_pool: thread_pool.clone(),
             //thread_count: if thread_pool.is_some() { 32 } else { 1 },
             feature_extractor: AdvancedFeatureExtractor::new(),
-            experience_replay: ExperienceReplay::new(200000),
+            experience_replay: ExperienceReplay::new(20000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0).rotate(rad)),
             right_hand_state: HandState::new(Hand::Right, Vector2::new(0.3, 0.0).rotate(rad)),
             rotation,
@@ -3722,14 +3736,16 @@ impl PhiTKAdvancedAI {
 
     fn load_or_create(filepath: &str, rotation: f32, config: &Config) -> Self {
         let path = Path::new(filepath);
-        if config.hand_split == true {
-            // 尝试加载已有模型
             if let Ok(bytes) = fs::read(path) {
-                if let Ok(mut ai) = bincode::deserialize::<Self>(&bytes) {
-                    if ai.validate_for_serialization() {
-                        println!("[Model] 从文件加载模型: {}, 训练回合数: {}", filepath, ai.training_episodes);
-                        ai.rotation = rotation;
-                        ai.update_hand_positions();
+                println!("[Model] 找到模型文件: {}, 大小: {} bytes", filepath, bytes.len());
+                match bincode::deserialize::<Self>(&bytes) {
+                    Ok(mut ai) => {
+                        println!("[Model] 模型反序列化成功，训练回合数: {}", ai.training_episodes);
+                        match ai.validate_for_serialization() {
+                            true => {
+                                println!("[Model] 模型验证通过，开始加载");
+                                ai.rotation = rotation;
+                                ai.update_hand_positions();
 
                         // 重置并初始化 main_network GPU
                         ai.main_network.initialization_attempted = false;
@@ -3770,8 +3786,31 @@ impl PhiTKAdvancedAI {
                         }
 
                         return ai;
+                            }
+                            false => {
+                                eprintln!("[Model Error] 模型验证失败，将创建新模型");
+                                let float_fields_valid = [
+                                    ai.exploration_rate,
+                                    ai.discount_factor,
+                                    ai.average_reward,
+                                    ai.difficulty_adaptation,
+                                    ai.learning_momentum,
+                                    ai.confidence_threshold
+                                ].iter().all(|f| f.is_finite());
+                                eprintln!("[Model Debug] 浮点字段验证: {}", float_fields_valid);
+                                eprintln!("[Model Debug] main_network验证: {}", ai.main_network.validate());
+                                eprintln!("[Model Debug] target_network验证: {}", ai.target_network.validate());
+                                eprintln!("[Model Debug] left_hand_state验证: {}", ai.left_hand_state.validate());
+                                eprintln!("[Model Debug] right_hand_state验证: {}", ai.right_hand_state.validate());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[Model Error] 模型反序列化失败: {:?}", e);
                     }
                 }
+            } else {
+                eprintln!("[Model Error] 无法读取模型文件: {}", filepath);
             }
 
             // 加载失败：创建新模型并保存
@@ -3782,15 +3821,6 @@ impl PhiTKAdvancedAI {
             println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
             ai.save_model(filepath); // 只在 hand_split=true 且加载失败时保存
             ai
-        } else {
-            // hand_split == false：不加载，不保存，直接创建新模型
-            let mut ai = Self::new(rotation);
-            println!("[GPU/CPU SWITCH] Beginning GPU init for new model (hand_split disabled)...");
-            ai.main_network.init_gpu_sync();
-            ai.target_network.init_gpu_sync();
-            println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
-            ai // 不调用 save_model
-        }
     }
 
     fn save_model(&mut self, filepath: &str) {
@@ -4205,7 +4235,6 @@ impl PhiTKAdvancedAI {
                             let left_count = time_window_notes.iter().filter(|n| n.position.x < -0.05).count();
                             let right_count = time_window_notes.iter().filter(|n| n.position.x > 0.05).count();
 
-                            // 修复类型转换问题
                             if left_count >= density_threshold && (left_count as f32) > (right_count as f32) * 1.5 {
                                 Some(Hand::Left)
                             } else if right_count >= density_threshold && (right_count as f32) > (left_count as f32) * 1.5 {
@@ -4998,9 +5027,9 @@ impl PhiTKAdvancedAI {
 
         let lr = self.main_network.learning_rate;
         let new_lr = if true_accuracy < 0.6 {
-            (lr * 1.1).clamp(0.05, 0.1)   // 准确率低 → 增大学习率
+            (lr * 1.1).clamp(0.1, 0.4)   // 准确率低 → 增大学习率
         } else if true_accuracy > 0.85 {
-            (lr * 0.95).max(0.05)          // 准确率高 → 缓慢衰减
+            (lr * 0.95).max(0.1)          // 准确率高 → 缓慢衰减
         } else {
             lr
         };

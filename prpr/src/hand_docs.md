@@ -1,5 +1,3 @@
-# PhiTK Advanced AI, 下一代手部分配Agent
-
 # Hand.rs 模块技术文档
 
 ## 1. 模块架构详解
@@ -7,522 +5,247 @@
 ### 1.1 整体架构图
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        PhiTKAdvancedAI                        │
+│                        Hand Assignment System                   │
 ├───────────────┬───────────────┬───────────────┬───────────────┤
-│  Neural Net   │ Feature       │ Experience    │ Hand State    │
-│  (DNN/LSTM)   │ Extraction    │ Replay        │ Management    │
+│  AI Worker    │ Request       │ Response      │ Line State    │
+│  Thread       │ Queue         │ Queue         │ Management    │
 ├───────────────┼───────────────┼───────────────┼───────────────┤
-│ GPU Acceleration │ Multi-threading │ Pattern Recognition │
+│ Async Processing │ Thread Pool │ Feature       │ Note Matching │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### 1.2 核心组件交互流程
-1. **输入处理**：接收原始音符数据 → 预处理为`ProcessedNote`
-2. **特征提取**：提取时空特征 → 生成特征向量
-3. **AI决策**：特征向量输入神经网络 → 生成手部分配建议
-4. **后处理**：结合游戏模式规则 → 生成最终分配结果
-5. **经验存储**：记录决策过程 → 更新经验回放缓冲区
+1. **请求发起**：主线程调用`assign_hands`函数
+2. **状态检查**：检查谱面行(line)的更新状态和待处理请求数
+3. **请求提交**：创建AI处理请求并发送到工作线程
+4. **异步处理**：AI工作线程处理请求并返回结果
+5. **结果合并**：主线程接收响应并合并到原始音符数据
 
 ## 2. 核心结构深度解析
 
-### 2.1 PhiTKAdvancedAI 结构体字段详解
+### 2.1 主要数据结构
 
-| 字段 | 类型 | 作用 | 线程安全 | 默认值 |
-|------|------|------|----------|--------|
-| `main_network` | DeepNeuralNetwork | 当前决策网络 | Arc<Mutex<>> | 随机初始化 |
-| `target_network` | DeepNeuralNetwork | 目标网络（Q-learning） | Arc<Mutex<>> | 延迟初始化 |
-| `thread_pool` | Option<Arc<ThreadPool>> | 线程池控制 | 一次性初始化 | 根据CPU核心数 |
-| `rotation` | f32 | 谱面旋转角度（-180~180） | 不可变 | 0.0 |
-| `game_mode` | GameMode | 游戏模式（2/4指） | 原子操作 | TwoFinger |
-| `recent_assignments` | VecDeque<(Hand,f32,f32)> | 最近分配记录 | 互斥锁保护 | 空队列 |
-| `hand_switch_count` | u32 | 手部切换计数器 | 原子操作 | 0 |
-
-**关键设计说明**：
-- 所有可变状态均通过`Mutex`保护，确保多线程安全
-- `rotation`字段为只读设计，避免运行时谱面旋转导致的逻辑混乱
-- `recent_assignments`使用环形缓冲区，保留最近100次分配记录用于模式分析
-
-### 2.2 DeepNeuralNetwork 实现细节
-
-#### 网络架构（当前配置）
-```
-Input (28) → Bi-LSTM(64) → Attention(32) → GELU(64) → GELU(3) → Output(3)
-```
-
-#### 权重初始化策略
-- **LSTM层**：使用Xavier/Glorot初始化，标准差为`(1.0 / input_size as f32).sqrt()`，适用于Tanh激活函数
-- **Attention层**：使用Xavier/Glorot初始化，标准差为`(2.0 / input_size as f32).sqrt()`，适用于GELU激活函数
-- **Dense层**：根据激活函数自动选择初始化策略（ReLU/GELU使用He初始化，Sigmoid/Tanh使用Xavier初始化）
-
-#### 层类型对比表
-
-| 层类型 | 适用场景 | 计算复杂度 | GPU加速收益 | 初始化策略 |
-|--------|----------|------------|-------------|------------|
-| Dense | 基础特征处理 | O(n²) | 中等 (2-3x) | He/Xavier (根据激活函数) |
-| LSTM | 时序模式识别 | O(n³) | 高 (5-8x) | Xavier (std_dev = sqrt(1/input_size)) |
-| Attention | 复杂模式关联 | O(n²) | 高 (4-6x) | Xavier (std_dev = sqrt(2/input_size)) |
-| Residual | 梯度稳定 | O(n) | 低 (1-2x) | He/Xavier (根据激活函数) |
-
-#### LSTM层实现细节
-- **双向处理**：支持双向LSTM，可同时处理前后文信息
-- **门控机制**：标准LSTM包含输入门、遗忘门、候选值和输出门
-- **序列处理**：自动处理可变长度序列，支持动态批处理
-- **权重布局**：权重矩阵布局为`[W_ih | W_hh]`拼接形式，其中`W_ih`为输入到隐藏层权重，`W_hh`为隐藏层到隐藏层权重
-
-#### Attention层实现细节
-- **QKV投影**：使用三个独立的权重矩阵分别计算Query、Key和Value
-- **缩放点积**：实现标准的缩放点积注意力机制
-- **多头支持**：通过调整输出维度可支持多头注意力
-- **位置编码**：结合输入序列的位置信息进行注意力计算
-
-**GPU加速实现**：
-- 使用WebGPU的Compute Shader实现矩阵乘法
-- 自动检测软件渲染器（llvmpipe/swiftshader）并降级到CPU
-- 支持动态批处理（batch_size=24）
-
+#### AiRequest 结构体
 ```rust
-// GPU初始化关键代码
-if adapter_info.vendor == 0x10005 { // Mesa软件渲染器
-    return false; // 强制CPU回退
+struct AiRequest {
+    id: u64,                    // 请求唯一ID
+    line_id: usize,             // 谱面行ID
+    version: u64,               // 请求版本号
+    timestamp: Instant,         // 请求时间戳
+    notes: Vec<Note>,           // 音符数据快照
+    rotation: f32,              // 谱面旋转角度
+    config: Arc<Config>,        // 游戏配置
+    bpm_list: Arc<BpmList>,     // BPM列表
 }
 ```
 
-## 3. 核心算法深度剖析
-
-### 3.1 手部分配决策流程
-
-```mermaid
-graph TD
-    A[原始音符数据] --> B{时间窗口分组}
-    B -->|同时音符| C[双押模式处理]
-    B -->|单音符| D[模式识别]
-    C --> E[2指/4指专用逻辑]
-    D --> F[神经网络预测]
-    E --> G[后处理优化]
-    F --> G
-    G --> H{跨越序列检测}
-    H -->|是| I[跨越序列优化]
-    H -->|否| J[常规优化]
-    I --> K[最终分配结果]
-    J --> K[最终分配结果]
-```
-
-#### 同时音符分组算法
+#### AiResponse 结构体
 ```rust
-fn detect_simultaneous_groups(&self, notes: &[ProcessedNote]) -> Vec<Vec<usize>> {
-    let mut groups = Vec::new();
-    let mut current_group = Vec::new();
-    
-    for i in 0..notes.len() {
-        if i == 0 || (notes[i].time - notes[i-1].time) < 0.05 {
-            current_group.push(i);
-        } else {
-            if !current_group.is_empty() {
-                groups.push(current_group);
-                current_group = Vec::new();
-            }
-            current_group.push(i);
-        }
-    }
-    if !current_group.is_empty() { groups.push(current_group); }
-    groups
-}
-```
-**参数说明**：
-- 时间窗口阈值：50ms（可配置）
-- 最大组大小：8个音符（防止单组过大）
-
-### 3.2 神经网络训练机制
-
-#### 经验回放工作流程
-```
-1. 收集经验：存储(state, action, reward, next_state)
-2. 采样批次：随机抽取64个样本
-3. 计算目标值：Q(s,a) = r + γ·max_a' Q'(s',a')
-4. 网络更新：使用MSE损失函数更新main_network
-5. 目标网络同步：每1000步更新target_network
-```
-
-#### 关键训练参数
-| 参数 | 作用 | 推荐值 | 调整建议 |
-|------|------|--------|----------|
-| `discount_factor` | 未来奖励衰减 | 0.95 | 高难度谱面适当降低 |
-| `target_update_freq` | 目标网络更新频率 | 1000 | 太低导致不稳定 |
-| `batch_size` | 训练批次大小 | 24 | GPU显存限制 |
-| `max_grad_norm` | 梯度裁剪阈值 | 5.0 | 防止梯度爆炸 |
-
-### 3.3 特征工程实现
-
-#### 空间特征提取
-```rust
-fn extract_spatial_features(&self, notes: &[ProcessedNote]) -> Vec<f32> {
-    let center = self.calculate_center(notes);
-    let mut features = vec![
-        self.calculate_spread_radius(notes, &center),
-        self.calculate_direction_entropy(notes),
-        self.calculate_cluster_count(notes),
-        self.calculate_symmetry_score(notes)
-    ];
-    
-    // 添加位置直方图特征（10个区间）
-    let mut hist = vec![0.0; 10];
-    for note in notes {
-        let bin = ((note.position.x + 1.0) * 5.0) as usize;
-        hist[bin.min(9)] += 1.0;
-    }
-    features.extend(hist);
-    
-    features
+struct AiResponse {
+    id: u64,                    // 对应请求ID
+    line_id: usize,             // 谱面行ID
+    version: u64,               // 响应版本号
+    timestamp: Instant,         // 响应时间戳
+    notes: Vec<Note>,           // 处理后的音符数据
+    checksum: u64,              // 数据校验和
 }
 ```
 
-#### 跨越序列特征提取
+#### LineState 结构体
 ```rust
-fn detect_crossing_pattern(&self, notes: &[ProcessedNote]) -> f32 {
-    if notes.len() < 2 {
-        return 0.0;
-    }
-    let mut crossing_score = 0.0;
-    let mut consecutive_crossings = 0;
-    let mut max_consecutive = 0;
-    
-    for i in 1..notes.len() {
-        let prev_x = notes[i-1].position.x;
-        let curr_x = notes[i].position.x;
-        // 检查是否从正到负或负到正
-        if prev_x * curr_x < 0.0 {
-            consecutive_crossings += 1;
-            crossing_score += 1.0;
-        } else {
-            max_consecutive = max_consecutive.max(consecutive_crossings);
-            consecutive_crossings = 0;
-        }
-    }
-    max_consecutive = max_consecutive.max(consecutive_crossings);
-    
-    // 如果有连续的跨越，给予更高的分数
-    let base_score = crossing_score / (notes.len() - 1) as f32;
-    if max_consecutive >= 2 {
-        // 连续跨越序列，提高检测分数
-        (base_score * 1.5).min(1.0)
-    } else {
-        base_score
-    }
+struct LineState {
+    current_version: u64,                       // 当前版本
+    last_full_update: Instant,                  // 上次完整更新时间
+    last_light_update: Instant,                 // 上次轻量更新时间
+    pending_requests: HashMap<u64, (Instant, u64)>, // 待处理请求
 }
 ```
 
-#### 跨越序列优化算法
+### 2.2 PhiTKAdvancedAI 结构体
+
+#### 核心字段
+| 字段 | 类型 | 作用 |
+|------|------|------|
+| `main_network` | DeepNeuralNetwork | 主神经网络 |
+| `target_network` | DeepNeuralNetwork | 目标网络（用于Q-learning） |
+| `feature_extractor` | AdvancedFeatureExtractor | 特征提取器 |
+| `experience_replay` | ExperienceReplay | 经验回放缓冲区 |
+| `rotation` | f32 | 谱面旋转角度 |
+| `game_mode` | GameMode | 游戏模式（2指/4指） |
+| `recent_assignments` | VecDeque<(Hand, f32, f32)> | 最近分配记录 |
+| `hand_switch_count` | u32 | 手部切换计数 |
+
+#### 神经网络架构
+- **输入层**: 40维特征向量
+- **LSTM层**: 3层双向LSTM (40→128→128→128 hidden units)
+- **Attention层**: 2层注意力机制 (256→128→64)
+- **Dense层**: 6层全连接层 (64→512→256→256→128→128→64)
+- **输出层**: 5维输出 (左右手置信度、稳定性指标等)
+
+#### GPU加速支持
+- 使用WebGPU进行矩阵运算加速
+- 自动检测软件渲染器并回退到CPU
+- 支持批量处理（batch_size=256）
+- 异步缓冲区映射和数据传输
+
+## 3. 核心算法实现
+
+### 3.1 手部分配主流程
+
 ```rust
-fn optimize_crossing_pattern(&mut self, notes: &mut [ProcessedNote]) {
-    if notes.is_empty() {
-        return;
-    }
-    
-    // 检测是否为真正的跨越序列（从正到负或负到正的连续序列）
-    let mut is_crossing_sequence = false;
-    let mut crossing_start = 0;
-    let mut crossing_end = 0;
-    
-    // 查找跨越序列的开始和结束
-    for i in 0..notes.len() {
-        if i > 0 {
-            let prev_x = notes[i-1].position.x;
-            let curr_x = notes[i].position.x;
-            // 检查是否发生跨越（符号改变）
-            if prev_x * curr_x < 0.0 {
-                if !is_crossing_sequence {
-                    is_crossing_sequence = true;
-                    crossing_start = i.saturating_sub(1);
-                }
-                crossing_end = i;
-            } else if is_crossing_sequence {
-                // 如果跨越序列中断，结束检测
-                break;
-            }
-        }
-    }
-    
-    if is_crossing_sequence && crossing_end > crossing_start {
-        // 确定起始手：根据跨越序列开始前的音符位置
-        let start_hand = if notes[crossing_start].position.x < 0.0 { Hand::Left } else { Hand::Right };
-        let mut current_hand = start_hand;
-        
-        // 处理跨越序列之前的音符
-        for i in 0..=crossing_start {
-            notes[i].assigned_hand = Some(start_hand);
-            notes[i].confidence = 0.85;
-        }
-        
-        // 处理跨越序列：使用起始手完成整个跨越
-        for i in (crossing_start + 1)..=crossing_end {
-            notes[i].assigned_hand = Some(start_hand);
-            notes[i].confidence = 0.8;
-        }
-        
-        // 跨越完成后，根据最后一个音符的位置决定是否切换回默认手
-        let last_note_x = notes[crossing_end].position.x;
-        let ideal_hand_after_crossing = if last_note_x < 0.0 { Hand::Left } else { Hand::Right };
-        
-        // 如果跨越后的理想手与起始手不同，则切换
-        if ideal_hand_after_crossing != start_hand {
-            current_hand = ideal_hand_after_crossing;
-        }
-        
-        // 处理跨越序列之后的音符
-        for i in (crossing_end + 1)..notes.len() {
-            notes[i].assigned_hand = Some(current_hand);
-            notes[i].confidence = 0.85;
-        }
-    } else {
-        // 非跨越序列，使用原有逻辑
-        let start_hand = if notes[0].position.x < 0.0 { Hand::Left } else { Hand::Right };
-        let mut current_hand = start_hand;
-        for note in notes.iter_mut() {
-            note.assigned_hand = Some(current_hand);
-            note.confidence = 0.8;
-            // 如果位置与手部相反且距离较大，考虑切换
-            if note.position.x * current_hand.sign() < -2.4 {
-                current_hand = match current_hand {
-                    Hand::Left => Hand::Right,
-                    Hand::Right => Hand::Left,
-                };
-            }
-        }
-    }
+pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotation: f32, bpm_list: &BpmList)
+```
+
+**执行流程**:
+1. 检查音符数组是否为空
+2. 启动AI工作线程（首次调用时）
+3. 获取谱面行状态
+4. 处理已完成的响应（批量处理最多5个）
+5. 判断是否需要发起新的完整更新请求
+6. 限制待处理请求数量（最多3个）
+
+### 3.2 音符匹配与合并算法
+
+```rust
+fn match_and_merge_notes(original: &mut [Note], updated: &[Note]) -> bool
+```
+
+**匹配策略**:
+- **时间窗口**: 50ms (0.05秒)
+- **位置阈值**: 20像素距离 (400平方)
+- **类型匹配**: 确保音符类型相同
+- **最优匹配**: 使用时间+距离的综合评分
+
+### 3.3 特征提取实现
+
+#### ProcessedNote 结构
+```rust
+struct ProcessedNote {
+    index: usize,           // 音符索引
+    position: Vector2,      // 位置坐标
+    time: f32,              // 时间戳
+    kind: NoteKind,         // 音符类型
+    assigned_hand: Option<Hand>, // 分配的手部
+    confidence: f32,        // 置信度
+    features: Vec<f32>,     // 特征向量
+    judge: JudgeStatus,     // 判定状态
+    difficulty: f32,        // 难度评分
+    duration: f32,          // 持续时间
 }
 ```
 
-#### 时间特征提取关键指标
-| 特征 | 计算方式 | 作用 |
-|------|----------|------|
-| 节奏密度 | 音符数/时间窗口 | 判断段落难度 |
-| 速度变化率 | ΔBPM/Δt | 检测变速段落 |
-| 时序熵 | -Σ p(t)log p(t) | 判断节奏规律性 |
-| 连打长度 | 最长连续音符数 | 优化连打分配 |
-| 跨越序列检测 | 连续符号变化计数 | 识别x到-x跨越模式 |
+#### Vector2 工具方法
+- `distance_to()`: 计算两点间距离
+- `rotate()`: 旋转向量
+- `magnitude()`: 计算向量长度
+- `normalize()`: 向量归一化
+- `dot()`: 点积计算
+- `clean()`: 清理非有限值
 
-#### 跨越序列处理机制
-当检测到从正x坐标跨越到负x坐标（或反之）的连续音符序列时，系统会：
+### 3.4 神经网络前向传播
 
-1. **识别跨越序列**：检测连续的符号变化（prev_x * curr_x < 0）
-2. **确定起始手**：根据跨越序列开始前的音符位置确定起始手
-3. **保持手部一致性**：使用起始手处理整个跨越序列，避免中途切换
-4. **智能恢复**：跨越完成后根据最终位置决定是否切换回默认手
+#### CPU实现 (`light_forward`)
+- 顺序处理各层
+- 支持Dense、LSTM、Attention、Residual层类型
+- 使用并行计算优化矩阵运算
 
-**触发条件**：
-- 连续跨越序列长度 ≥ 2
-- 检测分数阈值 > 0.4（已从0.6降低以提高灵敏度）
+#### GPU实现 (`gpu_forward`)
+- 创建输入/输出缓冲区
+- 矩阵乘法计算
+- 激活函数应用
+- 异步结果读取
+- 失败时自动回退到CPU
 
-**优势**：
-- 减少不必要的手部切换
-- 提高跨越序列的演奏流畅性
-- 保持手部分配的物理可行性
+## 4. 异步处理机制
 
-## 4. 高级配置指南
+### 4.1 线程模型
+- **主线程**: 负责游戏逻辑和UI渲染
+- **AI工作线程**: 专门处理手部分配请求
+- **响应分发线程**: 处理AI响应的分发
 
-### 4.1 游戏模式深度配置
+### 4.2 请求管理
+- **请求频率**: 每20ms最多发起一次完整更新
+- **超时机制**: 请求5秒后自动过期
+- **资源限制**: 每行最多3个待处理请求
+- **批量响应**: 每帧最多处理5个响应
 
-#### 2指模式配置模板
+### 4.3 错误处理
+- **Panic防护**: 使用`catch_unwind`防止AI崩溃影响主线程
+- **资源清理**: 定期清理过期请求（每30秒）
+- **校验机制**: 使用checksum验证响应数据完整性
+
+## 5. 性能优化策略
+
+### 5.1 内存优化
+- 使用`Arc`共享不可变数据（Config、BpmList）
+- 音符数据按需克隆，避免不必要的内存分配
+- 使用`VecDeque`实现高效的队列操作
+
+### 5.2 计算优化
+- 并行处理神经网络的矩阵运算
+- 批量处理多个响应减少锁竞争
+- 预排序音符索引优化匹配算法
+
+### 5.3 GPU优化
+- 异步缓冲区管理
+- 工作组大小优化（64线程/组）
+- 资源重用减少创建开销
+
+## 6. 配置与调优
+
+### 6.1 关键参数
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `FULL_UPDATE_INTERVAL_MS` | 20 | 完整更新间隔(ms) |
+| `REQUEST_TIMEOUT_MS` | 5000 | 请求超时时间(ms) |
+| `MAX_PENDING_REQUESTS` | 3 | 最大待处理请求数 |
+| `MAX_RESPONSES_PER_FRAME` | 5 | 每帧最大响应数 |
+
+### 6.2 神经网络参数
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `learning_rate` | 0.001 | 学习率 |
+| `momentum` | 0.9 | 动量参数 |
+| `dropout_rate` | 0.1 | Dropout率 |
+| `batch_size` | 256 | 批处理大小 |
+| `max_grad_norm` | 10.0 | 梯度裁剪阈值 |
+
+## 7. 使用示例
+
+### 7.1 基本用法
 ```rust
-let mut ai = PhiTKAdvancedAI::new(rotation);
-ai.game_mode = GameMode::TwoFinger;
-ai.config = HandConfig {
-    exploration_rate: 0.03,
-    hand_switch_penalty: 0.35,
-    position_tolerance: 0.18,
-    balance_threshold: 0.55,
-    consecutive_threshold: 2,
-    center_region_bonus: 0.25,
-    // ... 其他参数
-};
+// 在游戏场景中调用手部分配
+assign_hands(
+    &mut judge_line.notes,
+    &config,
+    judge_line.id,
+    judge_line.rotation,
+    &bpm_list
+);
 ```
 
-**参数调优建议**：
-- **高密度双押**：降低`position_tolerance`至0.12，提高`center_region_bonus`至0.3
-- **慢速谱面**：提高`consecutive_threshold`至3，降低`hand_switch_penalty`至0.25
-
-#### 4指模式特殊配置
+### 7.2 模型保存与加载
 ```rust
-ai.config.four_finger = FourFingerConfig {
-    finger_spacing: 0.35, // 手指间距阈值
-    cross_hand_threshold: 0.6, // 交叉手判定阈值
-    finger_priority: vec![0.4, 0.3, 0.2, 0.1], // 手指优先级
-    fatigue_decay: 0.02, // 疲劳衰减率
-};
+// 创建或加载AI模型
+let mut ai = PhiTKAdvancedAI::load_or_create("phitk_ai_model.bin", rotation, &config);
+
+// 初始化GPU（可选）
+ai.main_network.init_gpu_sync();
+ai.target_network.init_gpu_sync();
 ```
 
-### 4.2 GPU性能调优
+## 8. 调试与监控
 
-#### 显存优化技巧
-1. **降低batch_size**：从24→16可减少40%显存占用
-2. **关闭非必要层**：设置`activation_pipelinotes`为None
-3. **使用FP16**：在支持的硬件上启用半精度计算
+### 8.1 性能指标
+- `TOTAL_TOKENS_USED`: 总处理请求数
+- `correct_predictions`: 正确预测数
+- `average_reward`: 平均奖励值
+- `training_episodes`: 训练轮次
 
-#### 常见GPU问题解决方案
-| 问题现象 | 原因 | 解决方案 |
-|----------|------|----------|
-| 初始化失败 | 软件渲染器 | 设置`WGPU_BACKEND=primary` |
-| 性能低下 | 驱动过旧 | 更新至最新Vulkan驱动 |
-| 内存泄漏 | 未释放资源 | 调用`cleanup_gpu_resources()` |
-
-## 5. 高级调试技术
-
-### 5.1 实时决策监控
-
-#### 启用详细日志
-```rust
-// 在main.rs中添加
-#[cfg(feature = "log")]
-extern crate::log;
-
-// 在AI初始化后
-ai.enable_debug_logging(true);
-```
-
-#### 关键日志格式
-```
-[AI-DEBUG] T=2.34s | Line=0 | Mode=2Finger
-  Note: (x=0.25, t=0.05s) | Features: [0.7, 0.3, ...]
-  Network: L=0.82(↑0.15) R=0.65(↓0.08) | Decision=Left
-  Reason: Alternating pattern detected (prev=Right)
-```
-
-### 5.2 性能分析工具
-
-#### CPU热点分析
-```bash
-# 生成火焰图
-perf record -F 99 -g -- cargo run
-perf script | inferno-flamegraph > flame.svg
-```
-
-#### GPU性能指标
-| 指标 | 正常范围 | 问题阈值 |
-|------|----------|----------|
-| Compute Time | <5ms/frame | >10ms/frame |
-| Memory Usage | <70% VRAM | >90% VRAM |
-| Pipeline Switch | <100/frame | >500/frame |
-
-## 6. 扩展开发指南
-
-### 6.1 自定义模式识别
-
-#### 添加新识别模式
-```rust
-impl AdvancedFeatureExtractor {
-    fn detect_arpeggio(&self, notes: &[ProcessedNote]) -> bool {
-        // 检测琶音模式（等时间间隔的渐进式音符）
-        if notes.len() < 4 { return false; }
-        
-        let time_diffs: Vec<_> = notes.windows(2)
-            .map(|w| w[1].time - w[0].time)
-            .collect();
-        
-        // 检查时间间隔是否近似相等
-        let avg = time_diffs.iter().sum::<f32>() / time_diffs.len() as f32;
-        time_diffs.iter().all(|&d| (d - avg).abs() < 0.01)
-    }
-}
-```
-
-#### 注册新模式
-```rust
-// 在模式库初始化时
-self.pattern_library.insert("arpeggio".to_string(), PatternSignature {
-    name: "arpeggio".to_string(),
-    features: vec![0.8, 0.2, 0.0, 0.0],
-    difficulty_multiplier: 1.2,
-    optimal_strategy: HandStrategy::Alternating,
-    success_rate: 0.0,
-    adaptation_count: 0,
-});
-```
-
-### 6.2 神经网络架构定制
-
-#### 添加自定义层
-```rust
-impl DeepNeuralNetwork {
-    fn add_custom_layer(&mut self, input_size: usize, output_size: usize) {
-        let layer = NetworkLayer {
-            weights: vec![vec![0.0; input_size]; output_size],
-            biases: vec![0.0; output_size],
-            activation_func: ActivationFunction::GELU,
-            layer_type: LayerType::Custom("Wavelet".to_string()),
-            // ... 其他字段
-        };
-        self.layers.push(layer);
-    }
-}
-```
-
-#### 自定义激活函数
-```wgsl
-// 在custom_activation.wgsl中
-fn wavelet_activation(x: f32) -> f32 {
-    return x * cos(3.1415926 * x * 2.0);
-}
-```
-## 7. 故障排除手册
-
-### 7.1 典型问题诊断树
-
-```
-手部分配异常？
-├─▶ 检查rotation参数是否正确
-├─▶ 验证BPM列表是否完整
-├─▶ 查看特征提取日志
-│  ├─▶ 特征异常 → 检查预处理逻辑
-│  └─▶ 特征正常 → 检查网络输出
-└─▶ 网络输出异常
-   ├─▶ 权重是否NaN → 检查梯度裁剪
-   └─▶ 输出无变化 → 检查学习率
-```
-
-### 7.2 紧急恢复方案
-
-#### 模型损坏恢复
-```bash
-# 重置为默认模型
-cp prpr/assets/default_ai_model.bin phitk_ai_model.bin
-
-# 或从备份恢复
-tar -xzf ai_model_backup_20250929.tgz
-```
-
-#### 实时参数调整
-```rust
-// 在运行时调整参数
-ai.set_parameter("exploration_rate", 0.01);
-ai.set_parameter("confidence_threshold", 0.85);
-```
-
-## 8. 附录
-
-### 8.1 音符特征向量格式
-```
-[0]  当前时间位置（归一化）
-[1]  相对BPM变化率
-[2]  前一个音符时间差
-[3]  后一个音符时间差
-[4]  X坐标位置
-[5]  Y坐标位置
-[6]  前一个音符X差值
-[7]  前一个音符Y差值
-[8]  手部切换历史（最近5次）
-[9]  当前手部使用率
-[10] 模式识别置信度
-...  其他动态特征
-```
-
-### 8.2 网络输出解释
-| 输出索引 | 含义 | 范围 | 用途 |
-|----------|------|------|------|
-| 0 | 左手置信度 | [0,1] | 主要决策依据 |
-| 1 | 右手置信度 | [0,1] | 主要决策依据 |
-| 2 | 稳定性指标 | [0.3,0.96] | 用于难度调节 |
-| 3 | 即时奖励 | [-1,1] | 用于训练反馈 |
+### 8.2 日志输出
+- GPU初始化状态
+- 请求/响应处理状态
+- 错误和警告信息
 
 ---
-*本文档最后更新时间：2025-10-01*
-*技术审核：Link*
+*本文档基于实际代码实现，最后更新时间：2025-10-06*
