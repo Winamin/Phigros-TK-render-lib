@@ -42,8 +42,8 @@ pub struct Video {
     decode_ahead_frames: usize,
 
     // 视频信息
-    width: u32,
-    height: u32,
+    //width: u32,
+    //height: u32,
 
     // 缓冲区重用
     buf_y: Vec<u8>,
@@ -126,8 +126,8 @@ impl Video {
             ended: false,
             max_cache_size: 10, // 最多缓存10帧
             decode_ahead_frames: 3, // 提前解码3帧
-            width: w,
-            height: h,
+            //width: w,
+            //height: h,
             buf_y,
             buf_u,
             buf_v,
