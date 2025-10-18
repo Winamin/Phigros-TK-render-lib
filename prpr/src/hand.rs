@@ -544,6 +544,10 @@ struct DeepNeuralNetwork {
     #[serde(skip)]queue: Option<wgpu::Queue>,
     #[serde(skip)]matmul_pipeline: Option<wgpu::ComputePipeline>,
     #[serde(skip)]matmul_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    #[serde(skip)]lstm_pipeline: Option<wgpu::ComputePipeline>,
+    #[serde(skip)]lstm_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    #[serde(skip)]attention_pipeline: Option<wgpu::ComputePipeline>,
+    #[serde(skip)]attention_bind_group_layout: Option<wgpu::BindGroupLayout>,
     #[serde(skip)]activation_pipelinotes: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
     #[serde(
         skip
@@ -744,7 +748,7 @@ impl DeepNeuralNetwork {
             learning_rate: 0.003, //学习率 - 适应初始Loss为0.36的较高初始学习率
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size: 256, //批量训练
+            batch_size: 128, //批量训练
             max_grad_norm: 10.0, //最大梯度限制
             //weight_decay: 0.0001,
             last_loss: f32::INFINITY, //损失
@@ -754,6 +758,10 @@ impl DeepNeuralNetwork {
             queue: None,
             matmul_pipeline: None,
             matmul_bind_group_layout: None,
+            lstm_pipeline: None,
+            lstm_bind_group_layout: None,
+            attention_pipeline: None,
+            attention_bind_group_layout: None,
             activation_pipelinotes: StdHashMap::new(),
             activation_bind_group_layouts: StdHashMap::new(),
             gpu_initialized: false,
@@ -1018,7 +1026,7 @@ impl DeepNeuralNetwork {
         }
 
         let instance_desc = wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::GL,
+            backends: wgpu::Backends::VULKAN,
             ..Default::default()
         };
         let instance = wgpu::Instance::new(&instance_desc);
@@ -1149,6 +1157,180 @@ impl DeepNeuralNetwork {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         });
 
+        // 创建LSTM管线
+        let lstm_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("LSTM Bind Group Layout"),
+        });
+
+        let lstm_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("LSTM Pipeline Layout"),
+            bind_group_layouts: &[&lstm_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let lstm_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("LSTM Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("lstm.wgsl").into()),
+        });
+
+        let lstm_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("LSTM Pipeline"),
+            layout: Some(&lstm_pipeline_layout),
+            module: &lstm_shader,
+            entry_point: Some("main"),
+            cache: None,
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+
+        // 创建注意力管线
+        let attention_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("Attention Bind Group Layout"),
+        });
+
+        let attention_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Attention Pipeline Layout"),
+            bind_group_layouts: &[&attention_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let attention_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Attention Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("attention.wgsl").into()),
+        });
+
+        let attention_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Attention Pipeline"),
+            layout: Some(&attention_pipeline_layout),
+            module: &attention_shader,
+            entry_point: Some("main"),
+            cache: None,
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+
         let mut activation_pipelinotes = StdHashMap::new();
         let mut activation_bind_group_layouts = StdHashMap::new();
         for func in [
@@ -1234,6 +1416,10 @@ impl DeepNeuralNetwork {
         self.queue = Some(queue);
         self.matmul_pipeline = Some(matmul_pipeline);
         self.matmul_bind_group_layout = Some(matmul_bind_group_layout);
+        self.lstm_pipeline = Some(lstm_pipeline);
+        self.lstm_bind_group_layout = Some(lstm_bind_group_layout);
+        self.attention_pipeline = Some(attention_pipeline);
+        self.attention_bind_group_layout = Some(attention_bind_group_layout);
         self.activation_pipelinotes = activation_pipelinotes;
         self.activation_bind_group_layouts = activation_bind_group_layouts;
         self.batch_size_buffer = Some(batch_size_buffer);
@@ -1301,107 +1487,426 @@ impl DeepNeuralNetwork {
         });
 
         let mut current_input_buffer = input_buffer;
-        //let mut current_input_size = input.len();
+        let mut current_input_size = input.len();
 
         for i in 0..self.layers.len() {
             let layer = &self.layers[i];
-            let output_size = layer.weights.len();
+            let output_size = match layer.layer_type {
+                LayerType::Dense => layer.weights.len(),
+                LayerType::LSTM => {
+                    // LSTM层输出大小
+                    layer.activations.len()
+                },
+                LayerType::Attention => {
+                    // 注意力层输出大小
+                    layer.activations.len()
+                },
+                LayerType::Residual => layer.weights.len(),
+            };
 
-            // 创建输出缓冲区
-            let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Output Buffer Layer {}", i)),
-                size: (output_size * size_of::<f32>()) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
+            match layer.layer_type {
+                LayerType::Dense | LayerType::Residual => {
+                    // 创建输出缓冲区
+                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("Output Buffer Layer {}", i)),
+                        size: (output_size * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
 
-            // 矩阵乘法
-            let matmul_bind_group = self.create_matmul_bind_group(
-                layer,
-                &current_input_buffer,
-                &output_buffer
-            );
+                    // 矩阵乘法
+                    let matmul_bind_group = self.create_matmul_bind_group(
+                        layer,
+                        &current_input_buffer,
+                        &output_buffer
+                    );
 
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Matmul Encoder"),
-            });
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Matmul Encoder"),
+                    });
 
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Matmul Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
-                cpass.set_bind_group(0, &matmul_bind_group, &[]);
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Matmul Pass"),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
+                        cpass.set_bind_group(0, &matmul_bind_group, &[]);
 
-                // 正确计算工作组数量
-                let workgroup_count = ((output_size as u32) + 63) / 64;
-                cpass.dispatch_workgroups(workgroup_count, 1, 1);
-            }
+                        // 正确计算工作组数量
+                        let workgroup_count = ((output_size as u32) + 63) / 64;
+                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                    }
 
-            queue.submit(Some(encoder.finish()));
+                    queue.submit(Some(encoder.finish()));
 
-            // 激活函数
-            let activation_bind_group = self.create_activation_bind_group(
-                layer,
-                &output_buffer
-            );
+                    // 激活函数
+                    let activation_bind_group = self.create_activation_bind_group(
+                        layer,
+                        &output_buffer
+                    );
 
-            let activation_pipeline = self.activation_pipelinotes
-                .get(&layer.activation_func)
-                .unwrap();
+                    let activation_pipeline = self.activation_pipelinotes
+                        .get(&layer.activation_func)
+                        .unwrap();
 
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Activation Encoder"),
-            });
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Activation Encoder"),
+                    });
 
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Activation Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(activation_pipeline);
-                cpass.set_bind_group(0, &activation_bind_group, &[]);
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Activation Pass"),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline(activation_pipeline);
+                        cpass.set_bind_group(0, &activation_bind_group, &[]);
 
-                // 正确计算工作组数量
-                let workgroup_count = ((output_size as u32) + 63) / 64;
-                cpass.dispatch_workgroups(workgroup_count, 1, 1);
-            }
+                        // 正确计算工作组数量
+                        let workgroup_count = ((output_size as u32) + 63) / 64;
+                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                    }
 
-            queue.submit(Some(encoder.finish()));
+                    queue.submit(Some(encoder.finish()));
 
-            // 准备下一层的输入
-            if i < self.layers.len() - 1 {
-                let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(&format!("Input Buffer Layer {}", i + 1)),
-                    size: (output_size * size_of::<f32>()) as u64,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
+                    // 准备下一层的输入
+                    if i < self.layers.len() - 1 {
+                        let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some(&format!("Input Buffer Layer {}", i + 1)),
+                            size: (output_size * size_of::<f32>()) as u64,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
 
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Copy Encoder"),
-                });
+                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Copy Encoder"),
+                        });
 
-                encoder.copy_buffer_to_buffer(
-                    &output_buffer,
-                    0,
-                    &next_input_buffer,
-                    0,
-                    (output_size * size_of::<f32>()) as u64
-                );
+                        encoder.copy_buffer_to_buffer(
+                            &output_buffer,
+                            0,
+                            &next_input_buffer,
+                            0,
+                            (output_size * size_of::<f32>()) as u64
+                        );
 
-                queue.submit(Some(encoder.finish()));
-                current_input_buffer = next_input_buffer;
-                //current_input_size = output_size;
-            } else {
-                // 最后一层，直接使用输出缓冲区
-                current_input_buffer = output_buffer;
+                        queue.submit(Some(encoder.finish()));
+                        current_input_buffer = next_input_buffer;
+                        current_input_size = output_size;
+                    } else {
+                        // 最后一层，直接使用输出缓冲区
+                        current_input_buffer = output_buffer;
+                    }
+                },
+                LayerType::LSTM => {
+                    // LSTM层：现在使用GPU实现
+                    let seq_len = layer.seq_len;
+                    let feature_dim = if seq_len > 0 { current_input_size / seq_len } else { current_input_size };
+                    let output_size = layer.activations.len() / (if layer.bidirectional { 2 } else { 1 });
+                    
+                    // 创建输出缓冲区
+                    let total_output_size = output_size * seq_len * (if layer.bidirectional { 2 } else { 1 });
+                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("LSTM Output Buffer Layer {}", i)),
+                        size: (total_output_size * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
+                    
+                    // 创建隐藏状态和细胞状态缓冲区
+                    let hidden_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("LSTM Hidden States Buffer Layer {}", i)),
+                        size: (output_size * seq_len * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
+                    
+                    let cell_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("LSTM Cell States Buffer Layer {}", i)),
+                        size: (output_size * seq_len * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
+                    
+                    // 创建LSTM参数缓冲区
+                    #[repr(C)]
+                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+                    struct LSTMParams {
+                        input_size: u32,
+                        hidden_size: u32,
+                        seq_len: u32,
+                        batch_size: u32,
+                        bidirectional: u32,
+                    }
+                    
+                    let params = LSTMParams {
+                        input_size: feature_dim as u32,
+                        hidden_size: output_size as u32,
+                        seq_len: seq_len as u32,
+                        batch_size: 1, // 单个样本
+                        bidirectional: if layer.bidirectional { 1 } else { 0 },
+                    };
+                    
+                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("LSTM Params Buffer Layer {}", i)),
+                        contents: bytemuck::cast_slice(&[params]),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    });
+                    
+                    // 创建LSTM绑定组
+                    let lstm_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        layout: self.lstm_bind_group_layout.as_ref().unwrap(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: current_input_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: output_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: hidden_states_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: cell_states_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                        ],
+                        label: Some(&format!("LSTM Bind Group Layer {}", i)),
+                    });
+                    
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("LSTM Encoder"),
+                    });
+                    
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("LSTM Pass"),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline(self.lstm_pipeline.as_ref().unwrap());
+                        cpass.set_bind_group(0, &lstm_bind_group, &[]);
+                        
+                        // 计算工作组数量
+                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
+                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                    }
+                    
+                    queue.submit(Some(encoder.finish()));
+                    
+                    // 激活函数
+                    let activation_bind_group = self.create_activation_bind_group(
+                        layer,
+                        &output_buffer
+                    );
+                    
+                    let activation_pipeline = self.activation_pipelinotes
+                        .get(&layer.activation_func)
+                        .unwrap();
+                    
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("LSTM Activation Encoder"),
+                    });
+                    
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("LSTM Activation Pass"),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline(activation_pipeline);
+                        cpass.set_bind_group(0, &activation_bind_group, &[]);
+                        
+                        // 正确计算工作组数量
+                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
+                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                    }
+                    
+                    queue.submit(Some(encoder.finish()));
+                    
+                    // 准备下一层的输入
+                    if i < self.layers.len() - 1 {
+                        let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some(&format!("Input Buffer Layer {}", i + 1)),
+                            size: (total_output_size * size_of::<f32>()) as u64,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        
+                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Copy Encoder"),
+                        });
+                        
+                        encoder.copy_buffer_to_buffer(
+                            &output_buffer,
+                            0,
+                            &next_input_buffer,
+                            0,
+                            (total_output_size * size_of::<f32>()) as u64
+                        );
+                        
+                        queue.submit(Some(encoder.finish()));
+                        current_input_buffer = next_input_buffer;
+                        current_input_size = total_output_size;
+                    } else {
+                        // 最后一层，直接使用输出缓冲区
+                        current_input_buffer = output_buffer;
+                    }
+                },
+                LayerType::Attention => {
+                    // 注意力层：现在使用GPU实现
+                    // 创建输出缓冲区
+                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("Attention Output Buffer Layer {}", i)),
+                        size: (output_size * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
+                    
+                    // 创建注意力参数缓冲区
+                    #[repr(C)]
+                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+                    struct AttentionParams {
+                        input_size: u32,
+                        output_size: u32,
+                        batch_size: u32,
+                    }
+                    
+                    let params = AttentionParams {
+                        input_size: current_input_size as u32,
+                        output_size: output_size as u32,
+                        batch_size: 1, // 单个样本
+                    };
+                    
+                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("Attention Params Buffer Layer {}", i)),
+                        contents: bytemuck::cast_slice(&[params]),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    });
+                    
+                    // 创建注意力绑定组
+                    let attention_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        layout: self.attention_bind_group_layout.as_ref().unwrap(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: current_input_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: output_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                        ],
+                        label: Some(&format!("Attention Bind Group Layer {}", i)),
+                    });
+                    
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Attention Encoder"),
+                    });
+                    
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Attention Pass"),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline(self.attention_pipeline.as_ref().unwrap());
+                        cpass.set_bind_group(0, &attention_bind_group, &[]);
+                        
+                        // 计算工作组数量
+                        let workgroup_count = ((output_size as u32) + 63) / 64;
+                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                    }
+                    
+                    queue.submit(Some(encoder.finish()));
+                    
+                    // 激活函数
+                    let activation_bind_group = self.create_activation_bind_group(
+                        layer,
+                        &output_buffer
+                    );
+                    
+                    let activation_pipeline = self.activation_pipelinotes
+                        .get(&layer.activation_func)
+                        .unwrap();
+                    
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Attention Activation Encoder"),
+                    });
+                    
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Attention Activation Pass"),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline(activation_pipeline);
+                        cpass.set_bind_group(0, &activation_bind_group, &[]);
+                        
+                        // 正确计算工作组数量
+                        let workgroup_count = ((output_size as u32) + 63) / 64;
+                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                    }
+                    
+                    queue.submit(Some(encoder.finish()));
+                    
+                    // 准备下一层的输入
+                    if i < self.layers.len() - 1 {
+                        let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some(&format!("Input Buffer Layer {}", i + 1)),
+                            size: (output_size * size_of::<f32>()) as u64,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        
+                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Copy Encoder"),
+                        });
+                        
+                        encoder.copy_buffer_to_buffer(
+                            &output_buffer,
+                            0,
+                            &next_input_buffer,
+                            0,
+                            (output_size * size_of::<f32>()) as u64
+                        );
+                        
+                        queue.submit(Some(encoder.finish()));
+                        current_input_buffer = next_input_buffer;
+                        current_input_size = output_size;
+                    } else {
+                        // 最后一层，直接使用输出缓冲区
+                        current_input_buffer = output_buffer;
+                    }
+                },
             }
         }
 
         // 读取结果
-        let result_size = self.layers.last().unwrap().weights.len();
+        let result_size = self.layers.last().unwrap().activations.len();
         let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Staging Buffer"),
             size: (result_size * size_of::<f32>()) as u64,
@@ -1523,7 +2028,7 @@ impl DeepNeuralNetwork {
     }
 
     fn gpu_forward_batch(&mut self, inputs: &[&[f32]], actual_batch_size: usize) -> Vec<Vec<f32>> {
-        //println!("[GPU BATCH DEBUG] Processing batch with {} samples.", actual_batch_size);
+        println!("[GPU BATCH DEBUG] Processing batch with {} samples.", actual_batch_size);
         if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
             println!("[GPU DEBUG] Critical GPU resource (device/queue/pipeline) is None. FALLING BACK TO CPU.");
             return inputs.iter().map(|input| self.light_forward(input)).collect();
@@ -1544,78 +2049,335 @@ impl DeepNeuralNetwork {
         });
         let mut current_input_buffer = batch_input_buffer;
         let mut layer_output_buffers = Vec::new();
+        
         for i in 0..self.layers.len() {
             let layer = &self.layers[i];
-            let output_size = layer.weights.len() as u32;
-            let total_output_size = output_size * (actual_batch_size as u32);
+            
+            match layer.layer_type {
+                LayerType::Dense | LayerType::Residual => {
+                    let output_size = layer.weights.len() as u32;
+                    let total_output_size = output_size * (actual_batch_size as u32);
 
-            let activation_buffer = match layer.activations_buffer.as_ref() {
-                Some(b) => b,
-                None => panic!("Activation buffer for layer {} is not initialized.", i),
-            };
+                    let activation_buffer = match layer.activations_buffer.as_ref() {
+                        Some(b) => b,
+                        None => panic!("Activation buffer for layer {} is not initialized.", i),
+                    };
 
-            let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("Batch Output Buffer for Layer {}", layer_output_buffers.len())),
-                size: (total_output_size * size_of::<f32>() as u32) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
+                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("Batch Output Buffer for Layer {}", layer_output_buffers.len())),
+                        size: (total_output_size * size_of::<f32>() as u32) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
 
-            let matmul_bind_group = self.create_matmul_bind_group(layer, &current_input_buffer, activation_buffer);
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Batch Matmul Encoder")
-            });
+                    let matmul_bind_group = self.create_matmul_bind_group(layer, &current_input_buffer, activation_buffer);
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Batch Matmul Encoder")
+                    });
 
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Batch Matmul Pass"),
-                    timestamp_writes: None,
-                });
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Batch Matmul Pass"),
+                            timestamp_writes: None,
+                        });
 
-                cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
-                cpass.set_bind_group(0, &matmul_bind_group, &[]);
-                cpass.dispatch_workgroups(
-                    ((output_size * actual_batch_size as u32) + 7) / 8,
-                    1,
-                    1
-                );
+                        cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
+                        cpass.set_bind_group(0, &matmul_bind_group, &[]);
+                        cpass.dispatch_workgroups(
+                            ((output_size * actual_batch_size as u32) + 63) / 64,
+                            1,
+                            1
+                        );
+                    }
+                    queue.submit(Some(encoder.finish()));
+
+                    let activation_bind_group = self.create_activation_bind_group(
+                        layer,
+                        &output_buffer,
+                    );
+                    let activation_pipeline = self.activation_pipelinotes
+                        .get(&layer.activation_func)
+                        .expect("Activation pipeline not initialized");
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Batch Activation Encoder")
+                    });
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Batch Activation Pass"),
+                            timestamp_writes: None,
+                        });
+
+                        cpass.set_pipeline(activation_pipeline);
+                        cpass.set_bind_group(0, &activation_bind_group, &[]);
+                        cpass.dispatch_workgroups(
+                            ((output_size * actual_batch_size as u32) + 63) / 64,
+                            1,
+                            1
+                        );
+                    }
+                    queue.submit(Some(encoder.finish()));
+
+                    current_input_buffer = output_buffer.clone();
+                    layer_output_buffers.push(output_buffer);
+                },
+                LayerType::LSTM => {
+                    // LSTM层：现在使用GPU实现
+                    let seq_len = layer.seq_len;
+                    let feature_dim = if seq_len > 0 { input_size / seq_len } else { input_size };
+                    let output_size = layer.activations.len() / (if layer.bidirectional { 2 } else { 1 });
+                    
+                    // 创建输出缓冲区
+                    let total_output_size = output_size * seq_len * (if layer.bidirectional { 2 } else { 1 }) * actual_batch_size;
+                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("Batch LSTM Output Buffer for Layer {}", layer_output_buffers.len())),
+                        size: (total_output_size * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
+                    
+                    // 创建隐藏状态和细胞状态缓冲区
+                    let hidden_states_size = output_size * seq_len * actual_batch_size;
+                    let hidden_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("Batch LSTM Hidden States Buffer for Layer {}", layer_output_buffers.len())),
+                        size: (hidden_states_size * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
+                    
+                    let cell_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("Batch LSTM Cell States Buffer for Layer {}", layer_output_buffers.len())),
+                        size: (hidden_states_size * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
+                    
+                    // 创建LSTM参数缓冲区
+                    #[repr(C)]
+                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+                    struct LSTMParams {
+                        input_size: u32,
+                        hidden_size: u32,
+                        seq_len: u32,
+                        batch_size: u32,
+                        bidirectional: u32,
+                    }
+                    
+                    let params = LSTMParams {
+                        input_size: feature_dim as u32,
+                        hidden_size: output_size as u32,
+                        seq_len: seq_len as u32,
+                        batch_size: actual_batch_size as u32,
+                        bidirectional: if layer.bidirectional { 1 } else { 0 },
+                    };
+                    
+                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("Batch LSTM Params Buffer for Layer {}", layer_output_buffers.len())),
+                        contents: bytemuck::cast_slice(&[params]),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    });
+                    
+                    // 创建LSTM绑定组
+                    let lstm_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        layout: self.lstm_bind_group_layout.as_ref().unwrap(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: current_input_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: output_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: hidden_states_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: cell_states_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                        ],
+                        label: Some(&format!("Batch LSTM Bind Group for Layer {}", layer_output_buffers.len())),
+                    });
+                    
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Batch LSTM Encoder"),
+                    });
+                    
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Batch LSTM Pass"),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline(self.lstm_pipeline.as_ref().unwrap());
+                        cpass.set_bind_group(0, &lstm_bind_group, &[]);
+                        
+                        // 计算工作组数量
+                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
+                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                    }
+                    
+                    queue.submit(Some(encoder.finish()));
+                    
+                    // 激活函数
+                    let activation_bind_group = self.create_activation_bind_group(
+                        layer,
+                        &output_buffer,
+                    );
+                    let activation_pipeline = self.activation_pipelinotes
+                        .get(&layer.activation_func)
+                        .expect("Activation pipeline not initialized");
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Batch LSTM Activation Encoder")
+                    });
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Batch LSTM Activation Pass"),
+                            timestamp_writes: None,
+                        });
+
+                        cpass.set_pipeline(activation_pipeline);
+                        cpass.set_bind_group(0, &activation_bind_group, &[]);
+                        cpass.dispatch_workgroups(
+                            ((total_output_size as u32) + 63) / 64,
+                            1,
+                            1
+                        );
+                    }
+                    queue.submit(Some(encoder.finish()));
+
+                    current_input_buffer = output_buffer.clone();
+                    layer_output_buffers.push(output_buffer);
+                },
+                LayerType::Attention => {
+                    // 注意力层：现在使用GPU实现
+                    let output_size = layer.activations.len();
+                    let total_output_size = output_size * actual_batch_size;
+                    
+                    // 创建输出缓冲区
+                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("Batch Attention Output Buffer for Layer {}", layer_output_buffers.len())),
+                        size: (total_output_size * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
+                    
+                    // 创建注意力参数缓冲区
+                    #[repr(C)]
+                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+                    struct AttentionParams {
+                        input_size: u32,
+                        output_size: u32,
+                        batch_size: u32,
+                    }
+                    
+                    let params = AttentionParams {
+                        input_size: input_size as u32,
+                        output_size: output_size as u32,
+                        batch_size: actual_batch_size as u32,
+                    };
+                    
+                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("Batch Attention Params Buffer for Layer {}", layer_output_buffers.len())),
+                        contents: bytemuck::cast_slice(&[params]),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    });
+                    
+                    // 创建注意力绑定组
+                    let attention_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        layout: self.attention_bind_group_layout.as_ref().unwrap(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: current_input_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: output_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                        ],
+                        label: Some(&format!("Batch Attention Bind Group for Layer {}", layer_output_buffers.len())),
+                    });
+                    
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Batch Attention Encoder"),
+                    });
+                    
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Batch Attention Pass"),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline(self.attention_pipeline.as_ref().unwrap());
+                        cpass.set_bind_group(0, &attention_bind_group, &[]);
+                        
+                        // 计算工作组数量
+                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
+                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                    }
+                    
+                    queue.submit(Some(encoder.finish()));
+                    
+                    // 激活函数
+                    let activation_bind_group = self.create_activation_bind_group(
+                        layer,
+                        &output_buffer,
+                    );
+                    let activation_pipeline = self.activation_pipelinotes
+                        .get(&layer.activation_func)
+                        .expect("Activation pipeline not initialized");
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Batch Attention Activation Encoder")
+                    });
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Batch Attention Activation Pass"),
+                            timestamp_writes: None,
+                        });
+
+                        cpass.set_pipeline(activation_pipeline);
+                        cpass.set_bind_group(0, &activation_bind_group, &[]);
+                        cpass.dispatch_workgroups(
+                            ((total_output_size as u32) + 63) / 64,
+                            1,
+                            1
+                        );
+                    }
+                    queue.submit(Some(encoder.finish()));
+
+                    current_input_buffer = output_buffer.clone();
+                    layer_output_buffers.push(output_buffer);
+                },
             }
-            queue.submit(Some(encoder.finish()));
-
-            let activation_bind_group = self.create_activation_bind_group(
-                layer,
-                &output_buffer,
-            );
-            let activation_pipeline = self.activation_pipelinotes
-                .get(&layer.activation_func)
-                .expect("Activation pipeline not initialized");
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Batch Activation Encoder")
-            });
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Batch Activation Pass"),
-                    timestamp_writes: None,
-                });
-
-                cpass.set_pipeline(activation_pipeline);
-                cpass.set_bind_group(0, &activation_bind_group, &[]);
-                cpass.dispatch_workgroups(
-                    ((output_size * actual_batch_size as u32) + 63) / 64,
-                    1,
-                    1
-                );
-            }
-            queue.submit(Some(encoder.finish()));
-
-            current_input_buffer = output_buffer.clone();
-            layer_output_buffers.push(output_buffer);
         }
 
         // 读取最终结果
         let last_layer_output = layer_output_buffers.last().unwrap();
-        let last_layer = self.layers.last().unwrap();
-        let output_size = last_layer.weights.len();
+        let output_size = self.layers.last().unwrap().activations.len();
         let total_output_size = output_size * actual_batch_size;
 
         let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -3740,13 +4502,13 @@ impl PhiTKAdvancedAI {
             thread_pool: thread_pool.clone(),
             //thread_count: if thread_pool.is_some() { 32 } else { 1 },
             feature_extractor: AdvancedFeatureExtractor::new(),
-            experience_replay: ExperienceReplay::new(80000),
+            experience_replay: ExperienceReplay::new(600000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0)),
             right_hand_state: HandState::new(Hand::Right, Vector2::new(0.3, 0.0)),
             rotation,
             exploration_rate: 0.05,
             discount_factor: 0.95,
-            target_update_frequency: 3000,
+            target_update_frequency: 1000000,
             total_notes_processed: 0,
             correct_predictions: 0,
             training_episodes: 0,
@@ -4050,7 +4812,7 @@ impl PhiTKAdvancedAI {
         self.post_process_assignments(&mut processed_notes);
         self.optimize_jack_pattern(&mut processed_notes);
         self.apply_and_learn(notes, &processed_notes);
-        if self.experience_replay.len() >= 64 && self.total_notes_processed % 25 == 0 {
+        if self.experience_replay.len() >= 8192 && self.total_notes_processed % 128 == 0 {
             self.train_network();
         }
         if self.training_episodes % self.target_update_frequency as u64 == 0 {
@@ -4382,7 +5144,7 @@ impl PhiTKAdvancedAI {
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
         const CONTEXT_WINDOW: usize = 64;
-        const BATCH_SIZE: usize = 256;
+        const BATCH_SIZE: usize = 128;
 
         let mut unassigned_indices = Vec::new();
         for i in 0..notes.len() {
@@ -5420,7 +6182,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn train_network(&mut self) {
-        let batch_size = 256;
+        let batch_size = 128;
         let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
         if experiences.is_empty() {
             return;
