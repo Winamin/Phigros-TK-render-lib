@@ -5385,11 +5385,11 @@ impl PhiTKAdvancedAI {
             let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
 
             let final_hand = if let Some(prev_hand) = last_hand {
-                if prev_hand == Hand::Left { 手
+                if prev_hand == Hand::Left {
                     if note.position.x < -0.21 {
                         Hand::Left
                     } else {
-                        Hand::Right /
+                        Hand::Right
                     }
                 } else {
                     if note.position.x > 0.21 {
