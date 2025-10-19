@@ -455,6 +455,10 @@ struct PhiTKAdvancedAI {
     recent_assignments: VecDeque<(Hand, f32, f32)>,
     hand_switch_count: u32,
     last_assigned_hand: Option<Hand>,
+    position_weight_factor: f32,
+    timing_weight_factor: f32,
+    state_weight_factor: f32,
+    pattern_weight_factor: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -677,6 +681,34 @@ struct DifficultyEstimator {
     coordination_difficulty: f32,
 }
 
+/// 和弦类型
+#[derive(Debug, PartialEq)]
+enum ChordType {
+    Simple,    // 简单和弦（所有音符在同一侧）
+    Complex,   // 复杂和弦（音符分布在两侧）
+    Crossing,
+}
+
+/// 模式类型
+#[derive(Debug, PartialEq)]
+enum PatternType {
+    Alternating,
+    Stream,
+    Chord,
+    Jack,
+    Crossing,
+    None,
+}
+
+#[derive(Debug)]
+struct ChordContext {
+    sorted_indices: Vec<(f32, usize)>,
+    left_count: usize,
+    right_count: usize,
+    chord_type: ChordType,
+    has_center_crossing: bool,
+}
+
 impl Vector2 {
     fn new(x: f32, y: f32) -> Self { Self { x, y } }
 
@@ -749,7 +781,7 @@ impl DeepNeuralNetwork {
             momentum: 0.9,
             dropout_rate: 0.1,
             batch_size: 128, //批量训练
-            max_grad_norm: 10.0, //最大梯度限制
+            max_grad_norm: 5.0, //最大梯度限制 - 降低阈值以增强训练稳定性
             //weight_decay: 0.0001,
             last_loss: f32::INFINITY, //损失
             bad_epochs: 0,
@@ -2572,7 +2604,7 @@ impl DeepNeuralNetwork {
         let dir_mul = if bidirectional { 2 } else { 1 };
         // LSTM 需要 4 * output_size * dir_mul 个 bias（i, f, g, o）
         // 权重：W_ih (4*output_size × input_size) + W_hh (4*output_size × output_size)
-        let weights_rows = 4 * output_size * dir_mul;
+        let weights_rows = 4 * output_size * if bidirectional { 2 } else { 1 };
         
         // 初始化权重 - LSTM 使用 Tanh 激活函数，使用 Xavier/Glorot 初始化
         let std_dev = (1.0 / input_size as f32).sqrt();
@@ -2935,11 +2967,11 @@ impl DeepNeuralNetwork {
 
         // Scaled Dot-Product Attention
         let dk = output_size as f32;
-        let mut score = 0.0;
+        let mut _score = 0.0;
         for i in 0..output_size {
-            score += q[i] * k[i];
+            _score += q[i] * k[i];
         }
-        score /= dk.sqrt();
+        _score /= dk.sqrt();
 
         // Softmax (单值)
         let weight = 1.0; // 简化
@@ -3091,6 +3123,12 @@ impl DeepNeuralNetwork {
             return;
         }
 
+        // 输出梯度信息用于调试
+        if self.epoch_count % 10 == 0 && current_norm < 1e-3 {  // 每10个epoch且梯度较小时输出
+            println!("[Gradient Monitor] Epoch: {}, Gradient Norm: {:.8} (small)", 
+                     self.epoch_count, current_norm);
+        }
+
         // If within limit, nothing to do
         if current_norm <= self.max_grad_norm {
             return;
@@ -3174,51 +3212,42 @@ impl DeepNeuralNetwork {
     }
 
     fn adapt_learning_rate(&mut self, loss: f32) {
-        // 初始Loss值为0.36，使用更合理的学习率调整策略
-        // 基于余弦退火和Plateau检测的混合策略
-        
-        // 计算损失变化率
+        // 初始Loss值为0.36
         let loss_change_ratio = if self.last_loss.is_finite() && self.last_loss > 0.0 {
             loss / self.last_loss
         } else {
             1.0
         };
-        
-        // 基于epoch的自适应调整
+
         let epoch_factor = if self.epoch_count < 50 {
-            // 早期阶段：较高的学习率加速收敛
             1.2
         } else if self.epoch_count < 200 {
-            // 中期阶段：标准学习率
             1.0
         } else {
-            // 后期阶段：降低学习率精细调整
             0.8
         };
-        
-        // 损失变化检测
+
         if loss_change_ratio < 0.98 {
-            // 损失下降，适当增加学习率
             self.learning_rate = (self.learning_rate * 1.03 * epoch_factor).min(0.01);
             self.bad_epochs = 0;
         }
-        else if loss_change_ratio > 1.02 {
-            // 损失上升，降低学习率
-            self.learning_rate = (self.learning_rate * 0.9).max(0.0001);
+        else if loss_change_ratio > 1.01 {
+            self.learning_rate = (self.learning_rate * 0.85).max(0.00005);
             self.bad_epochs += 1;
-            
-            // 连续多个epoch表现不佳，执行更激进的调整
-            if self.bad_epochs >= 3 {
-                self.learning_rate = (self.learning_rate * 0.5).max(0.0001);
+            if self.bad_epochs >= 2 {
+                self.learning_rate = (self.learning_rate * 0.4).max(0.00005); // 更激进的降低
                 println!("连续{}个epoch表现不佳，大幅降低学习率至{:.6}", self.bad_epochs, self.learning_rate);
             }
-            
-            if self.bad_epochs >= 8 {
+            if self.bad_epochs >= 4 {
+                println!("连续{}个epoch损失增加，采取激进措施", self.bad_epochs);
+                // 可以在这里添加恢复到最佳模型权重的逻辑
+            }
+            if self.bad_epochs >= 6 {
                 println!("连续{}个epoch表现不佳，执行网络重置", self.bad_epochs);
                 self.reset_problem_layers();
                 self.bad_epochs = 0;
-                // 重置后使用中等学习率
-                self.learning_rate = 0.002;
+                // 重置后使用较低的学习率
+                self.learning_rate = 0.001;
             }
         }
         else {
@@ -3229,13 +3258,13 @@ impl DeepNeuralNetwork {
         }
         
         // 确保学习率在合理范围内
-        self.learning_rate = self.learning_rate.clamp(0.0001, 0.01);
+        self.learning_rate = self.learning_rate.clamp(0.00001, 0.01);
         
         // 记录当前损失
         self.last_loss = loss;
         
-        // 每10个epoch输出一次学习率状态
-        if self.epoch_count % 10 == 0 {
+        // 每5个epoch输出一次学习率状态（更频繁）
+        if self.epoch_count % 5 == 0 {
             println!("[学习率调整] Epoch: {}, Loss: {:.6}, LR: {:.6}, 变化率: {:.3}%", 
                      self.epoch_count, loss, self.learning_rate, (loss_change_ratio - 1.0) * 100.0);
         }
@@ -3470,8 +3499,49 @@ impl DeepNeuralNetwork {
 
     fn apply_gradients(&mut self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_size: usize) {
         let batch_size_f = batch_size as f32;
-        const MAX_GRAD: f32 = 10.0;
-        const MAX_WEIGHT: f32 = 25.0;
+        const MAX_GRAD: f32 = 5.0;  //梯度上限
+        const MAX_WEIGHT: f32 = 15.0;  // 权重上限
+        const MIN_GRAD_THRESHOLD: f32 = 1e-4;  // 梯度下限 - 当平均梯度小于0.2时进行放大
+
+        // 计算平均梯度大小
+        let mut total_grad_sum = 0.0;
+        let mut total_grad_count = 0;
+        
+        for layer_grad in gradients {
+            for row in layer_grad {
+                for &g in row {
+                    total_grad_sum += g.abs();
+                    total_grad_count += 1;
+                }
+            }
+        }
+        
+        for bias_grad in bias_gradients {
+            for &g in bias_grad {
+                total_grad_sum += g.abs();
+                total_grad_count += 1;
+            }
+        }
+        
+        let avg_grad_magnitude = if total_grad_count > 0 {
+            total_grad_sum / total_grad_count as f32
+        } else {
+            0.0
+        };
+
+        let gradient_scale = if avg_grad_magnitude > 0.0 && avg_grad_magnitude < MIN_GRAD_THRESHOLD {
+            let scale = MIN_GRAD_THRESHOLD / avg_grad_magnitude;
+            scale.min(10000.0) //最大限制
+        } else if avg_grad_magnitude == 0.0 {
+            1000.0
+        } else {
+            1.0
+        };
+
+        if self.epoch_count % 10 == 0 {
+            println!("[Gradient Monitor] Epoch: {}, Avg Gradient Magnitude: {:.8}, Scale: {:.2}", 
+                     self.epoch_count, avg_grad_magnitude, gradient_scale);
+        }
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             for (i, weight_row) in layer.weights.iter_mut().enumerate() {
@@ -3483,6 +3553,8 @@ impl DeepNeuralNetwork {
                             eprintln!("[Gradient Safety] NaN/Inf gradient detected at layer {}, weight[{}][{}], setting to 0.", layer_idx, i, j);
                             grad = 0.0;
                         }
+
+                        grad *= gradient_scale;
                         grad = grad.clamp(-MAX_GRAD, MAX_GRAD);
 
                         layer.momentum_weights[i][j] =
@@ -3490,8 +3562,18 @@ impl DeepNeuralNetwork {
                         let momentum_update = layer.momentum_weights[i][j];
                         let clamped_momentum = momentum_update.clamp(-MAX_GRAD, MAX_GRAD);
 
+                        if self.epoch_count % 10 == 0 && i == 0 && j == 0 {
+                            println!("[Weight Debug] Layer {}, Weight[{}][{}]: {:.6} -> ", layer_idx, i, j, *weight);
+                        }
+
+                        let old_weight = *weight;
                         *weight += clamped_momentum;
                         *weight = weight.clamp(-MAX_WEIGHT, MAX_WEIGHT);
+
+                        if self.epoch_count % 10 == 0 && i == 0 && j == 0 {
+                            println!("{:.6} (delta: {:+.8})", *weight, *weight - old_weight);
+                        }
+                        
                         if !weight.is_finite() {
                             eprintln!("[Gradient Safety] NaN/Inf weight detected at layer {}, weight[{}][{}], setting to 0.", layer_idx, i, j);
                             *weight = 0.0;
@@ -3508,14 +3590,28 @@ impl DeepNeuralNetwork {
                         eprintln!("[Gradient Safety] NaN/Inf gradient detected at layer {}, bias[{}], setting to 0.", layer_idx, i);
                         grad = 0.0;
                     }
+                    
+                    // 应用梯度放大
+                    grad *= gradient_scale;
                     grad = grad.clamp(-MAX_GRAD, MAX_GRAD);
 
                     layer.momentum_biases[i] = self.momentum * layer.momentum_biases[i] - self.learning_rate * grad;
                     let momentum_update = layer.momentum_biases[i];
                     let clamped_momentum = momentum_update.clamp(-MAX_GRAD, MAX_GRAD);
 
+                    // 添加调试信息
+                    if self.epoch_count % 10 == 0 && i == 0 {  // 每10个epoch输出第一个偏置的更新信息
+                        println!("[Bias Debug] Layer {}, Bias[{}]: {:.6} -> ", layer_idx, i, *bias);
+                    }
+
+                    let old_bias = *bias;
                     *bias += clamped_momentum;
                     *bias = bias.clamp(-MAX_WEIGHT, MAX_WEIGHT);
+                    
+                    // 添加调试信息
+                    if self.epoch_count % 10 == 0 && i == 0 {  // 每10个epoch输出第一个偏置的更新信息
+                        println!("{:.6} (delta: {:+.8})", *bias, *bias - old_bias);
+                    }
 
                     if !bias.is_finite() {
                         eprintln!("[Gradient Safety] NaN/Inf bias detected at layer {}, bias[{}], setting to 0.", layer_idx, i);
@@ -3654,100 +3750,6 @@ impl FingerState {
 
         self.position = new_pos;
         self.last_time = time;
-    }
-
-    fn calculate_assignment_score(&self, target_pos: Vector2, time: f32, note_difficulty: f32,
-                                  current_time: f32, note_kind: &NoteKind, _note_duration: f32) -> f32 {
-        // 繁忙状态检查
-        let is_available = current_time >= self.busy_until;
-        let distance = target_pos.distance_to(&self.position);
-        let time_diff = time - self.last_time;
-
-        let mut score = 0.5; // 基础分数
-
-        // 繁忙惩罚
-        if !is_available {
-            let busy_penalty = (self.busy_until - current_time).min(1.0) * 0.8;
-            score -= busy_penalty;
-        }
-
-        // 位置偏好 - 增加梯度变化
-        // 在2指模式下，使用更合理的移动策略，不单纯依赖x坐标的正负
-        let position_weight = if self.finger.to_hand() == Hand::Left {
-            // 左手优先选择x坐标较小的位置，但允许一定的灵活性
-            let x_diff = self.position.x - target_pos.x;
-            if x_diff > 0.2 {
-                // 目标在左手左侧，非常适合
-                0.4 + (x_diff * 0.6).min(0.2)
-            } else if x_diff > -0.1 {
-                // 目标在左手附近，适中
-                0.35 * (1.0 - (x_diff + 0.1) / 0.3).max(0.0)
-            } else {
-                // 目标在左手右侧，不太适合
-                -0.2 - ((-x_diff - 0.1) * 0.5).min(0.3)
-            }
-        } else {
-            // 右手优先选择x坐标较大的位置，但允许一定的灵活性
-            let x_diff = target_pos.x - self.position.x;
-            if x_diff > 0.2 {
-                // 目标在右手右侧，非常适合
-                0.4 + (x_diff * 0.6).min(0.2)
-            } else if x_diff > -0.1 {
-                // 目标在右手附近，适中
-                0.35 * (1.0 - (x_diff + 0.1) / 0.3).max(0.0)
-            } else {
-                // 目标在右手左侧，不太适合
-                -0.2 - ((-x_diff - 0.1) * 0.5).min(0.3)
-            }
-        };
-        score += position_weight;
-
-        // 距离评分
-        let distance_score = if distance < 0.1 {
-            0.9 - distance * 2.0
-        } else if distance < 0.3 {
-            0.7 - (distance - 0.1) * 1.5
-        } else if distance < 0.6 {
-            0.4 - (distance - 0.3) * 0.8
-        } else {
-            0.1 - (distance - 0.6).min(0.4) * 0.25
-        };
-        score *= distance_score.max(0.1);
-
-        // 疲劳影响 - 非线性
-        let fatigue_penalty = self.fatigue.powf(1.5) * 0.35;
-        score *= 1.0 - fatigue_penalty;
-
-        // 时间间隔评分
-        if time_diff > 0.001 {
-            let time_score = if time_diff < 0.06 {
-                0.3 + (time_diff / 0.06) * 0.4 // 过快惩罚
-            } else if time_diff < 0.2 {
-                0.7 + ((time_diff - 0.06) / 0.14) * 0.25 // 最佳区间
-            } else if time_diff < 0.5 {
-                0.95 - ((time_diff - 0.2) / 0.3) * 0.15 // 稍慢
-            } else {
-                0.8 + ((time_diff - 0.5).min(0.5) / 0.5) * 0.15 // 很慢反而好
-            };
-            score *= time_score;
-        }
-
-        if matches!(note_kind, NoteKind::Hold { .. }) {
-            if self.is_busy {
-                score *= 0.6;
-            }
-        }
-
-        let performance_factor = 0.5 + self.performance_score * 0.5;
-        score *= performance_factor;
-
-        let difficulty_factor = 1.0 - (note_difficulty - 1.0).max(0.0) * (1.0 - self.confidence) * 0.15;
-        score *= difficulty_factor;
-
-        let randomnotess = (fastrand::f32() - 0.5) * 0.05;
-        score += randomnotess;
-
-        score.clamp(0.0, 1.0)
     }
 }
 
@@ -4441,6 +4443,12 @@ impl ExperienceReplay {
     }
 }
 
+#[derive(Debug)]
+struct RecentPerformance {
+    variance: f32,
+    trend: f32,
+}
+
 impl PhiTKAdvancedAI {
     const CURRENT_VERSION: u32 = 1;
 
@@ -4493,7 +4501,7 @@ impl PhiTKAdvancedAI {
             .ok().map(Arc::new);
 
         let rad = rotation.to_radians();
-        let game_mode = GameMode::FourFinger;
+        let game_mode = GameMode::TwoFinger;
         let finger_states = Self::init_finger_states(game_mode, rad);
 
         let mut ai = Self {
@@ -4502,13 +4510,13 @@ impl PhiTKAdvancedAI {
             thread_pool: thread_pool.clone(),
             //thread_count: if thread_pool.is_some() { 32 } else { 1 },
             feature_extractor: AdvancedFeatureExtractor::new(),
-            experience_replay: ExperienceReplay::new(600000),
+            experience_replay: ExperienceReplay::new(800000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0)),
             right_hand_state: HandState::new(Hand::Right, Vector2::new(0.3, 0.0)),
             rotation,
             exploration_rate: 0.05,
             discount_factor: 0.95,
-            target_update_frequency: 1000000,
+            target_update_frequency: 991000000,
             total_notes_processed: 0,
             correct_predictions: 0,
             training_episodes: 0,
@@ -4533,6 +4541,10 @@ impl PhiTKAdvancedAI {
             recent_assignments: VecDeque::with_capacity(50),
             hand_switch_count: 0,
             last_assigned_hand: None,
+            position_weight_factor: 0.4,
+            timing_weight_factor: 0.2,
+            state_weight_factor: 0.25,
+            pattern_weight_factor: 0.15,
         };
 
         ai.target_network = DeepNeuralNetwork::new(); // 创建新实例
@@ -4717,87 +4729,6 @@ impl PhiTKAdvancedAI {
 
      */
 
-    fn detect_and_switch_mode(&mut self, notes: &[Note]) {
-        if notes.len() < 50 {  // 降低最小音符数量要求，更早检测
-            return;
-        }
-
-        let time_window = notes.last().unwrap().time - notes[0].time;
-        if time_window < 0.5 {  // 降低时间窗口要求
-            return;
-        }
-
-        let note_density = notes.len() as f32 / time_window.max(0.1);
-
-        // 检测同时音符
-        let mut max_simultaneous = 1;
-        let mut current_time = notes[0].time;
-        let mut current_group_size = 1;
-        let mut simultaneous_groups = 0; // 统计同时音符组的数量
-
-        for i in 1..notes.len() {
-            if (notes[i].time - current_time).abs() < 0.05 {  // 放宽同时判定阈值到50ms
-                current_group_size += 1;
-                max_simultaneous = max_simultaneous.max(current_group_size);
-            } else {
-                if current_group_size > 1 {
-                    simultaneous_groups += 1;
-                }
-                current_time = notes[i].time;
-                current_group_size = 1;
-            }
-        }
-        // 处理最后一组
-        if current_group_size > 1 {
-            simultaneous_groups += 1;
-        }
-
-        // 计算同时音符组的密度
-        let simultaneous_density = if time_window > 0.0 {
-            simultaneous_groups as f32 / time_window
-        } else {
-            0.0
-        };
-
-        // 更智能的切换逻辑
-        let should_switch_to_four_finger = 
-            // 高密度且多同时音符
-            (note_density > 20.0 && max_simultaneous >= 3) ||
-            // 中等密度但频繁同时音符
-            (note_density > 10.0 && simultaneous_density > 2.0 && max_simultaneous >= 3) ||
-            // 大量同时音符
-            max_simultaneous >= 4 ||
-            // 高密度谱面
-            (note_density > 30.0 && simultaneous_groups >= 5);
-
-        let should_switch_to_two_finger = 
-            // 明显的低密度
-            (note_density < 8.0 && max_simultaneous <= 2 && simultaneous_density < 1.0) ||
-            // 中等密度但简单模式
-            (note_density < 12.0 && max_simultaneous <= 2 && simultaneous_groups < 3);
-
-        // 模式切换逻辑
-        if should_switch_to_four_finger && self.game_mode != GameMode::FourFinger {
-            println!("[模式切换] 检测到复杂谱面，切换到四指模式。密度: {:.1}, 最大同时音符: {}, 同时组密度: {:.1}",
-                     note_density, max_simultaneous, simultaneous_density);
-            self.game_mode = GameMode::FourFinger;
-            self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
-        } else if should_switch_to_two_finger && self.game_mode != GameMode::TwoFinger {
-            println!("[模式切换] 检测到简单谱面，切换到二指模式。密度: {:.1}, 最大同时音符: {}, 同时组密度: {:.1}",
-                     note_density, max_simultaneous, simultaneous_density);
-            self.game_mode = GameMode::TwoFinger;
-            self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
-        }
-        
-        // 特殊处理：如果当前是2指模式但检测到可能的复杂情况，给出警告
-        if self.game_mode == GameMode::TwoFinger && 
-           ((note_density > 15.0 && max_simultaneous >= 3) || 
-            (simultaneous_density > 1.5 && max_simultaneous >= 3)) {
-            // 不自动切换，但可以记录日志或调整参数
-            // println!("[2指模式警告] 检测到可能需要四指模式的谱面特征，但保持2指模式");
-        }
-    }
-
     fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize) {
         //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
@@ -4806,13 +4737,14 @@ impl PhiTKAdvancedAI {
         let mut processed_notes = self.preprocess_notes(notes);
         let simultaneous_groups = self.detect_simultaneous_groups(&processed_notes);
         let mut bpm_list_clone = bpm_list.clone();
-        self.detect_and_switch_mode(notes);
+        // 移除密集音符策略的手部分配机制
+        // self.detect_and_switch_mode(notes);
         self.assign_simultaneous_groups(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
         self.ai_assign_single_notes(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
         self.post_process_assignments(&mut processed_notes);
-        self.optimize_jack_pattern(&mut processed_notes);
+        self.optimize_jack_pattern_new(&mut processed_notes);
         self.apply_and_learn(notes, &processed_notes);
-        if self.experience_replay.len() >= 8192 && self.total_notes_processed % 128 == 0 {
+        if self.experience_replay.len() >= 120 && self.total_notes_processed % 24 == 0 {
             self.train_network();
         }
         if self.training_episodes % self.target_update_frequency as u64 == 0 {
@@ -4820,7 +4752,7 @@ impl PhiTKAdvancedAI {
         }
         self.training_episodes += 1;
         self.last_save_episodes += 1;
-        if self.last_save_episodes >= 256 {
+        if self.last_save_episodes >= 16384 {
             println!("Saving episodes to {}", self.last_save_episodes);
             println!("训练回合数，已保存: {}", self.training_episodes);
             self.save_model("phitk_ai_model.bin");
@@ -4898,151 +4830,636 @@ impl PhiTKAdvancedAI {
         groups
     }
 
-    fn assign_simultaneous_groups(&mut self, notes: &mut [ProcessedNote], groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
-        const CONTEXT_WINDOW: usize = 64;
-        const CROSSING_THRESHOLD: f32 = 0.15;
+    fn assign_simultaneous_groups(&mut self, notes: &mut [ProcessedNote], groups: &[Vec<usize>], _bpm_list: &mut BpmList, _line_id: usize) {
         
         for group in groups {
             if group.len() < 2 {
                 continue;
             }
 
-            if self.game_mode == GameMode::TwoFinger {
-                // 2指模式下的同时音符处理优化
-                let mut sorted_group: Vec<_> = group.iter().map(|&i| (notes[i].position.x, i)).collect();
-                sorted_group.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            // Phigros风格的同时音符分配
+            self.assign_chord_notes(notes, group);
+        }
+    }
+    
+    /// 为Phigros游戏设计的和弦音符分配
+    /// 考虑音符分布、手部位置和玩家操作习惯
+    fn assign_chord_notes(&mut self, notes: &mut [ProcessedNote], group: &[usize]) {
+        // 使用全新的和弦分配策略
+        self.assign_chord_notes_new(notes, group);
+    }
+    
+    /// 全新的和弦音符分配策略
+    fn assign_chord_notes_new(&mut self, notes: &mut [ProcessedNote], group: &[usize]) {
+        if group.is_empty() {
+            return;
+        }
+        
+        // 分析和弦模式
+        let chord_context = self.analyze_chord_context(notes, group);
+        
+        // 根据和弦类型选择分配策略
+        match chord_context.chord_type {
+            ChordType::Simple => self.assign_simple_chord(notes, group, &chord_context),
+            ChordType::Complex => self.assign_complex_chord(notes, group, &chord_context),
+            ChordType::Crossing => self.assign_crossing_chord(notes, group, &chord_context),
+        }
+        
+        // 更新手部状态
+        self.update_hand_states_for_group(notes, group);
+    }
+    
+    /// 分析和弦上下文
+    fn analyze_chord_context(&self, notes: &mut [ProcessedNote], group: &[usize]) -> ChordContext {
+        // 按x坐标排序
+        let mut sorted_indices: Vec<_> = group.iter().map(|&i| (notes[i].position.x, i)).collect();
+        sorted_indices.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        
+        // 计算分布特征
+        let left_count = sorted_indices.iter().filter(|&&(x, _)| x < 0.0).count();
+        let right_count = sorted_indices.len() - left_count;
+        
+        // 检测是否有跨越中线的音符
+        let has_center_crossing = sorted_indices.iter().any(|&(x, _)| x.abs() < 0.2);
+        
+        // 确定和弦类型
+        let chord_type = if has_center_crossing && left_count > 0 && right_count > 0 {
+            ChordType::Crossing
+        } else if left_count == 0 || right_count == 0 {
+            ChordType::Simple
+        } else {
+            ChordType::Complex
+        };
+        
+        ChordContext {
+            sorted_indices,
+            left_count,
+            right_count,
+            chord_type,
+            has_center_crossing,
+        }
+    }
+    
+    /// 分配简单和弦（所有音符在同一侧）
+    fn assign_simple_chord(&mut self, notes: &mut [ProcessedNote], _group: &[usize], context: &ChordContext) {
+        // 确定主导手
+        let dominant_hand = if context.left_count > 0 {
+            Hand::Left
+        } else {
+            Hand::Right
+        };
+        
+        // 确定辅助手
+        let auxiliary_hand = if dominant_hand == Hand::Left {
+            Hand::Right
+        } else {
+            Hand::Left
+        };
+        
+        // 根据音符数量和位置分配
+        if context.sorted_indices.len() <= 2 {
+            // 少量音符：交替分配
+            let mut current_hand = dominant_hand;
+            for &(_, note_idx) in &context.sorted_indices {
+                notes[note_idx].assigned_hand = Some(current_hand);
+                notes[note_idx].confidence = 0.9;
                 
-                // 检测这组音符是否跨越中线
-                let mut crosses_center = false;
-                let mut left_count = 0;
-                let mut right_count = 0;
+                // 记录分配
+                self.record_chord_assignment(current_hand, notes[note_idx].position.x, notes[note_idx].time);
                 
-                for &(_, note_idx) in &sorted_group {
-                    let x = notes[note_idx].position.x;
-                    if x.abs() < CROSSING_THRESHOLD {
-                        crosses_center = true;
-                    } else if x < 0.0 {
-                        left_count += 1;
-                    } else {
-                        right_count += 1;
-                    }
-                }
-                
-                // 策略1：如果音符跨越中线，使用智能交替策略
-                if crosses_center || (left_count > 0 && right_count > 0) {
-                    // 获取最近的手分配历史
-                    let recent_hands: Vec<_> = self.recent_assignments.iter()
-                        .rev()
-                        .take(8)
-                        .map(|(h, _, _)| *h)
-                        .collect();
-                    
-                    // 确定起始手
-                    let start_hand = if recent_hands.is_empty() {
-                        // 没有历史记录，使用最左侧音符的手
-                        if sorted_group[0].0 < 0.0 { Hand::Left } else { Hand::Right }
-                    } else {
-                        // 使用最近的手的相反手，以促进交替
-                        if recent_hands[0] == Hand::Left { Hand::Right } else { Hand::Left }
-                    };
-                    
-                    let mut current_hand = start_hand;
-                    
-                    // 为每个音符分配手，考虑音符的分布和位置
-                    for (idx, &(_, note_idx)) in sorted_group.iter().enumerate() {
-                        // 对于跨越中线的音符，使用交替策略
-                        if notes[note_idx].position.x.abs() < CROSSING_THRESHOLD {
-                            current_hand = if current_hand == Hand::Left { Hand::Right } else { Hand::Left };
-                        } else {
-                            // 对于不跨越中线的音符，根据位置和当前手决定
-                            let note_hand = if notes[note_idx].position.x < 0.0 { Hand::Left } else { Hand::Right };
-                            
-                            // 如果音符手与当前手不同，且不是第一个音符，则切换
-                            if idx > 0 && note_hand != current_hand {
-                                current_hand = note_hand;
-                            }
-                            // 否则保持当前手，促进交替
-                        }
-                        
-                        notes[note_idx].assigned_hand = Some(current_hand);
-                        notes[note_idx].confidence = 0.90;
-                        
-                        self.recent_assignments.push_back((current_hand, notes[note_idx].position.x, notes[note_idx].time));
-                        if self.recent_assignments.len() > 50 {
-                            self.recent_assignments.pop_front();
-                        }
-                    }
-                } 
-                // 策略2：音符全部在一侧，使用平衡交替策略
-                else {
-                    // 检查最近的手分配历史，以确定起始手
-                    let mut recent_left_count = 0;
-                    let mut recent_right_count = 0;
-                    
-                    for (hand, _, _) in self.recent_assignments.iter().rev().take(6) {
-                        if *hand == Hand::Left {
-                            recent_left_count += 1;
-                        } else {
-                            recent_right_count += 1;
-                        }
-                    }
-                    
-                    // 选择使用较少的手作为起始手，以平衡负荷
-                    let start_hand = if recent_left_count <= recent_right_count {
-                        Hand::Left
-                    } else {
-                        Hand::Right
-                    };
-                    
-                    let mut current_hand = start_hand;
-                    
-                    // 为音符分配手，强制交替
-                    for (idx, &(_, note_idx)) in sorted_group.iter().enumerate() {
-                        // 每个音符交替一次手，确保相同时间戳的音符分配给不同的手
-                        if idx > 0 {
-                            current_hand = if current_hand == Hand::Left { Hand::Right } else { Hand::Left };
-                        }
-                        
-                        notes[note_idx].assigned_hand = Some(current_hand);
-                        notes[note_idx].confidence = 0.92;
-                        
-                        self.recent_assignments.push_back((current_hand, notes[note_idx].position.x, notes[note_idx].time));
-                        if self.recent_assignments.len() > 50 {
-                            self.recent_assignments.pop_front();
-                        }
-                    }
-                }
-                
-                self.update_hand_states_for_group(notes, group);
-                continue;
+                // 交替手
+                current_hand = if current_hand == Hand::Left { Hand::Right } else { Hand::Left };
+            }
+        } else {
+            // 大量音符：主导手处理主要音符，辅助手处理边缘音符
+            let split_point = context.sorted_indices.len() / 2;
+            
+            // 辅助手处理边缘音符（减少移动距离）
+            for &(_, note_idx) in &context.sorted_indices[..split_point.min(1)] {
+                notes[note_idx].assigned_hand = Some(auxiliary_hand);
+                notes[note_idx].confidence = 0.85;
+                self.record_chord_assignment(auxiliary_hand, notes[note_idx].position.x, notes[note_idx].time);
             }
             
-            // 4指模式保持原有逻辑
-            for &note_idx in group {
-                let start = note_idx.saturating_sub(CONTEXT_WINDOW / 2);
-                let end = (note_idx + CONTEXT_WINDOW / 2).min(notes.len());
-                let context = &notes[start..end];
-                let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
-                let ai_decision = self.make_ai_decision(&features, &notes[note_idx], line_id);
-                notes[note_idx].assigned_hand = Some(ai_decision.0);
-                notes[note_idx].confidence = ai_decision.1;
-                self.recent_assignments.push_back((ai_decision.0, notes[note_idx].position.x, notes[note_idx].time));
-                if self.recent_assignments.len() > 50 {
-                    self.recent_assignments.pop_front();
-                }
+            // 主导手处理其余音符
+            for &(_, note_idx) in &context.sorted_indices[split_point.min(1)..] {
+                notes[note_idx].assigned_hand = Some(dominant_hand);
+                notes[note_idx].confidence = 0.9;
+                self.record_chord_assignment(dominant_hand, notes[note_idx].position.x, notes[note_idx].time);
             }
-            self.update_hand_states_for_group(notes, group);
+        }
+    }
+    
+    /// 分配复杂和弦（音符分布在两侧）
+    fn assign_complex_chord(&mut self, notes: &mut [ProcessedNote], _group: &[usize], context: &ChordContext) {
+        // 分离左右侧音符
+        let (left_notes, right_notes): (Vec<_>, Vec<_>) = context.sorted_indices.iter()
+            .partition(|&&(x, _)| x < 0.0);
+        
+        // 为左侧音符分配左手
+        for &(_, note_idx) in &left_notes {
+            notes[note_idx].assigned_hand = Some(Hand::Left);
+            notes[note_idx].confidence = 0.95;
+            self.record_chord_assignment(Hand::Left, notes[note_idx].position.x, notes[note_idx].time);
+        }
+        
+        // 为右侧音符分配右手
+        for &(_, note_idx) in &right_notes {
+            notes[note_idx].assigned_hand = Some(Hand::Right);
+            notes[note_idx].confidence = 0.95;
+            self.record_chord_assignment(Hand::Right, notes[note_idx].position.x, notes[note_idx].time);
+        }
+    }
+    
+    /// 分配跨越和弦（包含中线附近的音符）
+    fn assign_crossing_chord(&mut self, notes: &mut [ProcessedNote], _group: &[usize], context: &ChordContext) {
+        // 获取最近的手部分配历史
+        let recent_hands: Vec<_> = self.recent_assignments.iter()
+            .rev()
+            .take(5)
+            .map(|(h, _, _)| *h)
+            .collect();
+        
+        // 统计最近使用的手
+        let left_usage = recent_hands.iter().filter(|&&h| h == Hand::Left).count();
+        let right_usage = recent_hands.len() - left_usage;
+        
+        // 选择起始手（使用较少的手）
+        let start_hand = if left_usage <= right_usage {
+            Hand::Left
+        } else {
+            Hand::Right
+        };
+        
+        // 按位置分配，考虑避免过度使用同一只手
+        let current_hand = start_hand;
+        for &(_, note_idx) in &context.sorted_indices {
+            let x = notes[note_idx].position.x;
+            
+            // 对于中线附近的音符，根据手部使用平衡来决定
+            let assigned_hand = if x.abs() < 0.2 {
+                // 中线附近：选择使用较少的手
+                if left_usage <= right_usage {
+                    Hand::Left
+                } else {
+                    Hand::Right
+                }
+            } else {
+                // 明确偏向一侧：根据位置决定
+                if x < 0.0 {
+                    Hand::Left
+                } else {
+                    Hand::Right
+                }
+            };
+            
+            notes[note_idx].assigned_hand = Some(assigned_hand);
+            notes[note_idx].confidence = 0.9;
+            self.record_chord_assignment(assigned_hand, notes[note_idx].position.x, notes[note_idx].time);
+            
+            // 更新使用统计
+            if assigned_hand == Hand::Left {
+                // 这里只是为了演示，实际使用统计在recent_assignments中
+            }
+        }
+    }
+    
+    /// 记录和弦分配
+    fn record_chord_assignment(&mut self, hand: Hand, x_position: f32, time: f32) {
+        self.recent_assignments.push_back((hand, x_position, time));
+        if self.recent_assignments.len() > 50 {
+            self.recent_assignments.pop_front();
         }
     }
 
     fn post_process_assignments(&mut self, notes: &mut [ProcessedNote]) {
-        self.smooth_hand_transitions(notes);
-        self.validate_physical_feasibility(notes);
-        self.optimize_recognized_patterns(notes);
+        // 使用全新的后处理系统
+        self.post_process_assignments_new(notes);
+    }
+    
+    /// 全新的后处理系统
+    fn post_process_assignments_new(&mut self, notes: &mut [ProcessedNote]) {
+        //  平滑手部转换
+        self.smooth_hand_transitions_new(notes);
+        // 验证物理可行性
+        self.validate_physical_feasibility_new(notes);
+        // 优化识别的模式
+        self.optimize_recognized_patterns_new(notes);
+        // 确保交替模式
+        self.ensure_alternating_pattern_new(notes);
+        //  检查手部一致性
+        self.check_hand_consistency_new(notes);
+    }
+    
+    /// 平滑手部转换
+    fn smooth_hand_transitions_new(&self, notes: &mut [ProcessedNote]) {
+        if notes.len() < 3 {
+            return;
+        }
+        
+        for i in 1..notes.len() - 1 {
+            if let (Some(prev_hand), Some(curr_hand), Some(next_hand)) = 
+                (notes[i - 1].assigned_hand, notes[i].assigned_hand, notes[i + 1].assigned_hand) {
+                // 检查是否是孤立的手部分配（前后手不同，当前手与前后都不同）
+                if curr_hand != prev_hand && curr_hand != next_hand && prev_hand == next_hand {
+                    let time_gap_prev = notes[i].time - notes[i - 1].time;
+                    let time_gap_next = notes[i + 1].time - notes[i].time;
+                    
+                    // 如果时间间隔足够大，考虑修正
+                    if time_gap_prev > 0.15 && time_gap_next > 0.15 {
+                        // 检查位置合理性
+                        let prev_distance = notes[i].position.distance_to(&notes[i - 1].position);
+                        let next_distance = notes[i].position.distance_to(&notes[i + 1].position);
+                        
+                        // 如果到前后音符的距离都很远，说明可能是错误分配
+                        if prev_distance > 0.5 && next_distance > 0.5 {
+                            notes[i].assigned_hand = Some(prev_hand);
+                            notes[i].confidence = 0.7;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    /// 验证物理可行性
+    fn validate_physical_feasibility_new(&self, notes: &mut [ProcessedNote]) {
+        const MAX_SPEED: f32 = 18.0; // 最大手部移动速度
+        const MIN_TIME_GAP: f32 = 0.05; // 最小时间间隔
+        
+        for i in 1..notes.len() {
+            if let (Some(prev_hand), Some(curr_hand)) = (notes[i - 1].assigned_hand, notes[i].assigned_hand) {
+                // 只检查同一只手的连续音符
+                if prev_hand == curr_hand {
+                    let distance = notes[i].position.distance_to(&notes[i - 1].position);
+                    let time_diff = notes[i].time - notes[i - 1].time;
+                    
+                    if time_diff > 0.001 {
+                        let required_speed = distance / time_diff;
+                        
+                        // 如果需要的速度过快，考虑切换手
+                        if required_speed > MAX_SPEED || time_diff < MIN_TIME_GAP {
+                            let other_hand = if curr_hand == Hand::Left { Hand::Right } else { Hand::Left };
+                            
+                            // 检查切换手是否更合理
+                            let hand_state = if other_hand == Hand::Left { 
+                                &self.left_hand_state 
+                            } else { 
+                                &self.right_hand_state 
+                            };
+                            
+                            let distance_to_other = notes[i].position.distance_to(&hand_state.position);
+                            let speed_to_other = distance_to_other / time_diff;
+                            
+                            // 如果切换手后速度更合理，则切换
+                            if speed_to_other <= MAX_SPEED {
+                                notes[i].assigned_hand = Some(other_hand);
+                                notes[i].confidence = 0.65;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    /// 优化识别的模式
+    fn optimize_recognized_patterns_new(&mut self, notes: &mut [ProcessedNote]) {
+        let mut i = 0;
+        while i < notes.len() {
+            let window_end = (i + 10).min(notes.len());
+            let window = &notes[i..window_end];
+            
+            if window.len() < 3 {
+                i += 1;
+                continue;
+            }
+            
+            // 识别模式
+            let pattern_type = self.identify_pattern(window);
+            
+            match pattern_type {
+                PatternType::Alternating => {
+                    self.optimize_alternating_pattern_new(&mut notes[i..window_end]);
+                    i = window_end;
+                },
+                PatternType::Stream => {
+                    self.optimize_stream_pattern_new(&mut notes[i..window_end]);
+                    i = window_end;
+                },
+                PatternType::Chord => {
+                    self.optimize_chord_pattern_new(&mut notes[i..window_end]);
+                    i = window_end;
+                },
+                PatternType::Jack => {
+                    self.optimize_jack_pattern_new(&mut notes[i..window_end]);
+                    i = window_end;
+                },
+                PatternType::Crossing => {
+                    self.optimize_crossing_pattern_new(&mut notes[i..window_end]);
+                    i = window_end;
+                },
+                PatternType::None => {
+                    i += 1;
+                }
+            }
+        }
+    }
+    
+    /// 识别模式类型
+    fn identify_pattern(&self, notes: &[ProcessedNote]) -> PatternType {
+        if notes.len() < 3 {
+            return PatternType::None;
+        }
+        
+        // 计算各种模式的得分
+        let alternating_score = self.calculate_alternating_score(notes);
+        let stream_score = self.calculate_stream_score(notes);
+        let chord_score = self.calculate_chord_score(notes);
+        let jack_score = self.calculate_jack_score(notes);
+        let crossing_score = self.calculate_crossing_score(notes);
+        
+        // 选择得分最高的模式
+        let max_score = alternating_score.max(stream_score).max(chord_score).max(jack_score).max(crossing_score);
+        
+        if max_score > 0.6 { // 阈值
+            if alternating_score == max_score {
+                PatternType::Alternating
+            } else if stream_score == max_score {
+                PatternType::Stream
+            } else if chord_score == max_score {
+                PatternType::Chord
+            } else if jack_score == max_score {
+                PatternType::Jack
+            } else {
+                PatternType::Crossing
+            }
+        } else {
+            PatternType::None
+        }
+    }
+    
+    /// 计算交替模式得分
+    fn calculate_alternating_score(&self, notes: &[ProcessedNote]) -> f32 {
+        if notes.len() < 4 {
+            return 0.0;
+        }
+        
+        let mut alternating_count = 0;
+        for i in 2..notes.len() {
+            if let (Some(prev_hand), Some(curr_hand), Some(next_hand)) = 
+                (notes[i-2].assigned_hand, notes[i-1].assigned_hand, notes[i].assigned_hand) {
+                if prev_hand != curr_hand && curr_hand != next_hand && prev_hand == next_hand {
+                    alternating_count += 1;
+                }
+            }
+        }
+        
+        alternating_count as f32 / (notes.len() - 2) as f32
+    }
 
-        self.ensure_alternating_pattern(notes);
-        //self.correct_position_mismatches(notes);
-        self.check_hand_consistency(notes);
+    fn calculate_stream_score(&self, notes: &[ProcessedNote]) -> f32 {
+        if notes.len() < 5 {
+            return 0.0;
+        }
+        
+        let mut same_side_count = 0;
+        let first_side = if let Some(hand) = notes[0].assigned_hand {
+            Some(hand)
+        } else {
+            return 0.0;
+        };
+        
+        for note in notes.iter() {
+            if let Some(hand) = note.assigned_hand {
+                if Some(hand) == first_side {
+                    same_side_count += 1;
+                }
+            }
+        }
+        
+        same_side_count as f32 / notes.len() as f32
+    }
+
+    fn calculate_chord_score(&self, notes: &[ProcessedNote]) -> f32 {
+        // 检查是否有同时出现的音符
+        let mut time_groups: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+        const TIME_SCALE: f32 = 1000.0;
+        
+        for note in notes {
+            let time_key = (note.time * TIME_SCALE).round() as i32;
+            *time_groups.entry(time_key).or_insert(0) += 1;
+        }
+        
+        let chord_count: usize = time_groups.values().filter(|&&count| count > 1).sum();
+        if chord_count > 0 {
+            chord_count as f32 / notes.len() as f32
+        } else {
+            0.0
+        }
+    }
+
+    fn calculate_jack_score(&self, notes: &[ProcessedNote]) -> f32 {
+        if notes.len() < 3 {
+            return 0.0;
+        }
+        
+        let mut jack_count = 0;
+        for i in 1..notes.len() {
+            let time_diff = notes[i].time - notes[i-1].time;
+            let distance = notes[i].position.distance_to(&notes[i-1].position);
+            
+            // 连打：时间间隔短且位置相近
+            if time_diff < 0.2 && distance < 0.3 {
+                jack_count += 1;
+            }
+        }
+        
+        jack_count as f32 / (notes.len() - 1) as f32
+    }
+
+    fn calculate_crossing_score(&self, notes: &[ProcessedNote]) -> f32 {
+        if notes.len() < 3 {
+            return 0.0;
+        }
+        
+        let mut crossing_count = 0;
+        for i in 1..notes.len() {
+            if let (Some(prev_hand), Some(curr_hand)) = (notes[i-1].assigned_hand, notes[i].assigned_hand) {
+                if prev_hand != curr_hand {
+                    crossing_count += 1;
+                }
+            }
+        }
+        
+        crossing_count as f32 / (notes.len() - 1) as f32
+    }
+
+    fn optimize_alternating_pattern_new(&self, notes: &mut [ProcessedNote]) {
+        for i in 1..notes.len() {
+            if let Some(prev_hand) = notes[i - 1].assigned_hand {
+                // 检查是否应该交替
+                let should_alternate = {
+                    if i > 1 {
+                        if let Some(prev_prev_hand) = notes[i - 2].assigned_hand {
+                            prev_prev_hand == prev_hand // 前两个音符使用同一只手
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+                
+                if should_alternate {
+                    let opposite_hand = if prev_hand == Hand::Left { Hand::Right } else { Hand::Left };
+                    notes[i].assigned_hand = Some(opposite_hand);
+                    notes[i].confidence = 0.85;
+                }
+            }
+        }
+    }
+
+    fn optimize_stream_pattern_new(&self, notes: &mut [ProcessedNote]) {
+        if notes.is_empty() {
+            return;
+        }
+        
+        // 确定主导手
+        let mut left_count = 0;
+        let mut right_count = 0;
+        
+        for note in notes.iter() {
+            if let Some(hand) = note.assigned_hand {
+                match hand {
+                    Hand::Left => left_count += 1,
+                    Hand::Right => right_count += 1,
+                }
+            }
+        }
+        
+        let dominant_hand = if left_count >= right_count { Hand::Left } else { Hand::Right };
+        
+
+        for note in notes.iter_mut() {
+            note.assigned_hand = Some(dominant_hand);
+            note.confidence = 0.8;
+        }
+    }
+
+    fn optimize_chord_pattern_new(&self, notes: &mut [ProcessedNote]) {
+        let mut time_groups: std::collections::HashMap<i32, Vec<usize>> = std::collections::HashMap::new();
+        const TIME_SCALE: f32 = 1000.0;
+        
+        for (i, note) in notes.iter().enumerate() {
+            let time_key = (note.time * TIME_SCALE).round() as i32;
+            time_groups.entry(time_key).or_insert_with(Vec::new).push(i);
+        }
+        
+        // 为每个时间组分配手
+        for (_, indices) in time_groups {
+            if indices.len() > 1 {
+                // 按位置排序
+                let mut sorted_indices = indices;
+                sorted_indices.sort_by(|&a, &b| {
+                    notes[a].position.x.partial_cmp(&notes[b].position.x).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                
+                let mid = sorted_indices.len() / 2;
+                for (pos, &idx) in sorted_indices.iter().enumerate() {
+                    notes[idx].assigned_hand = Some(if pos < mid { Hand::Left } else { Hand::Right });
+                    notes[idx].confidence = 0.9;
+                }
+            }
+        }
+    }
+
+    fn optimize_jack_pattern_new(&mut self, notes: &mut [ProcessedNote]) {
+        if notes.len() < 2 {
+            return;
+        }
+
+        let last_hand = self.get_most_recent_hand();
+
+        for note in notes.iter_mut() {
+            let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+
+            let final_hand = if let Some(prev_hand) = last_hand {
+                if prev_hand == Hand::Left { 手
+                    if note.position.x < -0.21 {
+                        Hand::Left
+                    } else {
+                        Hand::Right /
+                    }
+                } else {
+                    if note.position.x > 0.21 {
+                        Hand::Right
+                    } else {
+                        Hand::Left
+                    }
+                }
+            } else {
+                position_based_hand
+            };
+            
+            note.assigned_hand = Some(final_hand);
+            note.confidence = 0.9;
+        }
+    }
+
+    fn optimize_crossing_pattern_new(&mut self, notes: &mut [ProcessedNote]) {
+        for i in 1..notes.len() {
+            if let (Some(prev_hand), Some(curr_hand)) = (notes[i-1].assigned_hand, notes[i].assigned_hand) {
+                if prev_hand == curr_hand {
+                    let opposite_hand = if prev_hand == Hand::Left { Hand::Right } else { Hand::Left };
+                    notes[i].assigned_hand = Some(opposite_hand);
+                    notes[i].confidence = 0.75;
+                }
+            }
+        }
+    }
+
+    fn ensure_alternating_pattern_new(&mut self, notes: &mut [ProcessedNote]) {
+        const MAX_CONSECUTIVE: usize = 4;
+        let mut consecutive_count = 0;
+        let mut last_hand = None;
+        
+        for note in notes.iter_mut() {
+            if let Some(current_hand) = note.assigned_hand {
+                if last_hand == Some(current_hand) {
+                    consecutive_count += 1;
+                } else {
+                    consecutive_count = 1;
+                    last_hand = Some(current_hand);
+                }
+                if consecutive_count > MAX_CONSECUTIVE {
+                    let opposite_hand = if current_hand == Hand::Left { Hand::Right } else { Hand::Left };
+                    note.assigned_hand = Some(opposite_hand);
+                    note.confidence = 0.7;
+                    consecutive_count = 1;
+                    last_hand = Some(opposite_hand);
+                }
+            }
+        }
+    }
+
+    fn check_hand_consistency_new(&self, notes: &mut [ProcessedNote]) {
+        for note in notes.iter_mut() {
+            if let Some(hand) = note.assigned_hand {
+                // 检查位置与手部是否匹配
+                let position_mismatch = match hand {
+                    Hand::Left => note.position.x > 0.5, // 左手分配给右侧
+                    Hand::Right => note.position.x < -0.5, // 右手分配给左侧
+                };
+                
+                if position_mismatch {
+                    // 修正明显错误的分配
+                    let corrected_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                    note.assigned_hand = Some(corrected_hand);
+                    note.confidence = 0.6; // 降低置信度表示这是修正
+                }
+            }
+        }
     }
     /*
     fn correct_position_mismatches(&self, notes: &mut [ProcessedNote]) {
@@ -5067,77 +5484,67 @@ impl PhiTKAdvancedAI {
 
      */
 
-    fn ensure_alternating_pattern(&mut self, notes: &mut [ProcessedNote]) {
-        const MAX_CONSECUTIVE: usize = 3;
-        const TIME_THRESHOLD: f32 = 0.3;
-
-        let mut consecutive_count = 0;
-        let mut last_hand = None;
-
-        let mut indices_to_switch = Vec::new();
-
-        for (i, note) in notes.iter().enumerate() {
-            if let Some(current_hand) = note.assigned_hand {
-                if last_hand != Some(current_hand) {
-                    consecutive_count = 0;
-                    last_hand = Some(current_hand);
-                    continue;
-                }
-
-                consecutive_count += 1;
-                if consecutive_count > MAX_CONSECUTIVE {
-                    let prev_alt_time = notes[..i]
-                        .iter()
-                        .rev()
-                        .find(|n| n.assigned_hand != Some(current_hand))
-                        .map(|n| n.time);
-
-                    if let Some(prev_time) = prev_alt_time {
-                        if note.time - prev_time < TIME_THRESHOLD * 2.0 {
-                            indices_to_switch.push(i);
-                            consecutive_count = 0;
-                        }
-                    }
-                }
-            }
-        }
-
-        for i in indices_to_switch {
-            if let Some(current_hand) = notes[i].assigned_hand {
-                notes[i].assigned_hand = Some(match current_hand {
-                    Hand::Left => Hand::Right,
-                    Hand::Right => Hand::Left,
-                });
-                notes[i].confidence = (notes[i].confidence * 0.8).max(0.6);
-            }
-        }
-    }
-
     fn update_hand_states_for_group(&mut self, notes: &[ProcessedNote], group: &[usize]) {
-        let mut left_positions = Vec::new();
-        let mut right_positions = Vec::new();
-        let mut group_time = 0.0;
-
+        // 对于每个音符分别更新手部状态，而不是使用平均位置
+        let mut left_notes = Vec::new();
+        let mut right_notes = Vec::new();
+        
+        // 分离左右手音符
         for &idx in group {
             if let Some(hand) = notes[idx].assigned_hand {
                 match hand {
-                    Hand::Left => left_positions.push(notes[idx].position),
-                    Hand::Right => right_positions.push(notes[idx].position),
+                    Hand::Left => left_notes.push(idx),
+                    Hand::Right => right_notes.push(idx),
                 }
-                group_time = notes[idx].time;
             }
         }
-
-        if !left_positions.is_empty() {
-            let avg_pos = left_positions.iter().fold(Vector2::new(0.0, 0.0), |acc, &pos| acc + pos) * (1.0 / left_positions.len() as f32);
-            let success = notes[group[0]].judge == JudgeStatus::Judged;
-            self.left_hand_state.update_state(avg_pos, group_time, success, &notes[group[0]].kind);
+        
+        // 分别更新每只手的状态
+        self.update_individual_hand_states(notes, &left_notes, Hand::Left);
+        self.update_individual_hand_states(notes, &right_notes, Hand::Right);
+    }
+    
+    fn update_individual_hand_states(&mut self, notes: &[ProcessedNote], hand_indices: &[usize], hand: Hand) {
+        if hand_indices.is_empty() {
+            return;
         }
-
-        if !right_positions.is_empty() {
-            let avg_pos = right_positions.iter().fold(Vector2::new(0.0, 0.0), |acc, &pos| acc + pos) * (1.0 / right_positions.len() as f32);
-            let success = notes[group[0]].judge == JudgeStatus::Judged;
-            self.right_hand_state.update_state(avg_pos, group_time, success, &notes[group[0]].kind);
+        
+        // 按时间排序音符索引
+        let mut sorted_indices = hand_indices.to_vec();
+        sorted_indices.sort_by(|&a, &b| notes[a].time.partial_cmp(&notes[b].time).unwrap_or(std::cmp::Ordering::Equal));
+        
+        // 依次更新每个音符对应的手部状态
+        for &idx in &sorted_indices {
+            let note = &notes[idx];
+            let success = note.judge == JudgeStatus::Judged;
+            
+            // 更新手部状态
+            match hand {
+                Hand::Left => {
+                    self.left_hand_state.update_state(note.position, note.time, success, &note.kind);
+                }
+                Hand::Right => {
+                    self.right_hand_state.update_state(note.position, note.time, success, &note.kind);
+                }
+            }
+        }
+        
+        // 如果是二指模式，同时更新对应手指的状态
+        if self.game_mode == GameMode::TwoFinger {
+            // 在二指模式下，每只手只使用一个手指（食指）
+            let finger = match hand {
+                Hand::Left => Finger::LeftIndex,
+                Hand::Right => Finger::RightIndex,
+            };
+            
+            if let Some(finger_state) = self.finger_states.iter_mut().find(|fs| fs.finger == finger) {
+                // 使用最后一个音符的状态来更新手指状态
+                if let Some(&last_idx) = sorted_indices.last() {
+                    let note = &notes[last_idx];
+                    let success = note.judge == JudgeStatus::Judged;
+                    finger_state.update_state(note.position, note.time, success, &note.kind);
+                }
+            }
         }
     }
 
@@ -5153,7 +5560,18 @@ impl PhiTKAdvancedAI {
             }
         }
 
+        // Only process when we have a full batch of 128 samples
+        if unassigned_indices.len() < BATCH_SIZE {
+            // Not enough samples for a full batch, wait for more
+            return;
+        }
+        
         for batch_indices in unassigned_indices.chunks(BATCH_SIZE) {
+            // Skip incomplete batches (only process full batches of 128)
+            if batch_indices.len() < BATCH_SIZE {
+                continue;
+            }
+            
             let results: Vec<_> = if let Some(pool) = &self.thread_pool {
                 pool.install(|| {
                     batch_indices.par_iter().map(|&idx| {
@@ -5161,39 +5579,29 @@ impl PhiTKAdvancedAI {
                         let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
                         let context = &notes[start_idx..end_idx];
 
-                        let mut left_count = 0;
-                        let mut right_count = 0;
+                        let mut _left_count = 0;
+                        let mut _right_count = 0;
                         for note in context {
-                            if note.position.x < -0.1 { left_count += 1; }
-                            else if note.position.x > 0.1 { right_count += 1; }
+                            if note.position.x < -0.1 { _left_count += 1; }
+                            else if note.position.x > 0.1 { _right_count += 1; }
                         }
                         let current_note_time = notes[idx].time;
 
-                        let dominant_side = if self.game_mode == GameMode::TwoFinger {
-                            let density_threshold = 2; // 保持2个音符就触发
-                            let time_window_notes: Vec<_> = context.iter()
-                                .filter(|n| (n.time - current_note_time).abs() <= 0.5)
-                                .collect();
+                        // 移除GameMode相关的特殊处理，使用统一的密度检测逻辑
+                        let density_threshold = 2; // 保持2个音符就触发
+                        let time_window_notes: Vec<_> = context.iter()
+                            .filter(|n| (n.time - current_note_time).abs() <= 0.5)
+                            .collect();
 
-                            let left_count = time_window_notes.iter().filter(|n| n.position.x < -0.05).count();
-                            let right_count = time_window_notes.iter().filter(|n| n.position.x > 0.05).count();
+                        let left_count = time_window_notes.iter().filter(|n| n.position.x < -0.05).count();
+                        let right_count = time_window_notes.iter().filter(|n| n.position.x > 0.05).count();
 
-                            if left_count >= density_threshold && (left_count as f32) > (right_count as f32) * 1.5 {
-                                Some(Hand::Left)
-                            } else if right_count >= density_threshold && (right_count as f32) > (left_count as f32) * 1.5 {
-                                Some(Hand::Right)
-                            } else {
-                                None
-                            }
+                        let dominant_side = if left_count >= density_threshold && (left_count as f32) > (right_count as f32) * 1.5 {
+                            Some(Hand::Left)
+                        } else if right_count >= density_threshold && (right_count as f32) > (left_count as f32) * 1.5 {
+                            Some(Hand::Right)
                         } else {
-                            // 4指模式：保持原有比例逻辑
-                            if left_count > 0 && right_count > 0 {
-                                if (right_count as f32) / (left_count as f32) >= 2.0 { Some(Hand::Right) }
-                                else if (left_count as f32) / (right_count as f32) >= 2.0 { Some(Hand::Left) }
-                                else { None }
-                            } else if left_count > 0 { Some(Hand::Left) }
-                            else if right_count > 0 { Some(Hand::Right) }
-                            else { None }
+                            None
                         };
 
                         let mut feature_extractor = self.feature_extractor.clone();
@@ -5216,39 +5624,30 @@ impl PhiTKAdvancedAI {
                     let end_idx = (idx + CONTEXT_WINDOW / 2 + 1).min(notes.len());
                     let context = &notes[start_idx..end_idx];
 
-                    let mut left_count = 0;
-                    let mut right_count = 0;
+                    let mut _left_count = 0;
+                    let mut _right_count = 0;
                     for note in context {
-                        if note.position.x < -0.1 { left_count += 1; }
-                        else if note.position.x > 0.1 { right_count += 1; }
+                        if note.position.x < -0.1 { _left_count += 1; }
+                        else if note.position.x > 0.1 { _right_count += 1; }
                     }
                     let current_note_time = notes[idx].time;
 
-                    let dominant_side = if self.game_mode == GameMode::TwoFinger {
-                        let density_threshold = 2; // 保持2个音符就触发
-                        let time_window_notes: Vec<_> = context.iter()
-                            .filter(|n| (n.time - current_note_time).abs() <= 0.5) // 使用 current_note_time 而不是 note.time
-                            .collect();
+                    // 移除GameMode相关的特殊处理，使用统一的密度检测逻辑
+                    let density_threshold = 2; // 保持2个音符就触发
+                    let time_window_notes: Vec<_> = context.iter()
+                        .filter(|n| (n.time - current_note_time).abs() <= 0.5) // 使用 current_note_time 而不是 note.time
+                        .collect();
 
-                        let left_count = time_window_notes.iter().filter(|n| n.position.x < -0.05).count();
-                        let right_count = time_window_notes.iter().filter(|n| n.position.x > 0.05).count();
+                    let left_count = time_window_notes.iter().filter(|n| n.position.x < -0.05).count();
+                    let right_count = time_window_notes.iter().filter(|n| n.position.x > 0.05).count();
 
-                        // 修复类型转换问题
-                        if left_count >= density_threshold && (left_count as f32) > (right_count as f32) * 1.5 {
-                            Some(Hand::Left)
-                        } else if right_count >= density_threshold && (right_count as f32) > (left_count as f32) * 1.5 {
-                            Some(Hand::Right)
-                        } else {
-                            None
-                        }
+                    // 修复类型转换问题
+                    let dominant_side = if left_count >= density_threshold && (left_count as f32) > (right_count as f32) * 1.5 {
+                        Some(Hand::Left)
+                    } else if right_count >= density_threshold && (right_count as f32) > (left_count as f32) * 1.5 {
+                        Some(Hand::Right)
                     } else {
-                        if left_count > 0 && right_count > 0 {
-                            if (right_count as f32) / (left_count as f32) >= 2.0 { Some(Hand::Right) }
-                            else if (left_count as f32) / (right_count as f32) >= 2.0 { Some(Hand::Left) }
-                            else { None }
-                        } else if left_count > 0 { Some(Hand::Left) }
-                        else if right_count > 0 { Some(Hand::Right) }
-                        else { None }
+                        None
                     };
 
                     let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
@@ -5276,7 +5675,7 @@ impl PhiTKAdvancedAI {
                 let (features, note_idx, position_x, time, judge, kind, _dominant_side) = &results[i];
                 let current_note = notes[*note_idx].clone();
 
-                let ai_decision = self.make_ai_decision(output, &current_note, line_id);
+                let ai_decision = self.phitk_hand_assignment(&current_note, output, line_id);
                 let ideal_hand = if current_note.position.x < 0.0 { Hand::Left } else { Hand::Right };
                 let network_correct = ai_decision.0 == ideal_hand;
 
@@ -5306,174 +5705,565 @@ impl PhiTKAdvancedAI {
         }
     }
 
-    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, _line_id: usize) -> (Hand, f32, Finger) {
-        if self.game_mode == GameMode::TwoFinger {
-            // Phigros 2指模式优化
-            const SHORT_TIME_WINDOW: f32 = 0.3; // 短时间窗口，检测即时密集
-            const LONG_TIME_WINDOW: f32 = 1.0;  // 长时间窗口，检测整体趋势
-            const DENSE_THRESHOLD: f32 = 0.55;  // 密集区域阈值，降低以更容易检测
-            const CROSSING_THRESHOLD: f32 = 0.15; // 跨越中线的阈值
-
-            // 统计不同时间窗口内的音符分布
-            let mut recent_left_short = 0;
-            let mut recent_right_short = 0;
-            let mut recent_left_long = 0;
-            let mut recent_right_long = 0;
-            
-            // 统计最近的手分配历史
-            let mut recent_hand_sequence = Vec::new();
-            
-            for (hand, x, t) in &self.recent_assignments {
-                // 短时间窗口统计
-                if (note.time - t).abs() <= SHORT_TIME_WINDOW {
-                    if *x < -CROSSING_THRESHOLD {
-                        recent_left_short += 1;
-                    } else if *x > CROSSING_THRESHOLD {
-                        recent_right_short += 1;
-                    }
-                    recent_hand_sequence.push(*hand);
-                }
-                
-                // 长时间窗口统计
-                if (note.time - t).abs() <= LONG_TIME_WINDOW {
-                    if *x < -CROSSING_THRESHOLD {
-                        recent_left_long += 1;
-                    } else if *x > CROSSING_THRESHOLD {
-                        recent_right_long += 1;
-                    }
-                }
-            }
-
-            // 检测密集区域
-            let total_short = recent_left_short + recent_right_short;
-            let total_long = recent_left_long + recent_right_long;
-            
-            let is_left_dense_short = total_short > 0 && (recent_left_short as f32) / (total_short as f32) > DENSE_THRESHOLD;
-            let is_right_dense_short = total_short > 0 && (recent_right_short as f32) / (total_short as f32) > DENSE_THRESHOLD;
-            let is_left_dense_long = total_long > 0 && (recent_left_long as f32) / (total_long as f32) > DENSE_THRESHOLD;
-            let is_right_dense_long = total_long > 0 && (recent_right_long as f32) / (total_long as f32) > DENSE_THRESHOLD;
-            
-            let is_any_dense = is_left_dense_short || is_right_dense_short || is_left_dense_long || is_right_dense_long;
-
-            // 检测音符是否跨越中线
-            let is_crossing = note.position.x.abs() < CROSSING_THRESHOLD;
-            
-            // 检测连续同手模式
-            let mut consecutive_same_hand = 0;
-            let mut last_hand_in_sequence = None;
-            for &hand in recent_hand_sequence.iter().rev().take(6) {
-                if last_hand_in_sequence == Some(hand) {
-                    consecutive_same_hand += 1;
-                } else {
-                    break;
-                }
-                last_hand_in_sequence = Some(hand);
-            }
-
-            // 策略1：密集区域积极交替
-            if is_any_dense {
-                let dense_side = if is_left_dense_short || is_left_dense_long {
-                    Hand::Left
-                } else {
-                    Hand::Right
-                };
-                
-                // 在密集区域内，强制交替策略
-                if let Some(last_hand) = self.last_assigned_hand {
-                    // 如果上一个音符与密集区域同侧，则交替
-                    if last_hand == dense_side {
-                        let alternate_hand = if dense_side == Hand::Left { Hand::Right } else { Hand::Left };
-                        return (alternate_hand, 0.95, 
-                                if alternate_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                    } else {
-                        // 如果上一个音符已经交替，则继续使用密集区域的手
-                        return (dense_side, 0.90, 
-                                if dense_side == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                    }
-                } else {
-                    // 没有历史记录，根据音符位置选择
-                    let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
-                    return (position_based_hand, 0.85, 
-                            if position_based_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                }
-            }
-
-            // 策略2：跨越中线音符的特殊处理
-            if is_crossing {
-                // 跨越中线的音符，根据最近的手分配历史决定
-                if let Some(last_hand) = self.last_assigned_hand {
-                    // 优先使用与上一只手不同的手，以促进交替
-                    let alternate_hand = if last_hand == Hand::Left { Hand::Right } else { Hand::Left };
-                    return (alternate_hand, 0.88, 
-                            if alternate_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                } else {
-                    // 没有历史记录，根据细微的位置差异决定
-                    let hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
-                    return (hand, 0.80, 
-                            if hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                }
-            }
-
-            // 策略3：防止连续同手过多
-            if consecutive_same_hand >= 2 {
-                // 强制交替
-                let alternate_hand = if let Some(last_hand) = last_hand_in_sequence {
-                    if last_hand == Hand::Left { Hand::Right } else { Hand::Left }
-                } else {
-                    // 如果没有记录，根据位置决定
-                    if note.position.x < 0.0 { Hand::Right } else { Hand::Left }
-                };
-                
-                return (alternate_hand, 0.87, 
-                        if alternate_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-            }
-
-            // 策略4：基于位置的默认分配
-            let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
-            
-            // 检查是否需要平衡负荷
-            let left_ratio = if total_long > 0 { (recent_left_long as f32) / (total_long as f32) } else { 0.5 };
-            let right_ratio = if total_long > 0 { (recent_right_long as f32) / (total_long as f32) } else { 0.5 };
-            
-            // 如果负荷不平衡，优先使用负荷较轻的手
-            if (left_ratio - right_ratio).abs() > 0.3 {
-                let balanced_hand = if left_ratio > right_ratio { Hand::Right } else { Hand::Left };
-                
-                // 只有当位置与平衡手不太冲突时才使用平衡策略
-                let position_conflict = (position_based_hand == Hand::Left && note.position.x > 0.2) ||
-                                       (position_based_hand == Hand::Right && note.position.x < -0.2);
-                
-                if !position_conflict {
-                    return (balanced_hand, 0.83, 
-                            if balanced_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                }
-            }
-            
-            // 默认策略：基于位置分配
-            return (position_based_hand, 0.80, 
-                    if position_based_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
+    /// 全新的手序分配系统 - 多层决策架构
+    fn phitk_hand_assignment(&mut self, note: &ProcessedNote, network_output: &[f32], _line_id: usize) -> (Hand, f32, Finger) {
+        // 策略层：分析当前情况和上下文
+        let strategy_context = self.analyze_strategy_context(note);
+        
+        // 规划层：生成短期手部规划
+        let planning_result = self.plan_hand_assignment(note, &strategy_context);
+        
+        // 执行层：根据规划进行最终分配
+        let hand_assignment = self.execute_hand_assignment(note, &planning_result, network_output);
+        
+        // 反馈层：记录分配结果用于后续学习
+        self.record_assignment_feedback(note, hand_assignment.0, hand_assignment.1);
+        
+        hand_assignment
+    }
+    
+    /// 策略层：分析当前情况和上下文
+    fn analyze_strategy_context(&self, note: &ProcessedNote) -> StrategyContext {
+        StrategyContext {
+            position_factor: self.calculate_position_factor(note),
+            timing_factor: self.calculate_timing_factor(note),
+            pattern_factor: self.calculate_pattern_factor(note),
+            hand_state_factor: self.calculate_hand_state_factor(note),
+            note_type_factor: self.calculate_note_type_factor(&note.kind, note),
+        }
+    }
+    
+    /// 计算位置因素
+    fn calculate_position_factor(&self, note: &ProcessedNote) -> PositionFactor {
+        let x = note.position.x;
+        
+        PositionFactor {
+            x_position: x,
+            left_preference: if x < 0.0 { (0.0 - x).min(1.0) } else { 0.0 },
+            right_preference: if x > 0.0 { x.min(1.0) } else { 0.0 },
+            center_avoidance: (x.abs() - 0.1).max(0.0), // 避免中线区域
+        }
+    }
+    
+    /// 计算时间因素
+    fn calculate_timing_factor(&self, note: &ProcessedNote) -> TimingFactor {
+        let time_since_left = (note.time - self.left_hand_state.last_time).abs();
+        let time_since_right = (note.time - self.right_hand_state.last_time).abs();
+        
+        TimingFactor {
+            time_since_left,
+            time_since_right,
+        }
+    }
+    
+    /// 计算模式因素
+    fn calculate_pattern_factor(&self, note: &ProcessedNote) -> PatternFactor {
+        // 检查是否在特殊模式中（如连打、流水、交叉等）
+        let recent_notes: Vec<_> = self.recent_assignments.iter()
+            .rev()
+            .take(8)
+            .map(|(_, x, t)| (*x, *t))
+            .collect();
+        
+        let is_jack = self.detect_jack_pattern(note, &recent_notes);
+        let is_crossing = self.detect_crossing_pattern_for_note(note, &recent_notes);
+        let is_chord = self.detect_chord_pattern(note, &recent_notes);
+        
+        PatternFactor {
+            is_jack,
+            is_crossing,
+            is_chord,
+            note_density: self.calculate_note_density(note, &recent_notes),
+        }
+    }
+    
+    /// 计算手部状态因素
+    fn calculate_hand_state_factor(&self, note: &ProcessedNote) -> HandStateFactor {
+        HandStateFactor {
+            left_fatigue: self.left_hand_state.fatigue,
+            right_fatigue: self.right_hand_state.fatigue,
+            left_distance: note.position.distance_to(&self.left_hand_state.position),
+            right_distance: note.position.distance_to(&self.right_hand_state.position),
+        }
+    }
+    
+    /// 计算音符类型因素
+    fn calculate_note_type_factor(&self, note_kind: &NoteKind, _note: &ProcessedNote) -> NoteTypeFactor {
+        match note_kind {
+            NoteKind::Click => NoteTypeFactor {
+                complexity: 0.2,
+            },
+            NoteKind::Drag => NoteTypeFactor {
+                complexity: 0.7,
+            },
+            NoteKind::Flick => NoteTypeFactor {
+                complexity: 0.5,
+            },
+            NoteKind::Hold { .. } => NoteTypeFactor {
+                complexity: 0.8,
+            },
+        }
+    }
+    
+    /// 检测连打模式
+    fn detect_jack_pattern(&self, note: &ProcessedNote, recent_notes: &[(f32, f32)]) -> bool {
+        if recent_notes.len() < 4 {
+            return false;
         }
 
-        // 4指模式保持原有逻辑
-        let output = self.main_network.forward(features);
-        let left_prob = output.get(0).copied().unwrap_or(0.5);
-        let right_prob = output.get(1).copied().unwrap_or(0.5);
-        let confidence = output.get(3).copied().unwrap_or(0.7);
-        let network_hand = if left_prob > right_prob { Hand::Left } else { Hand::Right };
+        // 提高检测阈值，减少误触发
+        // 检查时间间隔是否连续且很短
+        let mut consecutive_short = 0;
+        let mut prev_time = note.time;
 
-        let mut finger_scores: Vec<(Finger, f32)> = self.finger_states.iter()
-            .map(|fs| {
-                let score = fs.calculate_assignment_score(
-                    note.position, note.time, note.difficulty,
-                    note.time, &note.kind, note.duration
-                );
-                (fs.finger, score)
-            })
-            .collect();
-        finger_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        let best_finger = finger_scores[0].0;
+        for &(_, time) in recent_notes {
+            if (prev_time - time).abs() < 0.15 {
+                consecutive_short += 1;
+            } else {
+                break; // 不是连续的短间隔
+            }
+            prev_time = time;
+        }
 
-        (network_hand, confidence, best_finger)
+        // 要求至少3个连续的短间隔音符才认为是连打
+        consecutive_short >= 4
+    }
+    
+    /// 检测交叉模式
+    fn detect_crossing_pattern_for_note(&self, note: &ProcessedNote, recent_notes: &[(f32, f32)]) -> bool {
+        if recent_notes.len() < 2 {
+            return false;
+        }
+        
+        let current_side = if note.position.x < 0.0 { -1 } else { 1 };
+        
+        for &(x, _) in recent_notes {
+            let prev_side = if x < 0.0 { -1 } else { 1 };
+            if prev_side != current_side {
+                return true; // 检测到交叉
+            }
+        }
+        
+        false
+    }
+
+    fn detect_chord_pattern(&self, note: &ProcessedNote, recent_notes: &[(f32, f32)]) -> bool {
+        for &(_x, time) in recent_notes {
+            if (time - note.time).abs() < 0.05 {
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// 计算音符密度
+    fn calculate_note_density(&self, note: &ProcessedNote, recent_notes: &[(f32, f32)]) -> f32 {
+        let mut count = 0;
+        for &(_, time) in recent_notes {
+            if (time - note.time).abs() < 0.5 { // 0.5秒内
+                count += 1;
+            }
+        }
+        count as f32 / 0.5 // 标准化到每秒
+    }
+    
+    /// 规划层：生成短期手部规划
+    fn plan_hand_assignment(&self, note: &ProcessedNote, context: &StrategyContext) -> PlanningResult {
+        // 根据模式选择不同的分配策略
+        if context.pattern_factor.is_jack {
+            // 连打模式：使用交替策略
+            let last_hand = self.get_most_recent_hand();
+            let preferred_hand = if last_hand == Some(Hand::Left) { Hand::Right } else { Hand::Left };
+            PlanningResult {
+                primary_hand: preferred_hand,
+                secondary_hand: if preferred_hand == Hand::Left { Hand::Right } else { Hand::Left },
+                confidence_factor: 1.3, // 连打模式需要高置信度
+            }
+        } else if context.pattern_factor.is_crossing {
+            // 交叉模式：根据位置分配
+            let preferred_hand = if context.position_factor.x_position < 0.0 { Hand::Left } else { Hand::Right };
+            PlanningResult {
+                primary_hand: preferred_hand,
+                secondary_hand: if preferred_hand == Hand::Left { Hand::Right } else { Hand::Left },
+                confidence_factor: 1.1,
+            }
+        } else if context.pattern_factor.is_chord {
+            // 和弦模式：根据位置分配，但考虑手部状态
+            let preferred_hand = if context.position_factor.x_position < 0.0 { Hand::Left } else { Hand::Right };
+            PlanningResult {
+                primary_hand: preferred_hand,
+                secondary_hand: if preferred_hand == Hand::Left { Hand::Right } else { Hand::Left },
+                confidence_factor: 1.2,
+            }
+        } else {
+            // 普通模式：使用综合评估
+            let (left_score, right_score) = self.evaluate_hands_comprehensive(note, context);
+            let primary_hand = if left_score > right_score { Hand::Left } else { Hand::Right };
+            PlanningResult {
+                primary_hand,
+                secondary_hand: if primary_hand == Hand::Left { Hand::Right } else { Hand::Left },
+                confidence_factor: 1.0,
+            }
+        }
+    }
+    
+    /// 综合评估两只手的得分
+    fn evaluate_hands_comprehensive(&self, note: &ProcessedNote, context: &StrategyContext) -> (f32, f32) {
+        let left_score = self.evaluate_hand_for_note(Hand::Left, note, context);
+        let right_score = self.evaluate_hand_for_note(Hand::Right, note, context);
+        (left_score, right_score)
+    }
+    
+    /// 评估特定手对于特定音符的得分
+    fn evaluate_hand_for_note(&self, hand: Hand, note: &ProcessedNote, context: &StrategyContext) -> f32 {
+        // 计算各个因素的得分
+        let position_score = self.calculate_position_score_for_hand(hand, &context.position_factor);
+        let timing_score = self.calculate_timing_score_for_hand(hand, &context.timing_factor);
+        let state_score = self.calculate_state_score_for_hand(hand, &context.hand_state_factor);
+        let pattern_score = self.calculate_pattern_score_for_hand(hand, &context.pattern_factor);
+        let note_type_score = self.calculate_note_type_score_for_hand(hand, &context.note_type_factor);
+        
+        // 综合得分（使用动态权重，位置因素占主导）
+        position_score * 0.5 +  // 提高位置因素的权重到50%
+        timing_score * 0.15 +
+        state_score * 0.2 +
+        pattern_score * 0.1 +
+        note_type_score * 0.05
+    }
+    
+    /// 计算位置得分
+    fn calculate_position_score_for_hand(&self, hand: Hand, factor: &PositionFactor) -> f32 {
+        match hand {
+            Hand::Left => factor.left_preference * 0.8 + factor.center_avoidance * 0.2,
+            Hand::Right => factor.right_preference * 0.8 + factor.center_avoidance * 0.2,
+        }
+    }
+    
+    /// 计算时间得分
+    fn calculate_timing_score_for_hand(&self, hand: Hand, factor: &TimingFactor) -> f32 {
+        let time_diff = match hand {
+            Hand::Left => factor.time_since_left,
+            Hand::Right => factor.time_since_right,
+        };
+        
+        // 时间间隔适中得分更高（避免过快切换）
+        if time_diff < 0.05 {
+            0.2 // 过快，低分
+        } else if time_diff < 0.2 {
+            0.8 // 适中，高分
+        } else if time_diff < 0.5 {
+            0.6 // 稍长，中等分
+        } else {
+            0.7 // 过长，中等偏上（避免过度闲置）
+        }
+    }
+    
+    /// 计算状态得分
+    fn calculate_state_score_for_hand(&self, hand: Hand, factor: &HandStateFactor) -> f32 {
+        let distance_score = match hand {
+            Hand::Left => (1.0 - factor.left_distance).max(0.0),
+            Hand::Right => (1.0 - factor.right_distance).max(0.0),
+        };
+        
+        let fatigue_score = match hand {
+            Hand::Left => (1.0 - factor.left_fatigue).max(0.1),
+            Hand::Right => (1.0 - factor.right_fatigue).max(0.1),
+        };
+        
+        // 距离和疲劳的综合得分
+        (distance_score * 0.6 + fatigue_score * 0.4).min(1.0)
+    }
+    
+    /// 计算模式得分
+    fn calculate_pattern_score_for_hand(&self, hand: Hand, factor: &PatternFactor) -> f32 {
+        let mut score: f32 = 1.0;
+        
+        if factor.is_jack {
+            // 连打模式：鼓励交替使用手，但不要过于强制
+            let last_hand = self.get_most_recent_hand();
+            if let Some(prev_hand) = last_hand {
+                if prev_hand == hand {
+                    score *= 0.4; // 轻微不鼓励连续使用同一只手
+                } else {
+                    score *= 1.1; // 鼓励交替使用
+                }
+            }
+        } else if factor.is_crossing {
+            // 交叉模式：使用位置决定的手
+            let hand_match = match hand {
+                Hand::Left => factor.note_density < 0.5, // 左侧音符
+                Hand::Right => factor.note_density >= 0.5, // 右侧音符
+            };
+            score *= if hand_match { 1.4 } else { 0.6 };
+        }
+        
+        score.clamp(0.1_f32, 1.5_f32)
+    }
+    
+    /// 计算音符类型得分
+    fn calculate_note_type_score_for_hand(&self, _hand: Hand, factor: &NoteTypeFactor) -> f32 {
+        // 根据音符类型和手的适用性计算得分
+        // 对于大多数音符类型，得分相对中性
+        1.0 - factor.complexity * 0.2 // 复杂度越高，得分越低
+    }
+    
+    /// 获取最近使用的手
+    fn get_most_recent_hand(&self) -> Option<Hand> {
+        self.recent_assignments.back().map(|(hand, _, _)| *hand)
+    }
+    
+    /// 执行层：根据规划进行最终分配
+    fn execute_hand_assignment(&mut self, note: &ProcessedNote, planning_result: &PlanningResult, network_output: &[f32]) -> (Hand, f32, Finger) {
+        let primary_hand = planning_result.primary_hand;
+        let secondary_hand = planning_result.secondary_hand;
+        
+        // 获取AI网络输出
+        let _left_prob = network_output.get(0).copied().unwrap_or(0.5);
+        let _right_prob = network_output.get(1).copied().unwrap_or(0.5);
+        let network_confidence = network_output.get(3).copied().unwrap_or(0.5);
+        
+        // 计算综合评估得分
+        let (left_score, right_score) = self.evaluate_hands_comprehensive(note, &self.analyze_strategy_context(note));
+        
+        // 根据规划结果调整手部选择，位置因素占主导
+        let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+        let final_hand = if (primary_hand == Hand::Left && left_score > right_score) || 
+                         (primary_hand == Hand::Right && right_score >= left_score) {
+            // 如果规划结果与位置因素一致，优先使用规划结果
+            if primary_hand == position_based_hand {
+                primary_hand
+            } else {
+                // 如果规划结果与位置因素不一致，需要权衡
+                // 在连打模式下可以适当考虑交替，但位置因素更重要
+                let last_hand = self.get_most_recent_hand();
+                if let Some(prev_hand) = last_hand {
+                    if planning_result.confidence_factor > 1.2 { // 连打模式
+                        // 在连打模式下，如果位置因素与交替因素冲突，优先考虑位置
+                        if (prev_hand == Hand::Left && position_based_hand == Hand::Left) ||
+                           (prev_hand == Hand::Right && position_based_hand == Hand::Right) {
+                            // 位置因素与前一手相同，考虑是否强制交替
+                            if note.position.x < -0.3 || note.position.x > 0.3 {
+                                // 位置明显偏向一侧，优先考虑位置
+                                position_based_hand
+                            } else {
+                                // 位置不明显，可以考虑交替
+                                primary_hand
+                            }
+                        } else {
+                            // 位置因素与前一手不同，优先考虑位置
+                            position_based_hand
+                        }
+                    } else {
+                        // 非连打模式，使用规划结果
+                        primary_hand
+                    }
+                } else {
+                    // 没有历史记录，使用位置因素
+                    position_based_hand
+                }
+            }
+        } else if left_score > 0.1 && right_score > 0.1 {
+            // 当两种手都有一定得分时，优先考虑位置因素
+            position_based_hand
+        } else {
+            // 使用次选手，但仍要考虑位置因素
+            if (secondary_hand == Hand::Left && note.position.x < 0.0) ||
+               (secondary_hand == Hand::Right && note.position.x > 0.0) {
+                secondary_hand
+            } else {
+                position_based_hand
+            }
+        };
+        
+        // 计算置信度
+        let score_diff = (left_score - right_score).abs();
+        let confidence_from_scores = (score_diff / (left_score + right_score + 0.0001)).clamp(0.3, 0.9);
+        let final_confidence = (network_confidence * 0.4 + confidence_from_scores * 0.4 + planning_result.confidence_factor * 0.2).max(0.7);
+        
+        // 手指分配
+        let finger = self.assign_finger_for_phitk(note, final_hand);
+        
+        (final_hand, final_confidence, finger)
+    }
+    
+    /// 记录分配反馈
+    fn record_assignment_feedback(&mut self, note: &ProcessedNote, hand: Hand, _confidence: f32) {
+        self.recent_assignments.push_back((hand, note.position.x, note.time));
+        if self.recent_assignments.len() > 50 {
+            self.recent_assignments.pop_front();
+        }
+    }
+
+    fn assign_finger_for_phitk(&self, _note: &ProcessedNote, hand: Hand) -> Finger {
+        match hand {
+            Hand::Left => Finger::LeftIndex,
+            Hand::Right => Finger::RightIndex,
+        }
+    }
+}
+
+/// 策略上下文结构
+#[derive(Debug)]
+struct StrategyContext {
+    position_factor: PositionFactor,
+    timing_factor: TimingFactor,
+    pattern_factor: PatternFactor,
+    hand_state_factor: HandStateFactor,
+    note_type_factor: NoteTypeFactor,
+}
+
+/// 位置因素
+#[derive(Debug)]
+struct PositionFactor {
+    x_position: f32,
+    left_preference: f32,
+    right_preference: f32,
+    center_avoidance: f32,
+}
+
+/// 时间因素
+#[derive(Debug)]
+struct TimingFactor {
+    time_since_left: f32,
+    time_since_right: f32,
+}
+
+/// 模式因素
+#[derive(Debug)]
+struct PatternFactor {
+    is_jack: bool,
+    is_crossing: bool,
+    is_chord: bool,
+    note_density: f32,
+}
+
+/// 手部状态因素
+#[derive(Debug)]
+struct HandStateFactor {
+    left_fatigue: f32,
+    right_fatigue: f32,
+    left_distance: f32,
+    right_distance: f32,
+}
+
+/// 音符类型因素
+#[derive(Debug)]
+struct NoteTypeFactor {
+    complexity: f32,
+}
+
+/// 规划结果
+#[derive(Debug)]
+struct PlanningResult {
+    primary_hand: Hand,
+    secondary_hand: Hand,
+    confidence_factor: f32,
+}
+
+impl PhiTKAdvancedAI {
+    /// 计算基于位置的评分
+    fn calculate_position_score(&self, note: &ProcessedNote) -> (f32, f32) {
+        // 基于x坐标计算位置偏好，但考虑更复杂的因素
+        let x = note.position.x;
+        
+        // 左手偏好：只在左侧区域给予高分，避免中间区域偏向错误的手
+        let left_position_score = if x < -0.4 {
+            0.6  // 明显左侧，高分
+        } else if x < -0.1 {
+            0.4 + (0.4 + x) * 0.6  // 左侧区域
+        } else if x < 0.0 {
+            0.2 + (0.2 + x) * 0.2  // 中左区域，降低分数
+        } else {
+            0.0  // 右侧或中间区域不给左手分数
+        };
+        
+        // 右手偏好：只在右侧区域给予高分，避免中间区域偏向错误的手
+        let right_position_score = if x > 0.4 {
+            0.6  // 明显右侧，高分
+        } else if x > 0.1 {
+            0.4 + (x - 0.1) * 0.6  // 右侧区域
+        } else if x > 0.0 {
+            0.2 + (x - 0.0) * 0.2  // 中右区域，降低分数
+        } else {
+            0.0  // 左侧或中间区域不给右手分数
+        };
+        
+        // 考虑y坐标的影响（垂直位置）
+        let y = note.position.y;
+        // 如果音符在较高位置，稍微偏向同侧手（模拟实际游戏中手的自然移动）
+        let height_factor = (y + 1.0) / 2.0; // 将[-1, 1]映射到[0, 1]
+        
+        // 微调评分 - 保持原始位置偏好的同时，减少中间区域的模糊性
+        let adjusted_left = left_position_score * (1.0 + height_factor * 0.2);
+        let adjusted_right = right_position_score * (1.0 + height_factor * 0.2);
+        
+        (adjusted_left, adjusted_right)
+    }
+
+    /// 计算基于手部状态的评分
+    fn calculate_hand_state_score(&self, note: &ProcessedNote) -> (f32, f32) {
+        // 计算到左手的距离
+        let left_distance = note.position.distance_to(&self.left_hand_state.position);
+        // 计算到右手的距离
+        let right_distance = note.position.distance_to(&self.right_hand_state.position);
+        
+        // 距离越近，得分越高（但需要考虑疲劳等因素）
+        let left_distance_score = (1.0 - left_distance.min(1.0)).max(0.0);
+        let right_distance_score = (1.0 - right_distance.min(1.0)).max(0.0);
+        
+        // 考虑手部疲劳，疲劳度越高，得分越低
+        let left_fatigue_penalty = self.left_hand_state.fatigue * 0.4; // 增加疲劳惩罚权重
+        let right_fatigue_penalty = self.right_hand_state.fatigue * 0.4;
+        
+        // 考虑手部忙碌状态，避免过快切换
+        let left_busy_penalty = if self.left_hand_state.last_time >= note.time { 0.3 } else { 0.0 }; // 增加忙碌惩罚
+        let right_busy_penalty = if self.right_hand_state.last_time >= note.time { 0.3 } else { 0.0 };
+        
+        // 综合评分，给予位置偏好更高的权重
+        let left_score = left_distance_score * 0.7 - left_fatigue_penalty * 0.2 - left_busy_penalty * 0.1;
+        let right_score = right_distance_score * 0.7 - right_fatigue_penalty * 0.2 - right_busy_penalty * 0.1;
+        
+        (left_score.max(0.0), right_score.max(0.0))
+    }
+
+    /// 计算基于音符类型的评分
+    fn calculate_note_type_score(&self, note_kind: &NoteKind) -> (f32, f32) {
+        // 不同音符类型可能更适合不同的手
+        let (left_score, right_score) = match note_kind {
+            NoteKind::Click => (0.1, 0.1), // 点击音符对左右手都相对中性
+            NoteKind::Drag => (0.2, 0.2),  // 拖动音符对左右手都相对中性
+            NoteKind::Flick => (0.15, 0.15), // 滑动音符对左右手都相对中性
+            NoteKind::Hold { .. } => (0.25, 0.25), // 长按音符对左右手都相对中性，但稍微偏向保持手部稳定
+        };
+        
+        (left_score, right_score)
+    }
+
+    /// 计算基于时间间隔的评分
+    fn calculate_timing_score(&self, note: &ProcessedNote) -> (f32, f32) {
+        // 计算与左手上次操作的时间间隔
+        let left_time_diff = (note.time - self.left_hand_state.last_time).abs();
+        // 计算与右手上次操作的时间间隔
+        let right_time_diff = (note.time - self.right_hand_state.last_time).abs();
+        
+        // 时间间隔适中得分较高（避免过快切换和过慢切换）
+        let left_timing_score = if left_time_diff < 0.05 {
+            0.0 // 过快切换，惩罚
+        } else if left_time_diff < 0.3 {
+            0.3 // 适中时间间隔，奖励
+        } else {
+            0.1 // 时间间隔过长，轻微惩罚
+        };
+        
+        let right_timing_score = if right_time_diff < 0.05 {
+            0.0 // 过快切换，惩罚
+        } else if right_time_diff < 0.3 {
+            0.3 // 适中时间间隔，奖励
+        } else {
+            0.1 // 时间间隔过长，轻微惩罚
+        };
+        
+        (left_timing_score, right_timing_score)
     }
 
     fn record_experience(&mut self, features: &[f32], note: &ProcessedNote, chosen_hand: Hand, confidence: f32, network_correct: bool) {
@@ -5502,187 +6292,72 @@ impl PhiTKAdvancedAI {
     fn calculate_reward(&mut self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
         let mut reward: f32 = 0.0;
 
+        // 2指模式奖励计算逻辑：综合考虑位置、手部状态、音符类型等因素
         if self.game_mode == GameMode::TwoFinger {
-            const SHORT_TIME_WINDOW: f32 = 0.3;
-            const LONG_TIME_WINDOW: f32 = 1.0;
-            const DENSE_THRESHOLD: f32 = 0.55;
-            const CROSSING_THRESHOLD: f32 = 0.15;
+            // 基于位置的奖励，但使用更复杂的评分
+            let position_score = self.calculate_position_score(note);
+            let (left_score, right_score) = position_score;
             
-            // 统计不同时间窗口内的音符分布
-            let mut recent_left_short = 0;
-            let mut recent_right_short = 0;
-            let mut recent_left_long = 0;
-            let mut recent_right_long = 0;
-            
-            // 统计最近的手分配序列
-            let mut recent_hand_sequence = Vec::new();
-            
-            for (hand, x, t) in &self.recent_assignments {
-                // 短时间窗口统计
-                if (note.time - t).abs() <= SHORT_TIME_WINDOW {
-                    if *x < -CROSSING_THRESHOLD {
-                        recent_left_short += 1;
-                    } else if *x > CROSSING_THRESHOLD {
-                        recent_right_short += 1;
-                    }
-                    recent_hand_sequence.push(*hand);
-                }
-                
-                // 长时间窗口统计
-                if (note.time - t).abs() <= LONG_TIME_WINDOW {
-                    if *x < -CROSSING_THRESHOLD {
-                        recent_left_long += 1;
-                    } else if *x > CROSSING_THRESHOLD {
-                        recent_right_long += 1;
-                    }
-                }
-            }
-
-            // 检测密集区域
-            let total_short = recent_left_short + recent_right_short;
-            let total_long = recent_left_long + recent_right_long;
-            
-            let is_left_dense_short = total_short > 0 && (recent_left_short as f32) / (total_short as f32) > DENSE_THRESHOLD;
-            let is_right_dense_short = total_short > 0 && (recent_right_short as f32) / (total_short as f32) > DENSE_THRESHOLD;
-            let is_left_dense_long = total_long > 0 && (recent_left_long as f32) / (total_long as f32) > DENSE_THRESHOLD;
-            let is_right_dense_long = total_long > 0 && (recent_right_long as f32) / (total_long as f32) > DENSE_THRESHOLD;
-            
-            let is_any_dense = is_left_dense_short || is_right_dense_short || is_left_dense_long || is_right_dense_long;
-            
-            // 检测音符是否跨越中线
-            let is_crossing = note.position.x.abs() < CROSSING_THRESHOLD;
-            
-            // 检测连续同手模式
-            let mut consecutive_same_hand = 0;
-            let mut last_hand_in_sequence = None;
-            for &hand in recent_hand_sequence.iter().rev().take(6) {
-                if last_hand_in_sequence == Some(hand) {
-                    consecutive_same_hand += 1;
-                } else {
-                    break;
-                }
-                last_hand_in_sequence = Some(hand);
+            // 根据选择的手给予相应的位置奖励
+            if chosen_hand == Hand::Left {
+                reward += left_score * 0.5;  // 位置奖励权重为0.5
+            } else {
+                reward += right_score * 0.5;
             }
             
-            // 策略1：密集区域奖励
-            if is_any_dense {
-                let dense_side = if is_left_dense_short || is_left_dense_long {
-                    Hand::Left
-                } else {
-                    Hand::Right
-                };
-                
-                // 在密集区域内，强烈奖励交替，惩罚连续同手
-                if let Some(last_hand) = self.last_assigned_hand {
-                    if last_hand == chosen_hand && consecutive_same_hand >= 1 {
-                        // 连续使用同一只手，大幅惩罚
-                        reward -= 0.9 - (consecutive_same_hand as f32 * 0.1); // 连续越多，惩罚越大
-                    } else {
-                        // 成功交替，大幅奖励
-                        reward += 0.8;
-                    }
-                    
-                    // 额外奖励：如果非密集区域的手进入密集区帮助
-                    if chosen_hand != dense_side {
-                        reward += 0.4; // 奖励"跨区支援"
-                    }
-                } else {
-                    // 没有历史记录，基于位置给予基础奖励
-                    let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
-                    if chosen_hand == position_based_hand {
-                        reward += 0.3;
-                    } else {
-                        reward -= 0.1;
-                    }
-                }
+            // 手部状态奖励：考虑手部疲劳和距离
+            let hand_state_score = self.calculate_hand_state_score(note);
+            let (left_hand_score, right_hand_score) = hand_state_score;
+            
+            if chosen_hand == Hand::Left {
+                reward += left_hand_score * 0.3;  // 手部状态奖励权重为0.3
+            } else {
+                reward += right_hand_score * 0.3;
             }
             
-            // 策略2：跨越中线音符的奖励
-            else if is_crossing {
-                // 跨越中线的音符，奖励交替策略
-                if let Some(last_hand) = self.last_assigned_hand {
-                    let alternate_hand = if last_hand == Hand::Left { Hand::Right } else { Hand::Left };
-                    if chosen_hand == alternate_hand {
-                        reward += 0.7; // 奖励成功交替
-                    } else {
-                        reward -= 0.3; // 惩罚未交替
-                    }
-                } else {
-                    // 没有历史记录，基于细微位置差异给予奖励
-                    let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
-                    if chosen_hand == position_based_hand {
-                        reward += 0.2;
-                    }
-                }
+            // 音符类型奖励
+            let note_type_score = self.calculate_note_type_score(&note.kind);
+            let (left_type_score, right_type_score) = note_type_score;
+            
+            if chosen_hand == Hand::Left {
+                reward += left_type_score * 0.2;  // 音符类型奖励权重为0.2
+            } else {
+                reward += right_type_score * 0.2;
             }
             
-            // 策略3：防止连续同手过多的奖励
-            else if consecutive_same_hand >= 2 {
-                // 强制交替的情况
-                let expected_alternate_hand = if let Some(last_hand) = last_hand_in_sequence {
-                    if last_hand == Hand::Left { Hand::Right } else { Hand::Left }
-                } else {
-                    // 如果没有记录，根据位置决定期望的手
-                    if note.position.x < 0.0 { Hand::Right } else { Hand::Left }
-                };
-                
-                if chosen_hand == expected_alternate_hand {
-                    reward += 0.6; // 奖励正确交替
-                } else {
-                    reward -= 0.5; // 惩罚未交替
-                }
-            }
+            // 时间间隔奖励
+            let timing_score = self.calculate_timing_score(note);
+            let (left_timing_score, right_timing_score) = timing_score;
             
-            // 策略4：基于位置的默认奖励
-            else {
-                let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
-                
-                // 检查负荷平衡
-                let left_ratio = if total_long > 0 { (recent_left_long as f32) / (total_long as f32) } else { 0.5 };
-                let right_ratio = if total_long > 0 { (recent_right_long as f32) / (total_long as f32) } else { 0.5 };
-                
-                if (left_ratio - right_ratio).abs() > 0.3 {
-                    let balanced_hand = if left_ratio > right_ratio { Hand::Right } else { Hand::Left };
-                    
-                    // 位置与平衡手不冲突的情况
-                    let position_conflict = (position_based_hand == Hand::Left && note.position.x > 0.2) ||
-                                           (position_based_hand == Hand::Right && note.position.x < -0.2);
-                    
-                    if !position_conflict && chosen_hand == balanced_hand {
-                        reward += 0.4; // 奖励平衡负荷
-                    } else if chosen_hand == position_based_hand {
-                        reward += 0.2; // 基础位置奖励
-                    } else {
-                        reward -= 0.15; // 位置冲突惩罚
-                    }
-                } else {
-                    // 没有明显负荷不平衡，使用基础位置奖励
-                    if chosen_hand == position_based_hand {
-                        reward += 0.25;
-                    } else {
-                        reward -= 0.1;
-                    }
-                }
+            if chosen_hand == Hand::Left {
+                reward += left_timing_score * 0.2;  // 时间间隔奖励权重为0.2
+            } else {
+                reward += right_timing_score * 0.2;
             }
             
             // 额外奖励：基于音符类型的特殊处理
             match note.kind {
                 NoteKind::Flick => {
-                    // Flick音符需要更精确的处理
+                    // 滑动音符稍微偏向位置决定的手
                     let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
                     if chosen_hand == ideal_hand {
-                        reward += 0.15;
+                        reward += 0.1;
                     } else {
-                        reward -= 0.2;
+                        reward -= 0.1;
                     }
                 },
                 NoteKind::Hold { .. } => {
                     // Hold音符需要考虑持续时间
                     if note.duration > 0.5 {
-                        // 长时间Hold，奖励使用位置对应的手
-                        let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
-                        if chosen_hand == ideal_hand {
-                            reward += 0.1;
+                        // 长按音符更倾向于分配给不疲劳的手
+                        let left_fatigue = self.left_hand_state.fatigue;
+                        let right_fatigue = self.right_hand_state.fatigue;
+                        let less_fatigued_hand = if left_fatigue < right_fatigue { Hand::Left } else { Hand::Right };
+                        
+                        if chosen_hand == less_fatigued_hand {
+                            reward += 0.15;
+                        } else {
+                            reward -= 0.1;
                         }
                     }
                 },
@@ -5720,328 +6395,6 @@ impl PhiTKAdvancedAI {
         }
 
         reward.clamp(-1.0, 1.0)
-    }
-
-    fn smooth_hand_transitions(&self, notes: &mut [ProcessedNote]) {
-        if notes.len() < 3 {
-            return;
-        }
-
-        for i in 1..notes.len() - 1 {
-            if let (Some(prev_hand), Some(curr_hand), Some(next_hand)) = (notes[i - 1].assigned_hand, notes[i].assigned_hand, notes[i + 1].assigned_hand) {
-                if curr_hand != prev_hand && curr_hand != next_hand && prev_hand == next_hand {
-                    let time_gap_prev = notes[i].time - notes[i - 1].time;
-                    let time_gap_next = notes[i + 1].time - notes[i].time;
-
-                    if time_gap_prev > 0.15 && time_gap_next > 0.15 {
-                        let position_reasonable = match prev_hand {
-                            Hand::Left => notes[i].position.x < 0.3,
-                            Hand::Right => notes[i].position.x > -0.3,
-                        };
-
-                        if position_reasonable && notes[i].confidence < 0.8 {
-                            notes[i].assigned_hand = Some(prev_hand);
-                            notes[i].confidence = 0.75;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn validate_physical_feasibility(&self, notes: &mut [ProcessedNote]) {
-        const MAX_SPEED: f32 = 10.0;
-        const MIN_TIME_GAP: f32 = 0.05;
-
-        for i in 1..notes.len() {
-            if let (Some(prev_hand), Some(curr_hand)) = (notes[i - 1].assigned_hand, notes[i].assigned_hand) {
-                if prev_hand == curr_hand {
-                    let distance = notes[i].position.distance_to(&notes[i - 1].position);
-                    let time_diff = notes[i].time - notes[i - 1].time;
-
-                    if time_diff > 0.001 {
-                        let required_speed = distance / time_diff;
-
-                        if required_speed > MAX_SPEED || time_diff < MIN_TIME_GAP {
-                            let other_hand = if curr_hand == Hand::Left { Hand::Right } else { Hand::Left };
-
-                            let switch_reasonable = match other_hand {
-                                Hand::Left => notes[i].position.x < 0.3,
-                                Hand::Right => notes[i].position.x > -0.3,
-                            };
-
-                            if switch_reasonable {
-                                notes[i].assigned_hand = Some(other_hand);
-                                notes[i].confidence = 0.6;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn optimize_recognized_patterns(&mut self, notes: &mut [ProcessedNote]) {
-        let mut i = 0;
-        while i < notes.len() {
-            let window_end = (i + 8).min(notes.len());
-            let window = &notes[i..window_end];
-
-            if window.len() < 3 {
-                i += 1;
-                continue;
-            }
-
-            let alternating_score = self.feature_extractor.detect_alternating_pattern(window);
-            let stream_score = self.feature_extractor.detect_stream_pattern(window);
-            let chord_score = self.feature_extractor.detect_chord_pattern(window);
-            let jack_score = self.feature_extractor.detect_jack_pattern(window);
-            let crossing_score = self.detect_crossing_pattern(window);
-
-            if alternating_score > 0.7 {
-                self.optimize_alternating_pattern(&mut notes[i..window_end]);
-                i = window_end;
-            } else if stream_score > 0.6 {
-                self.optimize_stream_pattern(&mut notes[i..window_end]);
-                i = window_end;
-            } else if chord_score > 0.5 {
-                self.optimize_chord_pattern(&mut notes[i..window_end]);
-                i = window_end;
-            } else if jack_score > 0.4 {
-                self.optimize_jack_pattern(&mut notes[i..window_end]);
-                i = window_end;
-            } else if crossing_score > 0.2 {
-                self.optimize_crossing_pattern(&mut notes[i..window_end]);
-                i = window_end;
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    fn optimize_jack_pattern(&mut self, notes: &mut [ProcessedNote]) {
-        if notes.len() < 3 {
-            return;
-        }
-        let avg_x: f32 = notes.iter().map(|n| n.position.x).sum::<f32>() / notes.len() as f32;
-        let mut current_hand = if avg_x < 0.0 { Hand::Left } else { Hand::Right };
-
-        for (index, note) in notes.iter_mut().enumerate() {
-            let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
-            if index > 0 && position_based_hand != current_hand {
-                note.assigned_hand = Some(position_based_hand);
-                current_hand = position_based_hand;
-            } else {
-                note.assigned_hand = Some(current_hand);
-                current_hand = match current_hand {
-                    Hand::Left => Hand::Right,
-                    Hand::Right => Hand::Left,
-                };
-            }
-            note.confidence = 0.85;
-        }
-    }
-
-    fn optimize_alternating_pattern(&self, notes: &mut [ProcessedNote]) {
-        for i in 1..notes.len() {
-            if let Some(prev_hand) = notes[i - 1].assigned_hand {
-                let should_alternate = notes[i].position.x * notes[i - 1].position.x < 0.0;
-
-                if should_alternate {
-                    let opposite_hand = if prev_hand == Hand::Left { Hand::Right } else { Hand::Left };
-                    notes[i].assigned_hand = Some(opposite_hand);
-                    notes[i].confidence = 0.85;
-                }
-            }
-        }
-    }
-
-    fn optimize_stream_pattern(&self, notes: &mut [ProcessedNote]) {
-        if notes.is_empty() {
-            return;
-        }
-
-        let avg_x = notes.iter().map(|n| n.position.x).sum::<f32>() / notes.len() as f32;
-        let dominant_hand = if avg_x < 0.0 { Hand::Left } else { Hand::Right };
-
-        let mut can_use_same_hand = true;
-        for i in 1..notes.len() {
-            let distance = notes[i].position.distance_to(&notes[i - 1].position);
-            let time_diff = notes[i].time - notes[i - 1].time;
-
-            if time_diff > 0.001 {
-                let required_speed = distance / time_diff;
-                if required_speed > 8.0 || time_diff < 0.08 {
-                    can_use_same_hand = false;
-                    break;
-                }
-            }
-        }
-
-        if can_use_same_hand {
-            for note in notes.iter_mut() {
-                note.assigned_hand = Some(dominant_hand);
-                note.confidence = 0.8;
-            }
-        }
-    }
-
-    fn optimize_chord_pattern(&self, notes: &mut [ProcessedNote]) {
-        let mut time_groups = HashMap::new();
-
-        for (i, note) in notes.iter().enumerate() {
-            let time_key = (note.time * 20.0).round() as i32;
-            time_groups.entry(time_key).or_insert(Vec::new()).push(i);
-        }
-
-        for indices in time_groups.values() {
-            if indices.len() > 1 {
-                let mut sorted_indices = indices.clone();
-                sorted_indices.sort_by(|&a, &b| notes[a].position.x.partial_cmp(&notes[b].position.x).unwrap_or(std::cmp::Ordering::Equal));
-
-                let mid = sorted_indices.len() / 2;
-                for (pos, &idx) in sorted_indices.iter().enumerate() {
-                    notes[idx].assigned_hand = Some(if pos < mid { Hand::Left } else { Hand::Right });
-                    notes[idx].confidence = 0.9;
-                }
-            }
-        }
-    }
-
-    fn detect_crossing_pattern(&self, notes: &[ProcessedNote]) -> f32 {
-        if notes.len() < 2 {
-            return 0.0;
-        }
-        let mut crossing_score = 0.0;
-        let mut consecutive_crossings = 0;
-        let mut max_consecutive = 0;
-        
-        for i in 1..notes.len() {
-            let prev_x = notes[i-1].position.x;
-            let curr_x = notes[i].position.x;
-            // 检查是否从正到负或负到正
-            if prev_x * curr_x < 0.0 {
-                consecutive_crossings += 1;
-                crossing_score += 1.0;
-            } else {
-                max_consecutive = max_consecutive.max(consecutive_crossings);
-                consecutive_crossings = 0;
-            }
-        }
-        max_consecutive = max_consecutive.max(consecutive_crossings);
-        
-        // 如果有连续的跨越，给予更高的分数
-        let base_score = crossing_score / (notes.len() - 1) as f32;
-        if max_consecutive >= 2 {
-            // 连续跨越序列，提高检测分数
-            (base_score * 1.5).min(1.0)
-        } else {
-            base_score
-        }
-    }
-
-    fn optimize_crossing_pattern(&mut self, notes: &mut [ProcessedNote]) {
-        if notes.is_empty() {
-            return;
-        }
-        
-        // 检测是否为真正的跨越序列（从正到负或负到正的连续序列）
-        let mut is_crossing_sequence = false;
-        let mut crossing_start = 0;
-        let mut crossing_end = 0;
-        
-        // 查找跨越序列的开始和结束
-        for i in 0..notes.len() {
-            if i > 0 {
-                let prev_x = notes[i-1].position.x;
-                let curr_x = notes[i].position.x;
-                // 检查是否发生跨越（符号改变）
-                if prev_x * curr_x < 0.0 {
-                    if !is_crossing_sequence {
-                        is_crossing_sequence = true;
-                        crossing_start = i.saturating_sub(1);
-                    }
-                    crossing_end = i;
-                } else if is_crossing_sequence {
-                    // 如果跨越序列中断，结束检测
-                    break;
-                }
-            }
-        }
-        
-        if is_crossing_sequence && crossing_end > crossing_start {
-            // 确定起始手：根据跨越序列开始前的音符位置
-            let start_hand = if notes[crossing_start].position.x < 0.0 { Hand::Left } else { Hand::Right };
-            let mut current_hand = start_hand;
-            
-            // 处理跨越序列之前的音符
-            for i in 0..=crossing_start {
-                notes[i].assigned_hand = Some(start_hand);
-                notes[i].confidence = 0.85;
-            }
-            
-            // 处理跨越序列：使用起始手完成整个跨越
-            for i in (crossing_start + 1)..=crossing_end {
-                notes[i].assigned_hand = Some(start_hand);
-                notes[i].confidence = 0.8;
-            }
-            
-            // 跨越完成后，根据最后一个音符的位置决定是否切换回默认手
-            let last_note_x = notes[crossing_end].position.x;
-            let ideal_hand_after_crossing = if last_note_x < 0.0 { Hand::Left } else { Hand::Right };
-            
-            // 如果跨越后的理想手与起始手不同，则切换
-            if ideal_hand_after_crossing != start_hand {
-                current_hand = ideal_hand_after_crossing;
-            }
-            
-            // 处理跨越序列之后的音符
-            for i in (crossing_end + 1)..notes.len() {
-                notes[i].assigned_hand = Some(current_hand);
-                notes[i].confidence = 0.85;
-            }
-        } else {
-            // 非跨越序列，使用原有逻辑
-            let start_hand = if notes[0].position.x < 0.0 { Hand::Left } else { Hand::Right };
-            let mut current_hand = start_hand;
-            for note in notes.iter_mut() {
-                note.assigned_hand = Some(current_hand);
-                note.confidence = 0.8;
-                // 如果位置与手部相反且距离较大，考虑切换
-                if note.position.x * current_hand.sign() < -2.4 {
-                    current_hand = match current_hand {
-                        Hand::Left => Hand::Right,
-                        Hand::Right => Hand::Left,
-                    };
-                }
-            }
-        }
-    }
-
-    fn check_hand_consistency(&self, notes: &mut [ProcessedNote]) {
-        const MAX_CONSECUTIVE_SAME_HAND: usize = 5;
-        let mut consecutive_count = 0;
-        let mut last_hand = None;
-        for note in notes.iter_mut() {
-            if let Some(hand) = note.assigned_hand {
-                if last_hand == Some(hand) {
-                    consecutive_count += 1;
-                } else {
-                    consecutive_count = 1;
-                    last_hand = Some(hand);
-                }
-                if consecutive_count > MAX_CONSECUTIVE_SAME_HAND {
-                    // 强制切换手
-                    note.assigned_hand = Some(match hand {
-                        Hand::Left => Hand::Right,
-                        Hand::Right => Hand::Left,
-                    });
-                    note.confidence = 0.6;
-                    consecutive_count = 1;
-                    last_hand = note.assigned_hand;
-                }
-            }
-        }
     }
 
     fn apply_and_learn(&mut self, original_notes: &mut [Note], processed_notes: &[ProcessedNote]) {
@@ -6151,34 +6504,189 @@ impl PhiTKAdvancedAI {
     }
 
     fn adapt_parameters(&mut self, _current_accuracy: f32) {
-        // 不再传入 current_accuracy，而是自己计算
+        // 使用全新的参数自适应系统
+        self.adapt_parameters_new();
+    }
+    
+    /// 全新的参数自适应系统
+    fn adapt_parameters_new(&mut self) {
+        // 1. 计算准确率
         let true_accuracy = if self.total_notes_processed > 0 {
             self.correct_predictions as f32 / self.total_notes_processed as f32
         } else {
             0.5
         };
-
+        
+        // 2. 更新平均奖励
         self.average_reward = 0.99 * self.average_reward + 0.01 * true_accuracy;
         self.average_reward = self.average_reward.clamp(0.0, 1.0);
-
-        // 与新的学习率调整策略保持一致，不再在这里直接修改学习率
-        // 学习率调整完全交给 DeepNeuralNetwork::adapt_learning_rate 处理
         
-        // 探索率：准确率低 → 多探索
-        self.exploration_rate = (0.4 - 0.3 * true_accuracy).clamp(0.05, 0.3);
-
-        // 置信度阈值：准确率高才提高
-        if true_accuracy > 0.8 {
-            self.confidence_threshold = (self.confidence_threshold + 0.005).min(0.85);
-        } else if true_accuracy < 0.6 {
-            self.confidence_threshold = (self.confidence_threshold - 0.01).max(0.5);
-        }
+        // 3. 动态调整探索率
+        self.exploration_rate = self.calculate_dynamic_exploration_rate(true_accuracy);
         
-        // 每100个训练周期输出一次参数状态
+        // 4. 动态调整置信度阈值
+        self.confidence_threshold = self.calculate_dynamic_confidence_threshold(true_accuracy);
+        
+        // 5. 动态调整权重
+        self.adjust_dynamic_weights(true_accuracy);
+        
+        // 6. 每100个训练周期输出一次参数状态
         if self.training_episodes % 100 == 0 {
             println!("[参数调整] Episode: {}, 准确率: {:.3}%, 探索率: {:.3}, 置信度阈值: {:.3}", 
                      self.training_episodes, true_accuracy * 100.0, self.exploration_rate, self.confidence_threshold);
         }
+    }
+    
+    /// 计算动态探索率
+    fn calculate_dynamic_exploration_rate(&self, accuracy: f32) -> f32 {
+        // 根据准确率动态调整探索率
+        // 准确率低时增加探索，准确率高时减少探索
+        let base_rate = 0.3 - 0.25 * accuracy;
+        
+        // 考虑训练进度的影响
+        let progress_factor = (self.training_episodes as f32 / 10000.0).min(1.0);
+        let progress_adjusted = base_rate * (1.0 - progress_factor * 0.5);
+        
+        progress_adjusted.clamp(0.05, 0.5)
+    }
+    
+    /// 计算动态置信度阈值
+    fn calculate_dynamic_confidence_threshold(&self, accuracy: f32) -> f32 {
+        // 根据准确率调整置信度阈值
+        let base_threshold = 0.6 + 0.25 * accuracy;
+        
+        // 考虑近期表现的波动
+        let recent_performance = self.calculate_recent_performance();
+        let volatility_factor = (1.0 - recent_performance.variance).max(0.8);
+        
+        (base_threshold * volatility_factor).clamp(0.5, 0.9)
+    }
+    
+    /// 计算近期表现
+    fn calculate_recent_performance(&self) -> RecentPerformance {
+        if self.performance_history.is_empty() {
+            return RecentPerformance {
+                variance: 0.0,
+                trend: 0.0,
+            };
+        }
+        
+        let recent_count = self.performance_history.len().min(50);
+        let recent_metrics: Vec<_> = self.performance_history.iter().rev().take(recent_count).collect();
+        
+        let sum_accuracy: f32 = recent_metrics.iter().map(|m| m.accuracy).sum();
+        let average_accuracy = sum_accuracy / recent_count as f32;
+        
+        let variance = recent_metrics.iter()
+            .map(|m| (m.accuracy - average_accuracy).powi(2))
+            .sum::<f32>() / recent_count as f32;
+        
+        let trend = if recent_metrics.len() >= 2 {
+            let first_half: f32 = recent_metrics[..recent_count/2].iter().map(|m| m.accuracy).sum();
+            let second_half: f32 = recent_metrics[recent_count/2..].iter().map(|m| m.accuracy).sum();
+            (second_half / (recent_count/2) as f32) - (first_half / (recent_count/2) as f32)
+        } else {
+            0.0
+        };
+        
+        RecentPerformance {
+            variance,
+            trend,
+        }
+    }
+    
+    /// 动态调整权重
+    fn adjust_dynamic_weights(&mut self, accuracy: f32) {
+        // 根据准确率和近期表现调整各种因素的权重
+        let performance = self.calculate_recent_performance();
+        
+        // 位置因素权重调整
+        self.position_weight_factor = self.calculate_position_weight(accuracy, &performance);
+        
+        // 时间因素权重调整
+        self.timing_weight_factor = self.calculate_timing_weight(accuracy, &performance);
+        
+        // 状态因素权重调整
+        self.state_weight_factor = self.calculate_state_weight(accuracy, &performance);
+        
+        // 模式因素权重调整
+        self.pattern_weight_factor = self.calculate_pattern_weight(accuracy, &performance);
+    }
+    
+    /// 计算位置因素权重
+    fn calculate_position_weight(&self, accuracy: f32, performance: &RecentPerformance) -> f32 {
+        // 基础权重
+        let mut weight: f32 = 0.4;
+        
+        // 根据准确率调整
+        if accuracy < 0.7 {
+            weight += 0.1; // 准确率低时增加位置因素权重
+        } else if accuracy > 0.9 {
+            weight -= 0.05; // 准确率高时略微减少位置因素权重
+        }
+        
+        // 根据趋势调整
+        if performance.trend < -0.01 {
+            weight += 0.05; // 表现下降时增加位置因素权重
+        } else if performance.trend > 0.01 {
+            weight -= 0.02; // 表现上升时略微减少位置因素权重
+        }
+        
+        weight.clamp(0.2_f32, 0.6_f32)
+    }
+    
+    /// 计算时间因素权重
+    fn calculate_timing_weight(&self, accuracy: f32, performance: &RecentPerformance) -> f32 {
+        // 基础权重
+        let mut weight: f32 = 0.2;
+        
+        // 根据准确率调整
+        if accuracy < 0.7 {
+            weight += 0.05; // 准确率低时增加时间因素权重
+        }
+        
+        // 根据方差调整（高方差时增加时间因素权重）
+        if performance.variance > 0.05 {
+            weight += 0.05;
+        }
+        
+        weight.clamp(0.1, 0.3)
+    }
+    
+    /// 计算状态因素权重
+    fn calculate_state_weight(&self, accuracy: f32, performance: &RecentPerformance) -> f32 {
+        // 基础权重
+        let mut weight: f32 = 0.25;
+        
+        // 根据准确率调整
+        if accuracy < 0.7 {
+            weight += 0.05; // 准确率低时增加状态因素权重
+        }
+        
+        // 根据趋势调整
+        if performance.trend < -0.01 {
+            weight += 0.05; // 表现下降时增加状态因素权重
+        }
+        
+        weight.clamp(0.15_f32, 0.4_f32)
+    }
+    
+    /// 计算模式因素权重
+    fn calculate_pattern_weight(&self, accuracy: f32, performance: &RecentPerformance) -> f32 {
+        // 基础权重
+        let mut weight: f32 = 0.15;
+        
+        // 根据准确率调整
+        if accuracy > 0.8 {
+            weight += 0.05; // 准确率高时增加模式因素权重
+        }
+        
+        // 根据方差调整
+        if performance.variance < 0.02 {
+            weight += 0.05; // 表现稳定时增加模式因素权重
+        }
+        
+        weight.clamp(0.1_f32, 0.25_f32)
     }
 
     fn train_network(&mut self) {
