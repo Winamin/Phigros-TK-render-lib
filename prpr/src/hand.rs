@@ -5193,7 +5193,8 @@ impl PhiTKAdvancedAI {
             .ok().map(Arc::new);
 
         let rad = rotation.to_radians();
-        let game_mode = GameMode::FourFinger;
+        // 初始化时使用自动检测模式，先默认为TwoFinger
+        let game_mode = GameMode::TwoFinger;
         let finger_states = Self::init_finger_states(game_mode, rad);
 
         let mut ai = Self {
@@ -5293,6 +5294,10 @@ impl PhiTKAdvancedAI {
                         } else {
                             println!("[GPU/CPU SWITCH] target_network GPU initialization failed, using CPU fallback.");
                         }
+
+                        // 重置游戏模式为自动检测模式
+                        ai.game_mode = GameMode::TwoFinger;
+                        ai.finger_states = Self::init_finger_states(ai.game_mode, rotation.to_radians());
 
                         return ai;
                             }
@@ -5417,14 +5422,14 @@ impl PhiTKAdvancedAI {
 
      */
 
-    fn detect_and_switch_mode(&mut self, notes: &[Note]) {
-        if notes.len() < 50 {  // 降低最小音符数量要求，更早检测
-            return;
+    fn detect_game_mode(&self, notes: &[Note]) -> GameMode {
+        if notes.len() < 20 {  // 降低最小音符数量要求，更早检测
+            return GameMode::TwoFinger; // 默认返回2指模式
         }
 
         let time_window = notes.last().unwrap().time - notes[0].time;
-        if time_window < 0.5 {  // 降低时间窗口要求
-            return;
+        if time_window < 0.3 {  // 降低时间窗口要求
+            return GameMode::TwoFinger; // 默认返回2指模式
         }
 
         let note_density = notes.len() as f32 / time_window.max(0.1);
@@ -5459,8 +5464,8 @@ impl PhiTKAdvancedAI {
             0.0
         };
 
-        // 更智能的切换逻辑
-        let should_switch_to_four_finger =
+        // 更智能的模式判断逻辑
+        let should_use_four_finger =
             // 高密度且多同时音符
             (note_density > 20.0 && max_simultaneous >= 3) ||
             // 中等密度但频繁同时音符
@@ -5470,31 +5475,21 @@ impl PhiTKAdvancedAI {
             // 高密度谱面
             (note_density > 30.0 && simultaneous_groups >= 5);
 
-        let should_switch_to_two_finger =
-            // 明显的低密度
-            (note_density < 8.0 && max_simultaneous <= 2 && simultaneous_density < 1.0) ||
-            // 中等密度但简单模式
-            (note_density < 12.0 && max_simultaneous <= 2 && simultaneous_groups < 3);
-
-        // 模式切换逻辑
-        if should_switch_to_four_finger && self.game_mode != GameMode::FourFinger {
-            println!("[模式切换] 检测到复杂谱面，切换到四指模式。密度: {:.1}, 最大同时音符: {}, 同时组密度: {:.1}",
-                     note_density, max_simultaneous, simultaneous_density);
-            self.game_mode = GameMode::FourFinger;
-            self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
-        } else if should_switch_to_two_finger && self.game_mode != GameMode::TwoFinger {
-            println!("[模式切换] 检测到简单谱面，切换到二指模式。密度: {:.1}, 最大同时音符: {}, 同时组密度: {:.1}",
-                     note_density, max_simultaneous, simultaneous_density);
-            self.game_mode = GameMode::TwoFinger;
-            self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
+        if should_use_four_finger {
+            GameMode::FourFinger
+        } else {
+            GameMode::TwoFinger
         }
+    }
 
-        // 特殊处理：如果当前是2指模式但检测到可能的复杂情况，给出警告
-        if self.game_mode == GameMode::TwoFinger &&
-           ((note_density > 15.0 && max_simultaneous >= 3) ||
-            (simultaneous_density > 1.5 && max_simultaneous >= 3)) {
-            // 不自动切换，但可以记录日志或调整参数
-            // println!("[2指模式警告] 检测到可能需要四指模式的谱面特征，但保持2指模式");
+    fn detect_and_switch_mode(&mut self, notes: &[Note]) {
+        let detected_mode = self.detect_game_mode(notes);
+        
+        // 模式切换逻辑
+        if detected_mode != self.game_mode {
+            println!("[模式切换] AI判断应使用{:?}模式", detected_mode);
+            self.game_mode = detected_mode;
+            self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
         }
     }
 
