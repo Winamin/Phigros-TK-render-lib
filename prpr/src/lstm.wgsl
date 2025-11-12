@@ -36,7 +36,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return; // 单向模式只处理方向0
     }
 
-    // 每个work item处理一个batch样本
+    // 验证batch索引
     if (global_id >= params.batch_size) {
         return;
     }
@@ -51,12 +51,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         is_backward
     );
 
+    // 添加时间步越界检查
+    if (actual_t >= params.seq_len) {
+        return;
+    }
+
     // 1. 获取当前输入 x_t [input_size]
     let x_base = batch_idx * params.seq_len * params.input_size + actual_t * params.input_size;
 
     // 2. 获取前一时刻状态 (h_prev, c_prev) [hidden_size]
-    var h_prev: array<f32, 512>; // 假设 max hidden_size = 512
-    var c_prev: array<f32, 512>;
+    var h_prev: array<f32, 1024>; // 支持最大 hidden_size=1024
+    var c_prev: array<f32, 1024>;
 
     // 初始化为0
     for (var i = 0u; i < params.hidden_size; i++) {
@@ -64,9 +69,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         c_prev[i] = 0.0;
     }
 
-    // 只有非首时间步才需要前一状态
+    // 处理非首时间步
     if (dispatch.t > 0u) {
-        // 修复：使用明确的 u32 类型计算
         var prev_actual_t: u32;
         if (is_backward) {
             // 反向LSTM：前一时间步是当前+1
@@ -87,12 +91,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // 计算门控
-    let weight_dir_offset = dir * 4u * params.hidden_size * (params.input_size + params.hidden_size);
+    // 3. 计算门控
+    let weight_dir_offset = dir * (4u * params.hidden_size * params.input_size +
+                                 4u * params.hidden_size * params.hidden_size);
     let bias_dir_offset = dir * 4u * params.hidden_size;
 
-    var h_t: array<f32, 512>;
-    var c_t: array<f32, 512>;
+    var h_t: array<f32, 1024>;
+    var c_t: array<f32, 1024>;
 
     // 为每个隐藏单元计算
     for (var h_idx = 0u; h_idx < params.hidden_size; h_idx++) {
@@ -103,19 +108,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             // 从偏置开始
             var sum = biases[bias_dir_offset + gate * params.hidden_size + h_idx];
 
-            // W_ih * x_t
+            // W_ih * x_t (输入权重部分)
+            let w_ih_offset = weight_dir_offset;
             for (var i = 0u; i < params.input_size; i++) {
-                let w_idx = weight_dir_offset
-                          + (gate * params.hidden_size + h_idx) * (params.input_size + params.hidden_size)
+                let w_idx = w_ih_offset
+                          + (gate * params.hidden_size + h_idx) * params.input_size
                           + i;
                 sum += weights[w_idx] * input[x_base + i];
             }
 
-            // W_hh * h_prev
+            // W_hh * h_prev (隐藏层权重部分)
+            let w_hh_offset = weight_dir_offset + 4u * params.hidden_size * params.input_size;
             for (var j = 0u; j < params.hidden_size; j++) {
-                let w_idx = weight_dir_offset
-                          + (gate * params.hidden_size + h_idx) * (params.input_size + params.hidden_size)
-                          + params.input_size + j;
+                let w_idx = w_hh_offset
+                          + (gate * params.hidden_size + h_idx) * params.hidden_size
+                          + j;
                 sum += weights[w_idx] * h_prev[j];
             }
 
