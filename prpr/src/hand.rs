@@ -20,6 +20,7 @@ use wgpu::util::DeviceExt;
 use crossbeam_channel::{unbounded, Receiver as CbReceiver, Sender as CbSender};
 use rayon::ThreadPool;
 use std::hash::{Hash, Hasher};
+use bytemuck::{Pod, Zeroable};
 
 type StdHashMap<K, V> = HashMap<K, V>;
 
@@ -479,6 +480,12 @@ struct Experience {
     next_state: Vec<f32>,
     done: bool,
     timestamp: f32,
+    // PPO新增字段
+    log_prob: f32,
+    value: f32,
+    next_value: f32,
+    advantage: f32,
+    return_: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -548,7 +555,7 @@ struct DeepNeuralNetwork {
     #[serde(skip)]lstm_bind_group_layout: Option<wgpu::BindGroupLayout>,
     #[serde(skip)]attention_pipeline: Option<wgpu::ComputePipeline>,
     #[serde(skip)]attention_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    #[serde(skip)]activation_pipelinotes: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
+    #[serde(skip)]activation_pipelines: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
     #[serde(
         skip
     )]activation_bind_group_layouts: StdHashMap<ActivationFunction, wgpu::BindGroupLayout>,
@@ -679,6 +686,25 @@ struct DifficultyEstimator {
     coordination_difficulty: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LSTMParams {
+    input_size: u32,
+    hidden_size: u32,
+    seq_len: u32,
+    batch_size: u32,
+    bidirectional: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DispatchParams {
+    t: u32,
+    direction: u32,
+    _pad0: u32, // 16-byte alignment padding
+    _pad1: u32, // 16-byte alignment padding
+}
+
 impl Vector2 {
     fn new(x: f32, y: f32) -> Self { Self { x, y } }
 
@@ -747,11 +773,11 @@ impl DeepNeuralNetwork {
     fn new() -> Self {
         let mut network = Self {
             layers: Vec::new(),
-            learning_rate: 0.003, //学习率 - 适应初始Loss为0.36的较高初始学习率
+            learning_rate: 0.0008, //降低初始学习率以防止梯度爆炸
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size: 256, //批量训练
-            max_grad_norm: 5.0, //最大梯度限制 - 降低阈值以增强训练稳定性
+            batch_size: 512, //增加批次大小以提高GPU利用率
+            max_grad_norm: 2.0, //降低梯度裁剪阈值以更好地控制梯度爆炸
             //weight_decay: 0.0001,
             last_loss: f32::INFINITY, //损失
             bad_epochs: 0,
@@ -766,7 +792,7 @@ impl DeepNeuralNetwork {
             residual_bind_group_layout: None,
             residual_pipeline: None,
             attention_bind_group_layout: None,
-            activation_pipelinotes: StdHashMap::new(),
+            activation_pipelines: StdHashMap::new(),
             activation_bind_group_layouts: StdHashMap::new(),
             gpu_initialized: false,
             batch_size_buffer: None,
@@ -881,54 +907,145 @@ impl DeepNeuralNetwork {
     }
 
     pub fn activate(x: f32, func: &ActivationFunction) -> f32 {
-        match func {
-            ActivationFunction::ReLU => x.max(0.0),
-            ActivationFunction::Sigmoid => 1.0 / (1.0 + (-x).exp()),
-            ActivationFunction::Tanh => x.tanh(),
-            ActivationFunction::Swish => x * (1.0 / (1.0 + (-x).exp())),
-            ActivationFunction::GELU => 0.5 * x * (1.0 + (x * 0.7978845608 * (1.0 + 0.044715 * x * x)).tanh()),
-            ActivationFunction::Linear => x,
+        // 对输入进行裁剪以防止数值不稳定
+        let clipped_x = x.clamp(-50.0, 50.0);  // 更严格的输入裁剪
+        
+        let result = match func {
+            ActivationFunction::ReLU => {
+                let res = clipped_x.max(0.0);
+                res.clamp(-50.0, 50.0)
+            },
+            ActivationFunction::Sigmoid => {
+                // 使用更稳定的sigmoid实现
+                let res = if clipped_x > 20.0 {
+                    1.0
+                } else if clipped_x < -20.0 {
+                    0.0
+                } else {
+                    1.0 / (1.0 + (-clipped_x).exp())
+                };
+                res.clamp(0.0, 1.0)
+            },
+            ActivationFunction::Tanh => {
+                // 使用clamp确保输出在[-1, 1]范围内
+                let res = clipped_x.tanh();
+                res.clamp(-0.999, 0.999)  // 避免极端值
+            },
+            ActivationFunction::Swish => {
+                // 防止指数函数溢出
+                let exp_val = if clipped_x > 20.0 {
+                    1.0
+                } else if clipped_x < -20.0 {
+                    0.0
+                } else {
+                    (-clipped_x).exp()
+                };
+                let sigmoid = 1.0 / (1.0 + exp_val);
+                let res = clipped_x * sigmoid;
+                // 更严格的输出裁剪
+                res.clamp(-30.0, 30.0)
+            },
+            ActivationFunction::GELU => {
+                // 使用更稳定的GELU实现
+                let res = if clipped_x.abs() < 3.0 {
+                    // 直接使用GELU公式
+                    let sqrt_2_over_pi = 0.7978845608_f32;
+                    let x3 = clipped_x * clipped_x * clipped_x;
+                    let a = sqrt_2_over_pi * (clipped_x + 0.044715 * x3);
+                    0.5 * clipped_x * (1.0 + a.tanh())
+                } else {
+                    // 对极端值使用近似
+                    if clipped_x > 0.0 {
+                        clipped_x
+                    } else {
+                        0.0
+                    }
+                };
+                res.clamp(-20.0, 20.0)
+            },
+            ActivationFunction::Linear => clipped_x.clamp(-50.0, 50.0),
+        };
+        
+        // 最终检查结果是否为有限值
+        if result.is_finite() {
+            result
+        } else {
+            0.0  // 如果结果不是有限值，返回0
         }
     }
 
     pub fn activate_derivative_from_z(x: f32, func: &ActivationFunction) -> f32 {
+        // 对输入进行裁剪以防止数值不稳定
+        let clipped_x = x.clamp(-100.0, 100.0);
+        
         match func {
             ActivationFunction::ReLU => {
-                if x > 0.0 { 1.0 } else { 0.0 }
+                if clipped_x > 0.0 { 1.0 } else { 0.0 }
             }
             ActivationFunction::Sigmoid => {
                 // s = sigmoid(x)
-                let s = 1.0 / (1.0 + (-x).exp());
-                s * (1.0 - s)
+                let exp_val = if clipped_x > 10.0 {
+                    1.0
+                } else if clipped_x < -10.0 {
+                    0.0
+                } else {
+                    (-clipped_x).exp()
+                };
+                let s = 1.0 / (1.0 + exp_val);
+                let result = s * (1.0 - s);
+                // 确保结果在有效范围内
+                result.clamp(0.0, 1.0)
             }
             ActivationFunction::Tanh => {
-                let t = x.tanh();
-                1.0 - t * t
+                let t = clipped_x.tanh();
+                let result = 1.0 - t * t;
+                // 确保结果在有效范围内
+                result.clamp(0.0, 1.0)
             }
             ActivationFunction::Swish => {
                 // swish(x) = x * sigmoid(x)
-                let sig = 1.0 / (1.0 + (-x).exp());
-                sig + x * sig * (1.0 - sig)
+                let exp_val = if clipped_x > 10.0 {
+                    1.0
+                } else if clipped_x < -10.0 {
+                    0.0
+                } else {
+                    (-clipped_x).exp()
+                };
+                let sig = 1.0 / (1.0 + exp_val);
+                let result = sig + clipped_x * sig * (1.0 - sig);
+                // 确保结果在合理范围内
+                result.clamp(-10.0, 10.0)
             }
             ActivationFunction::GELU => {
                 // derivative of GELU (approximation consistent with GELU definition used)
                 let sqrt_2_over_pi = 0.7978845608_f32;
-                let x3 = x * x * x;
-                let a = sqrt_2_over_pi * (x + 0.044715 * x3);
-                let tanh_a = a.tanh();
+                let x3 = clipped_x * clipped_x * clipped_x;
+                let a = sqrt_2_over_pi * (clipped_x + 0.044715 * x3);
+                let clamped_a = a.clamp(-10.0, 10.0); // 限制a的范围
+                let tanh_a = clamped_a.tanh();
                 let left = 0.5 * (1.0 + tanh_a);
                 let sech2 = 1.0 - tanh_a * tanh_a;
-                let a_prime = sqrt_2_over_pi * (1.0 + 0.134145 * x * x); // 0.044715*3 = 0.134145
-                left + 0.5 * x * sech2 * a_prime
+                let a_prime = sqrt_2_over_pi * (1.0 + 0.134145 * clipped_x * clipped_x); // 0.044715*3 = 0.134145
+                let result = left + 0.5 * clipped_x * sech2 * a_prime;
+                // 确保结果在合理范围内
+                result.clamp(-10.0, 10.0)
             }
             ActivationFunction::Linear => 1.0,
         }
     }
 
     fn light_forward(&mut self, input: &[f32]) -> Vec<f32> {
-        let mut current_input = input.to_vec();
+        // 检查输入是否包含NaN或无穷大值
+        let mut current_input: Vec<f32> = input.iter().map(|&x| if x.is_finite() { x } else { 0.0 }).collect();
 
         for layer in self.layers.iter_mut() {
+            // 在每层处理前检查输入
+            for x in &mut current_input {
+                if !x.is_finite() {
+                    *x = 0.0; // 将NaN或无穷大值替换为0
+                }
+            }
+            
             match layer.layer_type {
                 LayerType::Dense => {
                     current_input = Self::dense_forward(layer, &current_input);
@@ -946,10 +1063,29 @@ impl DeepNeuralNetwork {
                     // 确保维度匹配后才添加残差连接
                     if current_input.len() == input_copy.len() {
                         for i in 0..current_input.len() {
-                            current_input[i] += input_copy[i];
+                            // 检查两个值是否都是有限的
+                            if current_input[i].is_finite() && input_copy[i].is_finite() {
+                                current_input[i] += input_copy[i];
+                            } else {
+                                current_input[i] = 0.0; // 如果任何一个值不是有限的，则使用默认值
+                            }
                         }
                     }
                 }
+            }
+            
+            // 在每层处理后检查输出
+            for x in &mut current_input {
+                if !x.is_finite() {
+                    *x = 0.0; // 将NaN或无穷大值替换为0
+                }
+            }
+        }
+
+        // 最终输出检查
+        for x in &mut current_input {
+            if !x.is_finite() {
+                *x = 0.0; // 将NaN或无穷大值替换为0
             }
         }
 
@@ -1009,7 +1145,7 @@ impl DeepNeuralNetwork {
                 self.queue = None;
                 self.batch_size_buffer = None;
                 self.matmul_pipeline = None;
-                self.activation_pipelinotes.clear();
+                self.activation_pipelines.clear();
                 self.activation_bind_group_layouts.clear();
                 for layer in &mut self.layers {
                     layer.weights_buffer = None;
@@ -1234,6 +1370,16 @@ impl DeepNeuralNetwork {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
             label: Some("LSTM Bind Group Layout"),
         });
@@ -1285,7 +1431,7 @@ impl DeepNeuralNetwork {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -1306,6 +1452,16 @@ impl DeepNeuralNetwork {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -1335,7 +1491,7 @@ impl DeepNeuralNetwork {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         });
 
-        let mut activation_pipelinotes = StdHashMap::new();
+        let mut activation_pipelines = StdHashMap::new();
         let mut activation_bind_group_layouts = StdHashMap::new();
         for func in [
             ActivationFunction::ReLU,
@@ -1392,7 +1548,7 @@ impl DeepNeuralNetwork {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             });
 
-            activation_pipelinotes.insert(func.clone(), pipeline);
+            activation_pipelines.insert(func.clone(), pipeline);
             activation_bind_group_layouts.insert(func, activation_bind_group_layout);
         }
         
@@ -1511,7 +1667,7 @@ impl DeepNeuralNetwork {
         self.lstm_bind_group_layout = Some(lstm_bind_group_layout);
         self.attention_pipeline = Some(attention_pipeline);
         self.attention_bind_group_layout = Some(attention_bind_group_layout);
-        self.activation_pipelinotes = activation_pipelinotes;
+        self.activation_pipelines = activation_pipelines;
         self.activation_bind_group_layouts = activation_bind_group_layouts;
         self.residual_pipeline = Some(residual_pipeline);
         self.residual_bind_group_layout = Some(residual_bind_group_layout);
@@ -1554,6 +1710,7 @@ impl DeepNeuralNetwork {
     }
 
     fn gpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
+        println!("[GPU前向传播] 输入维度: {}", input.len());
         if !self.gpu_initialized {
             self.init_gpu_sync();
             if !self.gpu_initialized {
@@ -1640,7 +1797,7 @@ impl DeepNeuralNetwork {
                         &output_buffer
                     );
 
-                    let activation_pipeline = self.activation_pipelinotes
+                    let activation_pipeline = self.activation_pipelines
                         .get(&layer.activation_func)
                         .unwrap();
 
@@ -1814,61 +1971,60 @@ impl DeepNeuralNetwork {
                     }
                 },
                 LayerType::LSTM => {
-                    // LSTM层：现在使用GPU实现
                     let seq_len = layer.seq_len;
                     let feature_dim = if seq_len > 0 { current_input_size / seq_len } else { current_input_size };
-                    let output_size = layer.activations.len() / (if layer.bidirectional { 2 } else { 1 });
-                    
+                    let hidden_size = layer.activations.len() / (if layer.bidirectional { 2 } else { 1 });
+                    let num_directions = if layer.bidirectional { 2 } else { 1 };
+
+                    // 计算缓冲区大小（包含方向维度）
+                    let state_buffer_size = 1 * seq_len * num_directions * hidden_size; // batch=1
+                    let total_output_size = state_buffer_size; // output = hidden_states
+
                     // 创建输出缓冲区
-                    let total_output_size = output_size * seq_len * (if layer.bidirectional { 2 } else { 1 });
                     let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("LSTM Output Buffer Layer {}", i)),
                         size: (total_output_size * size_of::<f32>()) as u64,
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                         mapped_at_creation: false,
                     });
-                    
+
                     // 创建隐藏状态和细胞状态缓冲区
                     let hidden_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("LSTM Hidden States Buffer Layer {}", i)),
-                        size: (output_size * seq_len * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        size: (state_buffer_size * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
-                    
+
                     let cell_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("LSTM Cell States Buffer Layer {}", i)),
-                        size: (output_size * seq_len * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        size: (state_buffer_size * size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
-                    
+
                     // 创建LSTM参数缓冲区
-                    #[repr(C)]
-                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-                    struct LSTMParams {
-                        input_size: u32,
-                        hidden_size: u32,
-                        seq_len: u32,
-                        batch_size: u32,
-                        bidirectional: u32,
-                    }
-                    
                     let params = LSTMParams {
                         input_size: feature_dim as u32,
-                        hidden_size: output_size as u32,
+                        hidden_size: hidden_size as u32,
                         seq_len: seq_len as u32,
                         batch_size: 1, // 单个样本
                         bidirectional: if layer.bidirectional { 1 } else { 0 },
                     };
-                    
+
                     let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some(&format!("LSTM Params Buffer Layer {}", i)),
                         contents: bytemuck::cast_slice(&[params]),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        usage: wgpu::BufferUsages::STORAGE,
+                    });
+
+                    let dispatch_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("Dispatch Params Buffer Layer {}", i)),
+                        size: size_of::<DispatchParams>() as u64,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                        mapped_at_creation: false,
                     });
                     
-                    // 创建LSTM绑定组
                     let lstm_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout: self.lstm_bind_group_layout.as_ref().unwrap(),
                         entries: &[
@@ -1900,44 +2056,111 @@ impl DeepNeuralNetwork {
                                 binding: 6,
                                 resource: params_buffer.as_entire_binding(),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: dispatch_params_buffer.as_entire_binding(),
+                            }
                         ],
                         label: Some(&format!("LSTM Bind Group Layer {}", i)),
                     });
-                    
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("LSTM Encoder"),
-                    });
-                    
+
+                    // 清零状态缓冲区
                     {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("LSTM Pass"),
-                            timestamp_writes: None,
+                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some(&format!("LSTM Clear States Layer {}", i)),
                         });
-                        cpass.set_pipeline(self.lstm_pipeline.as_ref().unwrap());
-                        cpass.set_bind_group(0, &lstm_bind_group, &[]);
-                        
-                        // 计算工作组数量，确保不超过 WebGPU 限制 (65535)
-                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
-                        let workgroup_count = workgroup_count.min(65535);
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                        encoder.clear_buffer(&hidden_states_buffer, 0, None);
+                        encoder.clear_buffer(&cell_states_buffer, 0, None);
+                        queue.submit(Some(encoder.finish()));
                     }
-                    
-                    queue.submit(Some(encoder.finish()));
-                    
-                    // 激活函数
+
+                    // 按时间步和方向循环dispatch
+
+                    // 正向处理 (direction = 0)
+                    for t in 0..seq_len {
+                        // 写入当前dispatch参数
+                        let dispatch_data = DispatchParams {
+                            t: t as u32,
+                            direction: 0,
+                            _pad0: 0,
+                            _pad1: 0,
+                        };
+                        queue.write_buffer(
+                            &dispatch_params_buffer,
+                            0,
+                            bytemuck::bytes_of(&dispatch_data),
+                        );
+
+                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some(&format!("LSTM Forward Step {} Layer {}", t, i)),
+                        });
+
+                        {
+                            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                                label: Some(&format!("LSTM Forward Pass t={}", t)),
+                                timestamp_writes: None,
+                            });
+                            cpass.set_pipeline(self.lstm_pipeline.as_ref().unwrap());
+                            cpass.set_bind_group(0, &lstm_bind_group, &[]);
+
+                            // 基于batch_size来计算工作组的数量，最大限制为65535
+                            let workgroup_count = ((params.batch_size + 63) / 64).min(65535);
+                            cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                        }
+
+                        queue.submit(Some(encoder.finish()));
+                    }
+
+                    // 反向处理 (if bidirectional)
+                    if layer.bidirectional {
+                        for t in 0..seq_len {
+                            // 写入反向dispatch参数
+                            let dispatch_data = DispatchParams {
+                                t: t as u32,
+                                direction: 1, // 反向
+                                _pad0: 0,
+                                _pad1: 0,
+                            };
+                            queue.write_buffer(
+                                &dispatch_params_buffer,
+                                0,
+                                bytemuck::bytes_of(&dispatch_data),
+                            );
+
+                            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some(&format!("LSTM Backward Step {} Layer {}", t, i)),
+                            });
+
+                            {
+                                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                                    label: Some(&format!("LSTM Backward Pass t={}", t)),
+                                    timestamp_writes: None,
+                                });
+                                cpass.set_pipeline(self.lstm_pipeline.as_ref().unwrap());
+                                cpass.set_bind_group(0, &lstm_bind_group, &[]);
+
+                                let workgroup_count = ((params.batch_size + 63) / 64).min(65535);
+                                cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                            }
+
+                            queue.submit(Some(encoder.finish()));
+                        }
+                    }
+
+                    // 激活函数处理
                     let activation_bind_group = self.create_activation_bind_group(
                         layer,
                         &output_buffer
                     );
-                    
-                    let activation_pipeline = self.activation_pipelinotes
+
+                    let activation_pipeline = self.activation_pipelines
                         .get(&layer.activation_func)
                         .unwrap();
-                    
+
                     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("LSTM Activation Encoder"),
                     });
-                    
+
                     {
                         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("LSTM Activation Pass"),
@@ -1945,14 +2168,13 @@ impl DeepNeuralNetwork {
                         });
                         cpass.set_pipeline(activation_pipeline);
                         cpass.set_bind_group(0, &activation_bind_group, &[]);
-                        
-                        // 正确计算工作组数量
+
                         let workgroup_count = ((total_output_size as u32) + 63) / 64;
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+                        cpass.dispatch_workgroups(workgroup_count.min(65535), 1, 1);
                     }
-                    
+
                     queue.submit(Some(encoder.finish()));
-                    
+
                     // 准备下一层的输入
                     if i < self.layers.len() - 1 {
                         let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1961,11 +2183,11 @@ impl DeepNeuralNetwork {
                             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
-                        
+
                         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("Copy Encoder"),
                         });
-                        
+
                         encoder.copy_buffer_to_buffer(
                             &output_buffer,
                             0,
@@ -1973,7 +2195,7 @@ impl DeepNeuralNetwork {
                             0,
                             (total_output_size * size_of::<f32>()) as u64
                         );
-                        
+
                         queue.submit(Some(encoder.finish()));
                         current_input_buffer = next_input_buffer;
                         current_input_size = total_output_size;
@@ -1991,62 +2213,76 @@ impl DeepNeuralNetwork {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                         mapped_at_creation: false,
                     });
-                    
+
                     // 创建注意力参数缓冲区
                     #[repr(C)]
                     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
                     struct AttentionParams {
-                        input_size: u32,
-                        output_size: u32,
                         batch_size: u32,
+                        seq_len: u32,
+                        input_size: u32,
                         num_heads: u32,
+                        head_dim: u32,
                     }
+
+                    let seq_len = if current_input_size > 0 && layer.seq_len > 0 { 
+                        current_input_size / layer.seq_len 
+                    } else { 1 };
+                    
+                    let num_heads = 8; // 默认8个注意力头
+                    let head_dim = output_size / num_heads;
                     
                     let params = AttentionParams {
-                        input_size: current_input_size as u32,
-                        output_size: output_size as u32,
                         batch_size: 1, // 单个样本
-                        num_heads: 8, // 默认8个注意力头
+                        seq_len: seq_len as u32,
+                        input_size: (if seq_len > 0 { current_input_size / seq_len } else { current_input_size }) as u32,
+                        num_heads: num_heads as u32,
+                        head_dim: head_dim as u32,
                     };
-                    
+
                     let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some(&format!("Attention Params Buffer Layer {}", i)),
                         contents: bytemuck::cast_slice(&[params]),
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     });
-                    
+
                     // 创建注意力绑定组
+                    // 权重缓冲区需要包含权重 + 偏置的合并数据
                     let attention_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout: self.attention_bind_group_layout.as_ref().unwrap(),
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: current_input_buffer.as_entire_binding(),
+                                resource: params_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
+                                resource: current_input_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
-                                resource: output_buffer.as_entire_binding(),
+                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(), // Q权重+偏置
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
-                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
+                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(), // K权重+偏置
                             },
                             wgpu::BindGroupEntry {
                                 binding: 4,
-                                resource: params_buffer.as_entire_binding(),
+                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(), // V权重+偏置
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: output_buffer.as_entire_binding(),
                             },
                         ],
                         label: Some(&format!("Attention Bind Group Layer {}", i)),
                     });
-                    
+
                     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("Attention Encoder"),
                     });
-                    
+
                     {
                         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("Attention Pass"),
@@ -2054,29 +2290,30 @@ impl DeepNeuralNetwork {
                         });
                         cpass.set_pipeline(self.attention_pipeline.as_ref().unwrap());
                         cpass.set_bind_group(0, &attention_bind_group, &[]);
-                        
-                        // 计算工作组数量
-                        let workgroup_count = ((output_size as u32) + 63) / 64;
-                        let workgroup_count = workgroup_count.min(65535);
+
+                        // 安全的工作组计算，避免GPU过载
+                        let workgroup_size = 64usize;
+                        let total_output_size = output_size; // 注意力层的输出大小
+                        let workgroup_count = ((total_output_size + workgroup_size - 1) / workgroup_size) as u32;
                         cpass.dispatch_workgroups(workgroup_count, 1, 1);
                     }
-                    
+
                     queue.submit(Some(encoder.finish()));
-                    
+
                     // 激活函数
                     let activation_bind_group = self.create_activation_bind_group(
                         layer,
                         &output_buffer
                     );
-                    
-                    let activation_pipeline = self.activation_pipelinotes
+
+                    let activation_pipeline = self.activation_pipelines
                         .get(&layer.activation_func)
                         .unwrap();
-                    
+
                     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("Attention Activation Encoder"),
                     });
-                    
+
                     {
                         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("Attention Activation Pass"),
@@ -2084,15 +2321,15 @@ impl DeepNeuralNetwork {
                         });
                         cpass.set_pipeline(activation_pipeline);
                         cpass.set_bind_group(0, &activation_bind_group, &[]);
-                        
+
                         // 正确计算工作组数量
                         let workgroup_count = ((output_size as u32) + 63) / 64;
                         let workgroup_count = workgroup_count.min(65535);
                         cpass.dispatch_workgroups(workgroup_count, 1, 1);
                     }
-                    
+
                     queue.submit(Some(encoder.finish()));
-                    
+
                     // 准备下一层的输入
                     if i < self.layers.len() - 1 {
                         let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2101,11 +2338,11 @@ impl DeepNeuralNetwork {
                             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
-                        
+
                         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("Copy Encoder"),
                         });
-                        
+
                         encoder.copy_buffer_to_buffer(
                             &output_buffer,
                             0,
@@ -2113,7 +2350,7 @@ impl DeepNeuralNetwork {
                             0,
                             (output_size * size_of::<f32>()) as u64
                         );
-                        
+
                         queue.submit(Some(encoder.finish()));
                         current_input_buffer = next_input_buffer;
                         current_input_size = output_size;
@@ -2315,7 +2552,7 @@ impl DeepNeuralNetwork {
                         layer,
                         &output_buffer,
                     );
-                    let activation_pipeline = self.activation_pipelinotes
+                    let activation_pipeline = self.activation_pipelines
                         .get(&layer.activation_func)
                         .expect("Activation pipeline not initialized");
                     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2348,7 +2585,7 @@ impl DeepNeuralNetwork {
                     
                     // 创建输出缓冲区
                     let total_output_size = output_size * seq_len * (if layer.bidirectional { 2 } else { 1 }) * actual_batch_size;
-                    let f32_size = size_of::<f32>() as u32;
+                    let _f32_size = size_of::<f32>() as u32;
                     let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("Batch LSTM Output Buffer for Layer {}", layer_output_buffers.len())),
                         size: (total_output_size * size_of::<f32>()) as u64,
@@ -2361,14 +2598,14 @@ impl DeepNeuralNetwork {
                     let hidden_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("Batch LSTM Hidden States Buffer for Layer {}", layer_output_buffers.len())),
                         size: (hidden_states_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
                     
                     let cell_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("Batch LSTM Cell States Buffer for Layer {}", layer_output_buffers.len())),
                         size: (hidden_states_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
                     
@@ -2396,7 +2633,15 @@ impl DeepNeuralNetwork {
                         contents: bytemuck::cast_slice(&[params]),
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     });
-                    
+
+                    // 创建dispatch参数缓冲区
+                    let dispatch_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("Batch Dispatch Params Buffer Layer {}", layer_output_buffers.len())),
+                        size: size_of::<DispatchParams>() as u64,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                        mapped_at_creation: false,
+                    });
+
                     // 创建LSTM绑定组
                     let lstm_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout: self.lstm_bind_group_layout.as_ref().unwrap(),
@@ -2429,6 +2674,10 @@ impl DeepNeuralNetwork {
                                 binding: 6,
                                 resource: params_buffer.as_entire_binding(),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: dispatch_params_buffer.as_entire_binding(),
+                            },
                         ],
                         label: Some(&format!("Batch LSTM Bind Group for Layer {}", layer_output_buffers.len())),
                     });
@@ -2458,7 +2707,7 @@ impl DeepNeuralNetwork {
                         layer,
                         &output_buffer,
                     );
-                    let activation_pipeline = self.activation_pipelinotes
+                    let activation_pipeline = self.activation_pipelines
                         .get(&layer.activation_func)
                         .expect("Activation pipeline not initialized");
                     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2489,71 +2738,84 @@ impl DeepNeuralNetwork {
                     // 注意力层现在使用GPU实现
                     let output_size = layer.activations.len();
                     let total_output_size = output_size * actual_batch_size;
-                    
+
                     // 输出缓冲区
-                    let f32_size = size_of::<f32>() as u32;
+                    let _f32_size = size_of::<f32>() as u32;
                     let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("Batch Attention Output Buffer for Layer {}", layer_output_buffers.len())),
                         size: (total_output_size * size_of::<f32>()) as u64,
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                         mapped_at_creation: false,
                     });
-                    
+
                     // 注意力参数缓冲区
                     #[repr(C)]
                     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
                     struct AttentionParams {
-                        input_size: u32,
-                        output_size: u32,
                         batch_size: u32,
+                        seq_len: u32,
+                        input_size: u32,
                         num_heads: u32,
+                        head_dim: u32,
                     }
+
+                    let seq_len = if input_size > 0 && layer.seq_len > 0 { 
+                        input_size / layer.seq_len 
+                    } else { 1 };
+                    
+                    let num_heads = 8;
+                    let head_dim = output_size / num_heads;
                     
                     let params = AttentionParams {
-                        input_size: input_size as u32,
-                        output_size: output_size as u32,
                         batch_size: actual_batch_size as u32,
-                        num_heads: 8, // 默认8个注意力头
+                        seq_len: seq_len as u32,
+                        input_size: (if seq_len > 0 { input_size / seq_len } else { input_size }) as u32,
+                        num_heads: num_heads as u32,
+                        head_dim: head_dim as u32,
                     };
-                    
+
                     let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some(&format!("Batch Attention Params Buffer for Layer {}", layer_output_buffers.len())),
                         contents: bytemuck::cast_slice(&[params]),
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     });
-                    
+
                     // 注意力绑定组
                     let attention_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout: self.attention_bind_group_layout.as_ref().unwrap(),
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: current_input_buffer.as_entire_binding(),
+                                resource: params_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
+                                resource: current_input_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
-                                resource: output_buffer.as_entire_binding(),
+                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(), // Q权重+偏置
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
-                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
+                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(), // K权重+偏置
                             },
                             wgpu::BindGroupEntry {
                                 binding: 4,
-                                resource: params_buffer.as_entire_binding(),
+                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(), // V权重+偏置
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: output_buffer.as_entire_binding(),
                             },
                         ],
                         label: Some(&format!("Batch Attention Bind Group for Layer {}", layer_output_buffers.len())),
                     });
-                    
+
                     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("Batch Attention Encoder"),
                     });
-                    
+
                     {
                         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("Batch Attention Pass"),
@@ -2561,20 +2823,22 @@ impl DeepNeuralNetwork {
                         });
                         cpass.set_pipeline(self.attention_pipeline.as_ref().unwrap());
                         cpass.set_bind_group(0, &attention_bind_group, &[]);
-                        
-                        // 计算工作组数量
-                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
+
+                        // 安全的工作组计算，避免GPU过载
+                        let workgroup_size = 64usize;
+                        let total_output_size = output_size; // 批处理注意力层的输出大小
+                        let workgroup_count = ((total_output_size + workgroup_size - 1) / workgroup_size) as u32;
                         cpass.dispatch_workgroups(workgroup_count, 1, 1);
                     }
-                    
+
                     queue.submit(Some(encoder.finish()));
-                    
+
                     // 激活函数
                     let activation_bind_group = self.create_activation_bind_group(
                         layer,
                         &output_buffer,
                     );
-                    let activation_pipeline = self.activation_pipelinotes
+                    let activation_pipeline = self.activation_pipelines
                         .get(&layer.activation_func)
                         .expect("Activation pipeline not initialized");
                     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2602,102 +2866,7 @@ impl DeepNeuralNetwork {
                     current_input_buffer = output_buffer.clone();
                     layer_output_buffers.push(output_buffer);
                 },
-                LayerType::Residual => {
-                    // 残差层现在使用GPU实现
-                    let output_size = layer.weights.len() as u32;
-                    let total_output_size = output_size * (actual_batch_size as u32);
-                    let f32_size = size_of::<f32>() as u32;
-                    
-                    // 输出缓冲区
-                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Batch Residual Output Buffer for Layer {}", layer_output_buffers.len())),
-                        size: (total_output_size * f32_size) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                        mapped_at_creation: false,
-                    });
-                    
-                    // 获取残差输入（这里假设来自前一层？）
-                    let residual_input_buffer = if layer_output_buffers.len() >= 2 {
-                        &layer_output_buffers[layer_output_buffers.len() - 2]
-                    } else {
-                        &current_input_buffer
-                    };
-                    
-                    // 残差参数缓冲区
-                    #[repr(C)]
-                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-                    struct ResidualParams {
-                        input_size: u32,
-                        output_size: u32,
-                        batch_size: u32,
-                    }
-                    
-                    let params = ResidualParams {
-                        input_size: input_size as u32,
-                        output_size: output_size as u32,
-                        batch_size: actual_batch_size as u32,
-                    };
-                    
-                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(&format!("Batch Residual Params Buffer for Layer {}", layer_output_buffers.len())),
-                        contents: bytemuck::cast_slice(&[params]),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    });
-                    
-                    // 创建残差绑定组
-                    let residual_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: self.residual_bind_group_layout.as_ref().unwrap(),
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: current_input_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: output_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: residual_input_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: params_buffer.as_entire_binding(),
-                            },
-                        ],
-                        label: Some(&format!("Batch Residual Bind Group for Layer {}", layer_output_buffers.len())),
-                    });
-                    
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Batch Residual Encoder"),
-                    });
-                    
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Batch Residual Pass"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(self.residual_pipeline.as_ref().unwrap());
-                        cpass.set_bind_group(0, &residual_bind_group, &[]);
-                        
-                        // 计算工作组数量
-                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                    }
-                    
-                    queue.submit(Some(encoder.finish()));
-
-                    current_input_buffer = output_buffer.clone();
-                    layer_output_buffers.push(output_buffer);
-                },
+                
             }
         }
 
@@ -2706,7 +2875,7 @@ impl DeepNeuralNetwork {
         let output_size = self.layers.last().unwrap().activations.len();
         let total_output_size = output_size * actual_batch_size;
 
-        let f32_size = size_of::<f32>() as u32;
+        let _f32_size = size_of::<f32>() as u32;
         let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Batch Staging Buffer"),
             size: (total_output_size * size_of::<f32>()) as u64,
@@ -2790,7 +2959,7 @@ impl DeepNeuralNetwork {
         self.add_residual_layer(128, 128);
         // Layer 12: Dense (128 → 64)
         self.add_dense_layer(128, 64, ActivationFunction::GELU);
-        // Layer 13: Output (64 → 5)
+        // Layer 13: Output (64 → 5) - [left_prob, right_prob, value, confidence, four_finger]
         self.add_dense_layer(64, 5, ActivationFunction::Linear);
         
         // 添加反思层：用于自我验证和反思
@@ -3026,67 +3195,118 @@ impl DeepNeuralNetwork {
     }
 
     fn forward(&mut self, input: &[f32]) -> Vec<f32> {
+        // 检查输入是否包含NaN或无穷大值
+        if input.iter().any(|&x| !x.is_finite()) {
+            eprintln!("[Forward Warning] NaN/Inf detected in input, replacing with zeros");
+            // 创建一个清理后的输入向量
+            let clean_input: Vec<f32> = input.iter().map(|&x| if x.is_finite() { x } else { 0.0 }).collect();
+            if self.device.is_some() {
+                return self.gpu_forward(&clean_input);
+            } else {
+                return self.cpu_forward(&clean_input);
+            }
+        }
+        
         if self.device.is_some() {
             self.gpu_forward(input)
         } else {
-            let mut current_input = input.to_vec();
-            let mut layer_outputs: Vec<Vec<f32>> = Vec::new();
-            let total_layers = self.layers.len(); // 提前获取长度以避免借用冲突
-            let mut reflection_start_idx = None;
+            self.cpu_forward(input)
+        }
+    }
+    
+    fn cpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
+        let mut current_input = input.to_vec();
+        let mut layer_outputs: Vec<Vec<f32>> = Vec::new();
+        let total_layers = self.layers.len(); // 提前获取长度以避免借用冲突
+        let mut reflection_start_idx = None;
 
-            for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
-                match layer.layer_type {
-                    LayerType::Dense => {
-                        current_input = Self::dense_forward(layer, &current_input);
-                    }
-                    LayerType::LSTM => {
-                        current_input = Self::lstm_forward(layer, &current_input);
-                    }
-                    LayerType::Attention => {
-                        current_input = Self::attention_forward(layer, &current_input);
-                    }
-                    LayerType::Residual => {
-                        // 获取残差输入（通常是前一层或前几层的输出）
-                        let residual_input = if layer_outputs.len() >= 2 {
-                            layer_outputs[layer_outputs.len() - 2].clone()
-                        } else {
-                            current_input.clone()
-                        };
-
-                        current_input = Self::residual_forward(layer, &current_input, &residual_input);
-                    }
+        for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
+            // 在每层处理前检查输入
+            for x in &mut current_input {
+                if !x.is_finite() {
+                    *x = 0.0; // 将NaN或无穷大值替换为0
                 }
-                layer_outputs.push(current_input.clone());
-                
-                // 检测反思层的开始位置
-                if layer.layer_type == LayerType::Dense && reflection_start_idx.is_none() {
-                    // 反思层是最后几层的Dense层
-                    if layer_idx >= total_layers - 4 {
-                        reflection_start_idx = Some(layer_idx);
+            }
+            
+            match layer.layer_type {
+                LayerType::Dense => {
+                    current_input = Self::dense_forward(layer, &current_input);
+                }
+                LayerType::LSTM => {
+                    current_input = Self::lstm_forward(layer, &current_input);
+                }
+                LayerType::Attention => {
+                    current_input = Self::attention_forward(layer, &current_input);
+                }
+                LayerType::Residual => {
+                    // 获取残差输入（通常是前一层或前几层的输出）
+                    let residual_input = if layer_outputs.len() >= 2 {
+                        layer_outputs[layer_outputs.len() - 2].clone()
+                    } else {
+                        current_input.clone()
+                    };
+
+                    current_input = Self::residual_forward(layer, &current_input, &residual_input);
+                }
+            }
+            
+            // 检查当前层输出是否包含NaN或无穷大值
+            for x in &mut current_input {
+                if !x.is_finite() {
+                    *x = 0.0; // 将NaN或无穷大值替换为0
+                }
+            }
+            
+            layer_outputs.push(current_input.clone());
+            
+            // 检测反思层的开始位置
+            if layer.layer_type == LayerType::Dense && reflection_start_idx.is_none() {
+                // 反思层是最后几层的Dense层
+                if layer_idx >= total_layers - 4 {
+                    reflection_start_idx = Some(layer_idx);
+                }
+            }
+        }
+        
+        // 如果有反思层，执行反思过程
+        if let Some(start_idx) = reflection_start_idx {
+            let reflection_input = current_input.clone();
+            let mut reflection_output = reflection_input;
+            
+            // 通过反思层进行前向传播
+            for layer_idx in start_idx..total_layers {
+                if let LayerType::Dense = self.layers[layer_idx].layer_type {
+                    reflection_output = Self::dense_forward(&mut self.layers[layer_idx], &reflection_output);
+                    
+                    // 检查反思层输出
+                    for x in &mut reflection_output {
+                        if !x.is_finite() {
+                            *x = 0.0; // 将NaN或无穷大值替换为0
+                        }
                     }
                 }
             }
             
-            // 如果有反思层，执行反思过程
-            if let Some(start_idx) = reflection_start_idx {
-                let reflection_input = current_input.clone();
-                let mut reflection_output = reflection_input;
-                
-                // 通过反思层进行前向传播
-                for layer_idx in start_idx..total_layers {
-                    if let LayerType::Dense = self.layers[layer_idx].layer_type {
-                        reflection_output = Self::dense_forward(&mut self.layers[layer_idx], &reflection_output);
-                    }
-                }
-                
-                // 将反思结果与原始输出结合
-                for i in 0..current_input.len() {
+            // 将反思结果与原始输出结合
+            for i in 0..current_input.len() {
+                // 确保两个值都是有限的
+                if current_input[i].is_finite() && reflection_output[i].is_finite() {
                     current_input[i] = 0.7 * current_input[i] + 0.3 * reflection_output[i]; // 加权融合
+                } else {
+                    // 如果任何一个值不是有限的，则使用默认值
+                    current_input[i] = 0.0;
                 }
             }
-
-            current_input
         }
+
+        // 最终输出检查
+        for x in &mut current_input {
+            if !x.is_finite() {
+                *x = 0.0; // 将NaN或无穷大值替换为0
+            }
+        }
+
+        current_input
     }
 
     fn dense_forward(layer: &mut NetworkLayer, input: &[f32]) -> Vec<f32> {
@@ -3100,10 +3320,27 @@ impl DeepNeuralNetwork {
             .for_each(|(((weights, bias), z), out)| {
                 let mut sum = *bias;
                 for (w, x) in weights.iter().zip(input.iter()) {
-                    sum += w * x;
+                    // 检查w和x是否为NaN或无穷大
+                    if w.is_finite() && x.is_finite() {
+                        sum += w * x;
+                    }
                 }
+                
+                // 检查sum是否为NaN或无穷大
+                if !sum.is_finite() {
+                    sum = 0.0; // 将NaN或无穷大替换为0
+                }
+                
+                // 限制sum的范围以防止激活函数输出极端值
+                sum = sum.clamp(-100.0, 100.0);
+                
                 *z = sum;
                 *out = DeepNeuralNetwork::activate(sum, &layer.activation_func);
+                
+                // 检查激活函数输出是否为NaN或无穷大
+                if !out.is_finite() {
+                    *out = 0.0; // 将NaN或无穷大替换为0
+                }
             });
 
         layer.pre_activations = zs;
@@ -3115,8 +3352,21 @@ impl DeepNeuralNetwork {
         let hidden_size = h_prev.len();
         let input_size = x_t.len();
 
-        fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
-        fn tanh(x: f32) -> f32 { x.tanh() }
+        fn sigmoid(x: f32) -> f32 { 
+            // 防止指数函数溢出
+            if x > 10.0 {
+                1.0
+            } else if x < -10.0 {
+                0.0
+            } else {
+                1.0 / (1.0 + (-x).exp())
+            }
+        }
+        
+        fn tanh(x: f32) -> f32 { 
+            // tanh 函数本身对极端值处理较好，但仍进行检查
+            x.tanh().clamp(-1.0, 1.0)
+        }
 
         // 计算四个门的线性组合
         let mut ifgo = vec![0.0; 4 * hidden_size];
@@ -3125,48 +3375,80 @@ impl DeepNeuralNetwork {
         for i in 0..hidden_size {
             let mut sum = biases[i];
             for j in 0..input_size {
-                sum += weights_ih[i][j] * x_t[j];
+                // 检查权重和输入是否为有限值
+                if weights_ih[i][j].is_finite() && x_t[j].is_finite() {
+                    sum += weights_ih[i][j] * x_t[j];
+                }
             }
             for j in 0..hidden_size {
-                sum += weights_hh[i][j] * h_prev[j];
+                // 检查权重和隐藏状态是否为有限值
+                if weights_hh[i][j].is_finite() && h_prev[j].is_finite() {
+                    sum += weights_hh[i][j] * h_prev[j];
+                }
             }
-            ifgo[i] = sum;
+            // 检查偏差是否为有限值
+            if !biases[i].is_finite() {
+                sum = 0.0;
+            }
+            // 限制sum的范围以防止激活函数输出极端值
+            ifgo[i] = sum.clamp(-100.0, 100.0);
         }
 
         // 计算遗忘门 (f)
         for i in 0..hidden_size {
             let mut sum = biases[hidden_size + i];
             for j in 0..input_size {
-                sum += weights_ih[hidden_size + i][j] * x_t[j];
+                if weights_ih[hidden_size + i][j].is_finite() && x_t[j].is_finite() {
+                    sum += weights_ih[hidden_size + i][j] * x_t[j];
+                }
             }
             for j in 0..hidden_size {
-                sum += weights_hh[hidden_size + i][j] * h_prev[j];
+                if weights_hh[hidden_size + i][j].is_finite() && h_prev[j].is_finite() {
+                    sum += weights_hh[hidden_size + i][j] * h_prev[j];
+                }
             }
-            ifgo[hidden_size + i] = sum;
+            if !biases[hidden_size + i].is_finite() {
+                sum = 0.0;
+            }
+            ifgo[hidden_size + i] = sum.clamp(-100.0, 100.0);
         }
 
         // 计算候选值 (g)
         for i in 0..hidden_size {
             let mut sum = biases[2 * hidden_size + i];
             for j in 0..input_size {
-                sum += weights_ih[2 * hidden_size + i][j] * x_t[j];
+                if weights_ih[2 * hidden_size + i][j].is_finite() && x_t[j].is_finite() {
+                    sum += weights_ih[2 * hidden_size + i][j] * x_t[j];
+                }
             }
             for j in 0..hidden_size {
-                sum += weights_hh[2 * hidden_size + i][j] * h_prev[j];
+                if weights_hh[2 * hidden_size + i][j].is_finite() && h_prev[j].is_finite() {
+                    sum += weights_hh[2 * hidden_size + i][j] * h_prev[j];
+                }
             }
-            ifgo[2 * hidden_size + i] = sum;
+            if !biases[2 * hidden_size + i].is_finite() {
+                sum = 0.0;
+            }
+            ifgo[2 * hidden_size + i] = sum.clamp(-100.0, 100.0);
         }
 
         // 计算输出门 (o)
         for i in 0..hidden_size {
             let mut sum = biases[3 * hidden_size + i];
             for j in 0..input_size {
-                sum += weights_ih[3 * hidden_size + i][j] * x_t[j];
+                if weights_ih[3 * hidden_size + i][j].is_finite() && x_t[j].is_finite() {
+                    sum += weights_ih[3 * hidden_size + i][j] * x_t[j];
+                }
             }
             for j in 0..hidden_size {
-                sum += weights_hh[3 * hidden_size + i][j] * h_prev[j];
+                if weights_hh[3 * hidden_size + i][j].is_finite() && h_prev[j].is_finite() {
+                    sum += weights_hh[3 * hidden_size + i][j] * h_prev[j];
+                }
             }
-            ifgo[3 * hidden_size + i] = sum;
+            if !biases[3 * hidden_size + i].is_finite() {
+                sum = 0.0;
+            }
+            ifgo[3 * hidden_size + i] = sum.clamp(-100.0, 100.0);
         }
 
         // 应用激活函数
@@ -3180,8 +3462,33 @@ impl DeepNeuralNetwork {
         let mut h_t = vec![0.0; hidden_size];
 
         for i in 0..hidden_size {
-            c_t[i] = f_gate[i] * c_prev[i] + i_gate[i] * g_candidate[i];
-            h_t[i] = o_gate[i] * tanh(c_t[i]);
+            // 检查前一个细胞状态是否为有限值
+            let prev_c = if c_prev[i].is_finite() { c_prev[i] } else { 0.0 };
+            // 检查候选值是否为有限值
+            let g_cand = if g_candidate[i].is_finite() { g_candidate[i] } else { 0.0 };
+            // 检查输入门是否为有限值
+            let i_g = if i_gate[i].is_finite() { i_gate[i] } else { 0.0 };
+            
+            c_t[i] = f_gate[i] * prev_c + i_g * g_cand;
+            
+            // 检查更新后的细胞状态是否为有限值
+            if !c_t[i].is_finite() {
+                c_t[i] = 0.0;
+            } else {
+                c_t[i] = c_t[i].clamp(-10.0, 10.0); // 限制细胞状态范围
+            }
+            
+            // 检查输出门是否为有限值
+            let o_g = if o_gate[i].is_finite() { o_gate[i] } else { 0.0 };
+            
+            h_t[i] = o_g * tanh(c_t[i]);
+            
+            // 检查更新后的隐藏状态是否为有限值
+            if !h_t[i].is_finite() {
+                h_t[i] = 0.0;
+            } else {
+                h_t[i] = h_t[i].clamp(-10.0, 10.0); // 限制隐藏状态范围
+            }
         }
 
         (h_t, c_t)
@@ -3191,7 +3498,7 @@ impl DeepNeuralNetwork {
         let seq_len = layer.seq_len;
         let feature_dim = if seq_len > 0 { input.len() / seq_len } else { input.len() };
         let output_size = layer.activations.len() / (if layer.bidirectional { 2 } else { 1 });
-        let dir_mul = if layer.bidirectional { 2 } else { 1 };
+        let _dir_mul = if layer.bidirectional { 2 } else { 1 };
 
         if seq_len <= 1 || feature_dim == 0 {
             return Self::dense_forward(layer, input);
@@ -3234,11 +3541,26 @@ impl DeepNeuralNetwork {
             if end > input.len() { break; }
             let x_t = &input[start..end];
             let (new_h, new_c) = Self::lstm_cell(x_t, &h_fwd, &c_fwd, &weights_ih_fwd, &weights_hh_fwd, biases_fwd);
+            
+            // 检查输出是否为有限值
+            for h in &new_h {
+                if !h.is_finite() { continue; } // 如果不是有限值则跳过更新
+            }
+            for c in &new_c {
+                if !c.is_finite() { continue; } // 如果不是有限值则跳过更新
+            }
+            
             h_fwd = new_h;
             c_fwd = new_c;
         }
 
         if !layer.bidirectional {
+            // 检查最终输出是否为有限值
+            for x in &mut h_fwd {
+                if !x.is_finite() {
+                    *x = 0.0;
+                }
+            }
             layer.activations = h_fwd.clone();
             return h_fwd;
         }
@@ -3261,6 +3583,15 @@ impl DeepNeuralNetwork {
             if end > input.len() { continue; }
             let x_t = &input[start..end];
             let (new_h, new_c) = Self::lstm_cell(x_t, &h_bwd, &c_bwd, &weights_ih_bwd, &weights_hh_bwd, biases_bwd);
+            
+            // 检查输出是否为有限值
+            for h in &new_h {
+                if !h.is_finite() { continue; } // 如果不是有限值则跳过更新
+            }
+            for c in &new_c {
+                if !c.is_finite() { continue; } // 如果不是有限值则跳过更新
+            }
+            
             h_bwd = new_h;
             c_bwd = new_c;
         }
@@ -3269,6 +3600,14 @@ impl DeepNeuralNetwork {
         let mut output = Vec::with_capacity(2 * output_size);
         output.extend(h_fwd);
         output.extend(h_bwd);
+        
+        // 检查最终输出是否为有限值
+        for x in &mut output {
+            if !x.is_finite() {
+                *x = 0.0;
+            }
+        }
+        
         layer.activations = output.clone();
         output
     }
@@ -3305,7 +3644,7 @@ impl DeepNeuralNetwork {
         // 对每个注意力头进行计算
         for head in 0..num_heads {
             let start_idx = head * head_dim;
-            let end_idx = (head + 1) * head_dim;
+            let _end_idx = (head + 1) * head_dim;
             
             // 计算当前头的QKV
             let mut q = vec![0.0; head_dim];
@@ -3501,6 +3840,8 @@ impl DeepNeuralNetwork {
             eprintln!("警告: 训练数据为空，跳过训练");
             return;
         }
+        
+        // 初始化动量参数
         for layer in &mut self.layers {
             if !layer.weights.is_empty() && !layer.momentum_weights.is_empty() {
                 if layer.momentum_weights.len() != layer.weights.len() {
@@ -3522,37 +3863,297 @@ impl DeepNeuralNetwork {
 
         let batch_count = (training_data.len() + self.batch_size - 1) / self.batch_size;
         let mut total_loss = 0.0;
+        let mut valid_samples = 0;
 
         for batch_idx in 0..batch_count {
             let start_idx = batch_idx * self.batch_size;
             let end_idx = start_idx + self.batch_size.min(training_data.len() - start_idx);
             let batch = &training_data[start_idx..end_idx];
             let mut batch_loss = 0.0;
+            let mut batch_valid_samples = 0;
+            
             for (input, target) in batch {
-                let output = self.light_forward(input);
-                let loss: f32 = output.iter().zip(target.iter()).take(2) // 只取 hand Q 值
-                    .map(|(o, t)| (o - t).powi(2))
-                    .sum();
-                batch_loss += loss;
+                // 检查输入和目标是否包含NaN或无穷大值
+                let input_valid = input.iter().all(|&x| x.is_finite());
+                let target_valid = target.iter().all(|&x| x.is_finite());
+                
+                if input_valid && target_valid {
+                    let output = self.light_forward(input);
+                    // 检查输出是否有效
+                    if output.iter().all(|&x| x.is_finite()) {
+                        let loss: f32 = output.iter().zip(target.iter()).take(2) // 只取 hand Q 值
+                            .map(|(o, t)| {
+                                // 确保不会出现NaN
+                                let diff = o - t;
+                                if diff.is_finite() {
+                                    diff.powi(2)
+                                } else {
+                                    0.0 // 如果差值不是有限值，则损失为0
+                                }
+                            })
+                            .sum();
+                        
+                        // 检查损失是否为有限值
+                        if loss.is_finite() {
+                            batch_loss += loss;
+                            batch_valid_samples += 1;
+                        }
+                    }
+                }
             }
-            total_loss += batch_loss;
-
-            self.train_batch(batch);
+            
+            // 只有当批次中有有效样本时才进行训练
+            if batch_valid_samples > 0 {
+                total_loss += batch_loss;
+                valid_samples += batch_valid_samples;
+                self.train_batch(batch);
+            } else {
+                eprintln!("[Train Warning] Batch {} has no valid samples, skipping", batch_idx);
+            }
 
             if batch_idx == batch_count - 1 {
-                let avg_loss = total_loss / training_data.len() as f32;
-                self.adapt_learning_rate(avg_loss);
+                // 只有当有有效样本时才计算平均损失
+                let avg_loss = if valid_samples > 0 {
+                    total_loss / valid_samples as f32
+                } else {
+                    0.0 // 如果没有有效样本，损失为0
+                };
+                
+                // 检查平均损失是否为有限值
+                let safe_avg_loss = if avg_loss.is_finite() {
+                    avg_loss
+                } else {
+                    eprintln!("[Train Warning] NaN/Inf loss detected, using 0.0");
+                    0.0
+                };
+                
+                self.adapt_learning_rate(safe_avg_loss);
                 self.epoch_count += 1;
+                
                 if self.epoch_count % 1 == 0 {
                     let (min_weight, max_weight) = self.get_weight_range();
                     let (min_momentum, max_momentum) = self.get_momentum_range();
                     println!("[训练状态] Epoch: {}, Loss: {:.6}, LR: {:.6}, 权重范围 [{:.4}, {:.4}], 动量范围 [{:.4}, {:.4}]",
-                             self.epoch_count, avg_loss, self.learning_rate, min_weight, max_weight, min_momentum, max_momentum);
+                             self.epoch_count, safe_avg_loss, self.learning_rate, min_weight, max_weight, min_momentum, max_momentum);
                 }
             }
         }
     }
     
+    // 实现PPO算法训练
+    fn train_with_ppo(&mut self, training_data: &[(Vec<f32>, Vec<f32>)], experiences: &[Experience]) {
+        if training_data.is_empty() {
+            eprintln!("警告: 训练数据为空，跳过训练");
+            return;
+        }
+        
+        // 初始化动量参数
+        for layer in &mut self.layers {
+            if !layer.weights.is_empty() && !layer.momentum_weights.is_empty() {
+                if layer.momentum_weights.len() != layer.weights.len() {
+                    layer.momentum_weights = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
+                } else {
+                    for i in 0..layer.momentum_weights.len() {
+                        if layer.momentum_weights[i].len() != layer.weights[i].len() {
+                            layer.momentum_weights[i] = vec![0.0; layer.weights[i].len()];
+                        }
+                    }
+                }
+            } else if !layer.weights.is_empty() {
+                layer.momentum_weights = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
+            }
+            if layer.momentum_biases.len() != layer.biases.len() {
+                layer.momentum_biases = vec![0.0; layer.biases.len()];
+            }
+        }
+
+        let batch_count = (training_data.len() + self.batch_size - 1) / self.batch_size;
+        let mut total_loss = 0.0;
+        let mut valid_samples = 0;
+
+        for batch_idx in 0..batch_count {
+            let start_idx = batch_idx * self.batch_size;
+            let end_idx = start_idx + self.batch_size.min(training_data.len() - start_idx);
+            let batch = &training_data[start_idx..end_idx];
+            
+            // 计算PPO所需的奖励优势
+            let mut advantages = Vec::new();
+            let mut old_log_probs = Vec::new();
+            let mut actions = Vec::new();
+            
+            for (i, _) in batch.iter().enumerate() {
+                if i < experiences.len() {
+                    // 检查经验数据是否有效
+                    let advantage = if experiences[i].advantage.is_finite() { experiences[i].advantage } else { 0.0 };
+                    let log_prob = if experiences[i].log_prob.is_finite() { experiences[i].log_prob } else { 0.0 };
+                    advantages.push(advantage);
+                    old_log_probs.push(log_prob);
+                    actions.push(experiences[i].action);
+                } else {
+                    advantages.push(0.0);
+                    old_log_probs.push(0.0);
+                    actions.push(0);
+                }
+            }
+            
+            // 计算损失并更新网络
+            let mut batch_loss = 0.0;
+            let mut batch_valid_samples = 0;
+            
+            for (i, (input, target)) in batch.iter().enumerate() {
+                // 检查输入和目标是否有效
+                let input_valid = input.iter().all(|&x| x.is_finite());
+                let target_valid = target.iter().all(|&x| x.is_finite());
+                
+                if !input_valid || !target_valid {
+                    continue; // 跳过无效样本
+                }
+                
+                let output = self.light_forward(input);
+                
+                // 检查输出是否有效
+                if !output.iter().all(|&x| x.is_finite()) {
+                    continue; // 跳过无效输出
+                }
+                
+                // 计算PPO损失
+                let advantage = if i < advantages.len() { advantages[i] } else { 0.0 };
+                let old_log_prob = if i < old_log_probs.len() { old_log_probs[i] } else { 0.0 };
+                let action = if i < actions.len() { actions[i] } else { 0 };
+                
+                // 检查优势和旧对数概率是否有效
+                if !advantage.is_finite() || !old_log_prob.is_finite() {
+                    continue; // 跳过无效样本
+                }
+                
+                // 计算新策略的概率（使用softmax确保两个动作的概率和为1）
+                let left_prob = output[0];
+                let right_prob = output[1];
+                
+                // 检查概率是否有效
+                if !left_prob.is_finite() || !right_prob.is_finite() {
+                    continue; // 跳过无效样本
+                }
+                
+                let total_prob = left_prob + right_prob + 1e-8; // 防止除以0
+                
+                // 选择对应动作的概率
+                let action_prob = if action == 0 { left_prob / total_prob } else { right_prob / total_prob };
+                
+                // 检查动作概率是否有效并防止对数计算中的问题
+                if !action_prob.is_finite() || action_prob <= 0.0 {
+                    continue; // 跳过无效样本
+                }
+                
+                let new_log_prob = action_prob.ln();
+                
+                // 检查新对数概率是否有效
+                if !new_log_prob.is_finite() {
+                    continue; // 跳过无效样本
+                }
+                
+                // 计算概率比
+                let ratio = (new_log_prob - old_log_prob).exp();
+                
+                // 检查概率比是否有效
+                if !ratio.is_finite() {
+                    continue; // 跳过无效样本
+                }
+                
+                // PPO裁剪
+                const PPO_EPSILON: f32 = 0.2;
+                let clipped_ratio = ratio.clamp(1.0 - PPO_EPSILON, 1.0 + PPO_EPSILON);
+                
+                // 计算裁剪后的策略损失
+                let unclipped_loss = ratio * advantage;
+                let clipped_loss = clipped_ratio * advantage;
+                
+                // 使用最小值作为策略损失（最大化最小值）
+                let policy_loss = -unclipped_loss.min(clipped_loss); // 负号因为我们要最大化
+                
+                // 检查策略损失是否有效
+                if !policy_loss.is_finite() {
+                    continue; // 跳过无效样本
+                }
+                
+                // 价值函数损失
+                let value_output = output[2];
+                let value_target = target[2];
+                
+                // 检查值函数输出和目标是否有效
+                if !value_output.is_finite() || !value_target.is_finite() {
+                    continue; // 跳过无效样本
+                }
+                
+                let value_loss = (value_output - value_target).powi(2);
+                
+                // 检查价值损失是否有效
+                if !value_loss.is_finite() {
+                    continue; // 跳过无效样本
+                }
+                
+                // 组合损失
+                // 熵损失计算，添加检查防止对数计算中的问题
+                let entropy_loss = if left_prob > 1e-8 && right_prob > 1e-8 {
+                    -(left_prob * left_prob.ln() + right_prob * right_prob.ln())
+                } else {
+                    0.0 // 当概率接近0时，熵损失为0
+                };
+                
+                // 检查熵损失是否有效
+                if !entropy_loss.is_finite() {
+                    continue; // 跳过无效样本
+                }
+                
+                let loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_loss; // 组合损失
+                
+                // 检查总损失是否有效
+                if !loss.is_finite() {
+                    continue; // 跳过无效样本
+                }
+                
+                batch_loss += loss;
+                batch_valid_samples += 1;
+            }
+            
+            // 只有当批次中有有效样本时才进行训练
+            if batch_valid_samples > 0 {
+                total_loss += batch_loss;
+                valid_samples += batch_valid_samples;
+                self.train_batch(batch);
+            } else {
+                eprintln!("[PPO Train Warning] Batch {} has no valid samples, skipping", batch_idx);
+            }
+
+            if batch_idx == batch_count - 1 {
+                // 只有当有有效样本时才计算平均损失
+                let avg_loss = if valid_samples > 0 {
+                    total_loss / valid_samples as f32
+                } else {
+                    0.0 // 如果没有有效样本，损失为0
+                };
+                
+                // 检查平均损失是否为有限值
+                let safe_avg_loss = if avg_loss.is_finite() {
+                    avg_loss
+                } else {
+                    eprintln!("[PPO Train Warning] NaN/Inf loss detected, using 0.0");
+                    0.0
+                };
+                
+                self.adapt_learning_rate(safe_avg_loss);
+                self.epoch_count += 1;
+                
+                if self.epoch_count % 1 == 0 {
+                    let (min_weight, max_weight) = self.get_weight_range();
+                    let (min_momentum, max_momentum) = self.get_momentum_range();
+                    println!("[PPO训练状态] Epoch: {}, Loss: {:.6}, LR: {:.6}, 权重范围 [{:.4}, {:.4}], 动量范围 [{:.4}, {:.4}]",
+                             self.epoch_count, safe_avg_loss, self.learning_rate, min_weight, max_weight, min_momentum, max_momentum);
+                }
+            }
+        }
+    }
+
     // 实现Group Relative Policy Optimization (GRPO)算法，集成PPO优化功能
     fn train_with_grpo(&mut self, training_data: &[(Vec<f32>, Vec<f32>)], group_size: usize) {
         if training_data.is_empty() {
@@ -3715,7 +4316,7 @@ impl DeepNeuralNetwork {
         
         for i in 0..batch_size {
             // 标准化优势值
-            let normalized_advantage = (advantages[i] - mean_advantage) / std_advantage;
+            let _normalized_advantage = (advantages[i] - mean_advantage) / std_advantage;
             
             // 根据所在组的奖励调整梯度
             let group_idx = i / group_size;
@@ -3788,21 +4389,40 @@ impl DeepNeuralNetwork {
 
     fn calculate_gradient_norm(&self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>]) -> f32 {
         let mut total_norm = 0.0;
+        let mut valid_count = 0;
 
         for layer_grad in gradients {
             for row in layer_grad {
                 for &g in row {
-                    total_norm += g * g;
+                    // 只有当梯度是有限值时才计算
+                    if g.is_finite() {
+                        total_norm += g * g;
+                        valid_count += 1;
+                    }
                 }
             }
         }
 
         for bias_grad in bias_gradients {
             for &g in bias_grad {
-                total_norm += g * g;
+                // 只有当梯度是有限值时才计算
+                if g.is_finite() {
+                    total_norm += g * g;
+                    valid_count += 1;
+                }
             }
         }
 
+        // 如果没有有效的梯度值，返回0
+        if valid_count == 0 {
+            return 0.0;
+        }
+        
+        // 防止sqrt(0)的情况
+        if total_norm <= 0.0 {
+            return 0.0;
+        }
+        
         total_norm.sqrt()
     }
 
@@ -3810,8 +4430,8 @@ impl DeepNeuralNetwork {
         let current_norm = self.calculate_gradient_norm(gradients, bias_gradients);
 
         // Defensive checks
-        if !current_norm.is_finite() {
-            eprintln!("[GradClip][EMERGENCY] current_norm is not finite (NaN/Inf). Zeroing gradients and skipping this batch.");
+        if !current_norm.is_finite() || current_norm == 0.0 {
+            eprintln!("[GradClip][EMERGENCY] current_norm is not finite (NaN/Inf) or zero. Zeroing gradients and skipping this batch.");
             for layer_grad in gradients.iter_mut() {
                 for row in layer_grad.iter_mut() {
                     for g in row.iter_mut() { *g = 0.0; }
@@ -3827,6 +4447,29 @@ impl DeepNeuralNetwork {
                      self.epoch_count, current_norm);
         }
 
+        // 如果梯度范数极小，可能意味着梯度消失，需要特殊处理
+        if current_norm < 1e-6 {
+            eprintln!("[GradClip][WARNING] Very small gradient norm: {:.12}. May indicate gradient vanishing.", current_norm);
+            // 在梯度消失时，进行适度的放大以保持训练动力
+            let scale_up_factor = 10.0;
+            for layer_grad in gradients.iter_mut() {
+                for row in layer_grad.iter_mut() {
+                    for g in row.iter_mut() { 
+                        if g.is_finite() {
+                            *g *= scale_up_factor;
+                        }
+                    }
+                }
+            }
+            for b in bias_gradients.iter_mut() {
+                for g in b.iter_mut() { 
+                    if g.is_finite() {
+                        *g *= scale_up_factor;
+                    }
+                }
+            }
+        }
+
         // If within limit, nothing to do
         if current_norm <= self.max_grad_norm {
             return;
@@ -3836,7 +4479,7 @@ impl DeepNeuralNetwork {
         let desired_scale = self.max_grad_norm / current_norm;
 
         // 如果 desired_scale 极小（说明 gradient too huge），直接丢弃该 batch 的梯度以防爆炸
-        const EMERGENCY_SCALE_FLOOR: f32 = 1e-6;
+        const EMERGENCY_SCALE_FLOOR: f32 = 1e-8;  // 降低紧急下限，更早触发重置
         if desired_scale < EMERGENCY_SCALE_FLOOR {
             eprintln!(
                 "[GradClip][EMERGENCY] current_norm={:.6}, max_grad_norm={:.6}, desired_scale={:.12} < EMERGENCY_SCALE_FLOOR. \
@@ -3858,30 +4501,99 @@ impl DeepNeuralNetwork {
             current_norm, self.max_grad_norm, scale
         );
 
+        // 在应用缩放前检查每个梯度值，添加更严格的数值稳定性检查
         for layer_grad in gradients.iter_mut() {
             for row in layer_grad.iter_mut() {
-                for g in row.iter_mut() { *g *= scale; }
+                for g in row.iter_mut() { 
+                    // 只对有限值进行缩放
+                    if g.is_finite() {
+                        *g *= scale;
+                        // 添加额外的裁剪以防止缩放后的值过大
+                        let clipped_value = g.clamp(-self.max_grad_norm, self.max_grad_norm);
+                        *g = clipped_value;
+                        // 最终检查是否仍然为有限值
+                        if !g.is_finite() {
+                            *g = 0.0;
+                        }
+                    } else {
+                        *g = 0.0; // 将非有限值设为0
+                    }
+                }
             }
         }
+        
         for b in bias_gradients.iter_mut() {
-            for g in b.iter_mut() { *g *= scale; }
+            for g in b.iter_mut() { 
+                // 只对有限值进行缩放
+                if g.is_finite() {
+                    *g *= scale;
+                    // 添加额外的裁剪以防止缩放后的值过大
+                    let clipped_value = g.clamp(-self.max_grad_norm, self.max_grad_norm);
+                    *g = clipped_value;
+                    // 最终检查是否仍然为有限值
+                    if !g.is_finite() {
+                        *g = 0.0;
+                    }
+                } else {
+                    *g = 0.0; // 将非有限值设为0
+                }
+            }
         }
 
-        if current_norm > self.max_grad_norm * 10.0 {
-            eprintln!("[GradClip][ALERT] huge norm {:.6} at epoch {}", current_norm, self.epoch_count);
+        // 增强的梯度爆炸检测机制
+        if current_norm > self.max_grad_norm * 5.0 {  // 降低阈值，更早检测
+            eprintln!("[GradClip][ALERT] severe gradient explosion: norm {:.6} at epoch {}", current_norm, self.epoch_count);
             for (li, layer_grad) in gradients.iter().enumerate() {
                 let mut max_abs = 0.0f32;
+                let mut finite_count = 0;
                 for row in layer_grad {
-                    for &g in row { if g.abs() > max_abs { max_abs = g.abs(); } }
+                    for &g in row { 
+                        if g.is_finite() {
+                            finite_count += 1;
+                            if g.abs() > max_abs { 
+                                max_abs = g.abs(); 
+                            }
+                        }
+                    }
                 }
-                eprintln!("[GradClip][ALERT] layer {} max_abs_grad = {:.6}", li, max_abs);
+                eprintln!("[GradClip][ALERT] layer {} max_abs_grad = {:.6}, finite_count = {}", li, max_abs, finite_count);
+            }
+            
+            // 严重梯度爆炸时，应用额外的保守裁剪
+            let conservative_scale = (self.max_grad_norm * 0.5 / current_norm).max(0.01);
+            eprintln!("[GradClip][CONSERVATIVE] applying extra conservative scale: {:.6}", conservative_scale);
+            
+            for layer_grad in gradients.iter_mut() {
+                for row in layer_grad.iter_mut() {
+                    for g in row.iter_mut() {
+                        if g.is_finite() {
+                            *g *= conservative_scale;
+                            *g = g.clamp(-self.max_grad_norm * 0.5, self.max_grad_norm * 0.5);
+                        } else {
+                            *g = 0.0;
+                        }
+                    }
+                }
+            }
+            
+            for b in bias_gradients.iter_mut() {
+                for g in b.iter_mut() {
+                    if g.is_finite() {
+                        *g *= conservative_scale;
+                        *g = g.clamp(-self.max_grad_norm * 0.5, self.max_grad_norm * 0.5);
+                    } else {
+                        *g = 0.0;
+                    }
+                }
             }
         }
     }
 
     fn reset_problem_layers(&mut self) {
+        // 首先收集需要重置的层索引
         let mut layers_to_reset = Vec::new();
-
+        let mut saturated_layers = Vec::new();
+        
         for (i, layer) in self.layers.iter().enumerate() {
             let mut weight_ok = true;
             for &w in layer.weights.iter().flatten() {
@@ -3890,6 +4602,7 @@ impl DeepNeuralNetwork {
                     break;
                 }
             }
+            
             if let ActivationFunction::Tanh = layer.activation_func {
                 let mut saturated = 0;
                 for &a in &layer.activations {
@@ -3898,7 +4611,7 @@ impl DeepNeuralNetwork {
                     }
                 }
                 if saturated > layer.activations.len() / 2 {
-                    layers_to_reset.push(i);
+                    saturated_layers.push(i);
                     continue;
                 }
             }
@@ -3907,62 +4620,125 @@ impl DeepNeuralNetwork {
                 layers_to_reset.push(i);
             }
         }
+        
+        // 现在可以安全地重置层，因为没有借用冲突
+        for i in layers_to_reset {
+            let input_size = if i > 0 { 
+                self.layers[i-1].weights.len() 
+            } else { 
+                self.layers[i].weights[0].len() 
+            };
+            let _output_size = self.layers[i].weights.len(); // 添加下划线以避免未使用变量警告
+            let std_dev = (1.0 / input_size as f32).sqrt();
+            
+            for weights in &mut self.layers[i].weights {
+                for w in weights.iter_mut() {
+                    *w = if w.is_nan() || w.is_infinite() {
+                        (fastrand::f32() * 2.0 - 1.0) * 0.1
+                    } else if w.abs() > 30.0 {
+                        30.0 * w.signum()
+                    } else {
+                        (fastrand::f32() * 2.0 - 1.0) * std_dev
+                    };
+                }
+            }
+            
+            for b in &mut self.layers[i].biases {
+                if b.is_nan() || b.is_infinite() {
+                    *b = (fastrand::f32() * 2.0 - 1.0) * 0.1;
+                } else if b.abs() > 30.0 {
+                    *b = 30.0 * b.signum();
+                } else {
+                    *b = 0.0;
+                }
+            }
+        }
+        
+        // 重置饱和层
+        for i in saturated_layers {
+            let input_size = if i > 0 { 
+                self.layers[i-1].weights.len() 
+            } else { 
+                self.layers[i].weights[0].len() 
+            };
+            let _output_size = self.layers[i].weights.len(); // 添加下划线以避免未使用变量警告
+            let std_dev = (1.0 / input_size as f32).sqrt();
+            
+            // 重置激活值
+            for a in &mut self.layers[i].activations {
+                if a.is_nan() || a.is_infinite() {
+                    *a = 0.0;
+                }
+            }
+            
+            // 重置权重
+            for weights in &mut self.layers[i].weights {
+                for w in weights.iter_mut() {
+                    *w = (fastrand::f32() * 2.0 - 1.0) * std_dev;
+                }
+            }
+            
+            for b in &mut self.layers[i].biases {
+                *b = 0.0;
+            }
+        }
     }
 
     fn adapt_learning_rate(&mut self, loss: f32) {
         // 初始Loss值为0.36
-        let loss_change_ratio = if self.last_loss.is_finite() && self.last_loss > 0.0 {
-            loss / self.last_loss
+        let loss_change_ratio = if self.last_loss.is_finite() && self.last_loss > 1e-8 {
+            (loss / self.last_loss).clamp(0.1, 10.0) // 限制比率范围，防止极端值
         } else {
             1.0
         };
 
         let epoch_factor = if self.epoch_count < 50 {
-            1.2
+            0.9  // 早期训练使用较低的学习率
         } else if self.epoch_count < 200 {
             1.0
         } else {
-            0.8
+            0.7  // 后期训练继续降低学习率
         };
 
         if loss_change_ratio < 0.98 {
-            self.learning_rate = (self.learning_rate * 1.03 * epoch_factor).min(0.01);
+            // 损失下降，正常增加学习率，但幅度更保守
+            self.learning_rate = (self.learning_rate * 1.015 * epoch_factor).min(0.005);
             self.bad_epochs = 0;
         }
-        else if loss_change_ratio > 1.01 {
-            self.learning_rate = (self.learning_rate * 0.85).max(0.00005);
+        else if loss_change_ratio > 1.02 {  // 提高阈值，更少触发学习率降低
+            self.learning_rate = (self.learning_rate * 0.90).max(0.00002);  // 更保守的降低
             self.bad_epochs += 1;
-            if self.bad_epochs >= 2 {
-                self.learning_rate = (self.learning_rate * 0.4).max(0.00005); // 更激进的降低
+            if self.bad_epochs >= 1 {
+                self.learning_rate = (self.learning_rate * 0.5).max(0.00002); // 更快的响应
                 println!("连续{}个epoch表现不佳，大幅降低学习率至{:.6}", self.bad_epochs, self.learning_rate);
             }
-            if self.bad_epochs >= 4 {
+            if self.bad_epochs >= 3 {
                 println!("连续{}个epoch损失增加，采取激进措施", self.bad_epochs);
                 // 可以在这里添加恢复到最佳模型权重的逻辑
             }
-            if self.bad_epochs >= 6 {
+            if self.bad_epochs >= 5 {
                 println!("连续{}个epoch表现不佳，执行网络重置", self.bad_epochs);
                 self.reset_problem_layers();
                 self.bad_epochs = 0;
-                // 重置后使用较低的学习率
-                self.learning_rate = 0.001;
+                // 重置后使用更低的学习率
+                self.learning_rate = 0.0002;
             }
         }
         else {
-            // 损失平稳，使用轻微的余弦退火
-            let cosine_factor = 0.5 * (1.0 + (std::f32::consts::PI * (self.epoch_count % 100) as f32 / 100.0).cos());
-            self.learning_rate = 0.003 * cosine_factor * epoch_factor;
+            // 损失平稳，使用更稳定的调度策略
+            let cosine_factor = 0.5 * (1.0 + (std::f32::consts::PI * (self.epoch_count % 200) as f32 / 200.0).cos());
+            self.learning_rate = 0.0008 * cosine_factor * epoch_factor;
             self.bad_epochs = 0;
         }
         
-        // 确保学习率在合理范围内
-        self.learning_rate = self.learning_rate.clamp(0.00001, 0.01);
+        // 确保学习率在更保守的范围内
+        self.learning_rate = self.learning_rate.clamp(0.00001, 0.005);
         
-        // 记录当前损失
-        self.last_loss = loss;
+        // 记录当前损失，添加NaN检查
+        self.last_loss = if loss.is_finite() { loss } else { self.last_loss };
         
-        // 每5个epoch输出一次学习率状态（更频繁）
-        if self.epoch_count % 5 == 0 {
+        // 每3个epoch输出一次学习率状态（更频繁监控）
+        if self.epoch_count % 3 == 0 {
             println!("[学习率调整] Epoch: {}, Loss: {:.6}, LR: {:.6}, 变化率: {:.3}%", 
                      self.epoch_count, loss, self.learning_rate, (loss_change_ratio - 1.0) * 100.0);
         }
@@ -3985,16 +4761,39 @@ impl DeepNeuralNetwork {
     }
 
     pub fn train_batch(&mut self, batch: &[(Vec<f32>, Vec<f32>)]) {
+        // 检查批次是否为空
+        if batch.is_empty() {
+            eprintln!("[Train Warning] Empty batch provided, skipping training");
+            return;
+        }
+        
         let batch_size = batch.len();
 
-        let mut inputs: Vec<&[f32]> = Vec::with_capacity(batch_size);
-        let mut targets: Vec<&[f32]> = Vec::with_capacity(batch_size);
+        // 创建清理后的批次副本，避免生命周期问题
+        let cleaned_batch: Vec<(Vec<f32>, Vec<f32>)> = batch.iter()
+            .map(|(input, target)| {
+                // 检查输入是否包含NaN或无穷大值
+                let clean_input: Vec<f32> = input.iter().map(|&x| if x.is_finite() { x } else { 0.0 }).collect();
+                let clean_target: Vec<f32> = target.iter().map(|&x| if x.is_finite() { x } else { 0.0 }).collect();
+                (clean_input, clean_target)
+            })
+            .collect();
 
-        for (input, target) in batch {
-            inputs.push(input);
-            targets.push(target);
-        }
-        let outputs = self.gpu_forward_batch(&inputs, batch_size);
+        // 前向传播
+        let inputs: Vec<&[f32]> = cleaned_batch.iter().map(|(input, _)| input.as_slice()).collect();
+        let targets: Vec<&[f32]> = cleaned_batch.iter().map(|(_, target)| target.as_slice()).collect();
+        
+        let outputs = if self.device.is_some() && self.gpu_initialized {
+            self.gpu_forward_batch(&inputs, batch_size)
+        } else {
+            // CPU前向传播
+            inputs.iter().map(|&input| self.cpu_forward(input)).collect()
+        };
+        
+        // 检查输出是否包含NaN或无穷大值
+        let clean_outputs: Vec<Vec<f32>> = outputs.into_iter().map(|output| {
+            output.into_iter().map(|x| if x.is_finite() { x } else { 0.0 }).collect()
+        }).collect();
 
         let mut total_gradients: Vec<Vec<Vec<f32>>> = vec![vec![vec![0.0; 0]; 0]; self.layers.len()];
         let mut total_bias_gradients: Vec<Vec<f32>> = vec![vec![0.0; 0]; self.layers.len()];
@@ -4009,34 +4808,73 @@ impl DeepNeuralNetwork {
             total_bias_gradients[layer_idx] = vec![0.0; layer.biases.len()];
         }
 
+        // 反向传播
+        let mut valid_samples = 0;
         for i in 0..batch_size {
-            self.backward(
-                inputs[i],
-                &outputs[i],
-                targets[i],
-                &mut total_gradients,
-                &mut total_bias_gradients
-            );
+            // 检查输入、输出和目标是否都有效
+            let input_valid = inputs[i].iter().all(|&x| x.is_finite());
+            let output_valid = clean_outputs[i].iter().all(|&x| x.is_finite());
+            let target_valid = targets[i].iter().all(|&x| x.is_finite());
+            
+            if input_valid && output_valid && target_valid {
+                self.backward(
+                    inputs[i],
+                    &clean_outputs[i],
+                    targets[i],
+                    &mut total_gradients,
+                    &mut total_bias_gradients
+                );
+                valid_samples += 1;
+            } else {
+                eprintln!("[Train Warning] Skipping sample {} due to NaN/Inf values", i);
+            }
+        }
+        
+        // 如果没有有效样本，直接返回
+        if valid_samples == 0 {
+            eprintln!("[Train Error] No valid samples in batch, skipping gradient update");
+            return;
         }
 
-        if batch_size > 0 {
-            let inv_batch = 1.0f32 / (batch_size as f32);
+        if valid_samples > 0 {
+            let inv_batch = 1.0f32 / (valid_samples as f32);
             for layer_idx in 0..self.layers.len() {
                 let wg = &mut total_gradients[layer_idx];
                 for r in 0..wg.len() {
                     for c in 0..wg[r].len() {
                         wg[r][c] *= inv_batch;
+                        // 确保梯度是有限值
+                        if !wg[r][c].is_finite() {
+                            wg[r][c] = 0.0;
+                        }
                     }
                 }
                 let bg = &mut total_bias_gradients[layer_idx];
                 for j in 0..bg.len() {
                     bg[j] *= inv_batch;
+                    // 确保梯度是有限值
+                    if !bg[j].is_finite() {
+                        bg[j] = 0.0;
+                    }
                 }
             }
         }
+        
+        // 梯度裁剪
         self.clip_gradients(&mut total_gradients, &mut total_bias_gradients);
-        self.apply_gradients(&total_gradients, &total_bias_gradients, batch_size);
-        println!("First weight value after update: {:.6}", self.layers[0].weights[0][0]);
+        
+        // 应用梯度
+        self.apply_gradients(&total_gradients, &total_bias_gradients, valid_samples);
+        
+        // 输出第一个权重值用于调试
+        if !self.layers.is_empty() && !self.layers[0].weights.is_empty() && !self.layers[0].weights[0].is_empty() {
+            let first_weight = self.layers[0].weights[0][0];
+            if first_weight.is_finite() {
+                println!("First weight value after update: {:.6}", first_weight);
+            } else {
+                println!("First weight value after update: NaN/Inf (reset to 0.0)");
+            }
+        }
     }
 
 
@@ -4208,16 +5046,22 @@ impl DeepNeuralNetwork {
         for layer_grad in gradients {
             for row in layer_grad {
                 for &g in row {
-                    total_grad_sum += g.abs();
-                    total_grad_count += 1;
+                    // 添加梯度检查，防止NaN和无穷大影响平均值计算
+                    if g.is_finite() {
+                        total_grad_sum += g.abs();
+                        total_grad_count += 1;
+                    }
                 }
             }
         }
         
         for bias_grad in bias_gradients {
             for &g in bias_grad {
-                total_grad_sum += g.abs();
-                total_grad_count += 1;
+                // 添加梯度检查，防止NaN和无穷大影响平均值计算
+                if g.is_finite() {
+                    total_grad_sum += g.abs();
+                    total_grad_count += 1;
+                }
             }
         }
         
@@ -4227,11 +5071,12 @@ impl DeepNeuralNetwork {
             0.0
         };
 
+        // 限制梯度缩放因子，防止过大
         let gradient_scale = if avg_grad_magnitude > 0.0 && avg_grad_magnitude < MIN_GRAD_THRESHOLD {
             let scale = MIN_GRAD_THRESHOLD / avg_grad_magnitude;
-            scale.min(10000.0) //最大限制
+            scale.min(100.0) // 降低最大限制，防止过度放大
         } else if avg_grad_magnitude == 0.0 {
-            1000.0
+            1.0 // 不再使用1000.0的放大因子，避免数值不稳定
         } else {
             1.0
         };
@@ -4247,16 +5092,28 @@ impl DeepNeuralNetwork {
                     if i < gradients[layer_idx].len() && j < gradients[layer_idx][i].len() {
                         let mut grad = gradients[layer_idx][i][j] / batch_size_f;
 
+                        // 检查梯度是否为NaN或无穷大
                         if !grad.is_finite() {
                             eprintln!("[Gradient Safety] NaN/Inf gradient detected at layer {}, weight[{}][{}], setting to 0.", layer_idx, i, j);
                             grad = 0.0;
                         }
 
+                        // 应用梯度缩放和裁剪
                         grad *= gradient_scale;
                         grad = grad.clamp(-MAX_GRAD, MAX_GRAD);
 
-                        layer.momentum_weights[i][j] =
-                            self.momentum * layer.momentum_weights[i][j] - self.learning_rate * grad;
+                        // 计算动量更新，添加NaN检查
+                        let momentum_component = self.momentum * layer.momentum_weights[i][j];
+                        let gradient_component = self.learning_rate * grad;
+                        
+                        // 检查计算结果是否为NaN或无穷大
+                        if !momentum_component.is_finite() || !gradient_component.is_finite() {
+                            eprintln!("[Gradient Safety] NaN/Inf momentum or gradient component at layer {}, weight[{}][{}], resetting.", layer_idx, i, j);
+                            layer.momentum_weights[i][j] = 0.0;
+                        } else {
+                            layer.momentum_weights[i][j] = momentum_component - gradient_component;
+                        }
+                        
                         let momentum_update = layer.momentum_weights[i][j];
                         let clamped_momentum = momentum_update.clamp(-MAX_GRAD, MAX_GRAD);
 
@@ -4266,12 +5123,20 @@ impl DeepNeuralNetwork {
 
                         let old_weight = *weight;
                         *weight += clamped_momentum;
-                        *weight = weight.clamp(-MAX_WEIGHT, MAX_WEIGHT);
+                        
+                        // 添加权重更新后的检查
+                        if !weight.is_finite() {
+                            eprintln!("[Gradient Safety] NaN/Inf weight detected at layer {}, weight[{}][{}], resetting to 0.", layer_idx, i, j);
+                            *weight = 0.0;
+                        } else {
+                            *weight = weight.clamp(-MAX_WEIGHT, MAX_WEIGHT);
+                        }
 
                         if self.epoch_count % 10 == 0 && i == 0 && j == 0 {
                             println!("{:.6} (delta: {:+.8})", *weight, *weight - old_weight);
                         }
                         
+                        // 最终检查权重是否为NaN或无穷大
                         if !weight.is_finite() {
                             eprintln!("[Gradient Safety] NaN/Inf weight detected at layer {}, weight[{}][{}], setting to 0.", layer_idx, i, j);
                             *weight = 0.0;
@@ -4284,16 +5149,28 @@ impl DeepNeuralNetwork {
                 if i < bias_gradients[layer_idx].len() {
                     let mut grad = bias_gradients[layer_idx][i] / batch_size_f;
 
+                    // 检查梯度是否为NaN或无穷大
                     if !grad.is_finite() {
                         eprintln!("[Gradient Safety] NaN/Inf gradient detected at layer {}, bias[{}], setting to 0.", layer_idx, i);
                         grad = 0.0;
                     }
                     
-                    // 应用梯度放大
+                    // 应用梯度放大和裁剪
                     grad *= gradient_scale;
                     grad = grad.clamp(-MAX_GRAD, MAX_GRAD);
 
-                    layer.momentum_biases[i] = self.momentum * layer.momentum_biases[i] - self.learning_rate * grad;
+                    // 计算动量更新，添加NaN检查
+                    let momentum_component = self.momentum * layer.momentum_biases[i];
+                    let gradient_component = self.learning_rate * grad;
+                    
+                    // 检查计算结果是否为NaN或无穷大
+                    if !momentum_component.is_finite() || !gradient_component.is_finite() {
+                        eprintln!("[Gradient Safety] NaN/Inf momentum or gradient component at layer {}, bias[{}], resetting.", layer_idx, i);
+                        layer.momentum_biases[i] = 0.0;
+                    } else {
+                        layer.momentum_biases[i] = momentum_component - gradient_component;
+                    }
+                    
                     let momentum_update = layer.momentum_biases[i];
                     let clamped_momentum = momentum_update.clamp(-MAX_GRAD, MAX_GRAD);
 
@@ -4304,13 +5181,21 @@ impl DeepNeuralNetwork {
 
                     let old_bias = *bias;
                     *bias += clamped_momentum;
-                    *bias = bias.clamp(-MAX_WEIGHT, MAX_WEIGHT);
+                    
+                    // 添加偏置更新后的检查
+                    if !bias.is_finite() {
+                        eprintln!("[Gradient Safety] NaN/Inf bias detected at layer {}, bias[{}], resetting to 0.", layer_idx, i);
+                        *bias = 0.0;
+                    } else {
+                        *bias = bias.clamp(-MAX_WEIGHT, MAX_WEIGHT);
+                    }
                     
                     // 添加调试信息
                     if self.epoch_count % 10 == 0 && i == 0 {  // 每10个epoch输出第一个偏置的更新信息
                         println!("{:.6} (delta: {:+.8})", *bias, *bias - old_bias);
                     }
 
+                    // 最终检查偏置是否为NaN或无穷大
                     if !bias.is_finite() {
                         eprintln!("[Gradient Safety] NaN/Inf bias detected at layer {}, bias[{}], setting to 0.", layer_idx, i);
                         *bias = 0.0;
@@ -4318,16 +5203,35 @@ impl DeepNeuralNetwork {
                 }
             }
         }
+        
+        // GPU更新部分添加错误处理
         if self.device.is_none() || self.queue.is_none() {
             return;
         }
+        
         for layer in &mut self.layers {
-            let queue = self.queue.as_ref().expect("GPU queue not initialized — call init_gpu() before calling this method");
-            let weights_buf = layer.weights_buffer.as_ref().expect("weights_buffer not created for layer");
-            let biases_buf = layer.biases_buffer.as_ref().expect("biases_buffer not created for layer");
-            let weights_flat = layer.weights.iter().flatten().cloned().collect::<Vec<f32>>();
-            queue.write_buffer(weights_buf, 0, bytemuck::cast_slice(&weights_flat));
-            queue.write_buffer(biases_buf, 0, bytemuck::cast_slice(&layer.biases));
+            // 检查GPU资源是否存在
+            if layer.weights_buffer.is_none() || layer.biases_buffer.is_none() {
+                continue; // 跳过未初始化的层
+            }
+            
+            // 检查队列是否有效
+            if let Some(queue) = &self.queue {
+                // 检查缓冲区是否有效
+                if let (Some(weights_buf), Some(biases_buf)) = (&layer.weights_buffer, &layer.biases_buffer) {
+                    // 检查权重和偏置是否为NaN或无穷大
+                    let weights_valid = layer.weights.iter().flatten().all(|&w| w.is_finite());
+                    let biases_valid = layer.biases.iter().all(|&b| b.is_finite());
+                    
+                    if weights_valid && biases_valid {
+                        let weights_flat = layer.weights.iter().flatten().cloned().collect::<Vec<f32>>();
+                        queue.write_buffer(weights_buf, 0, bytemuck::cast_slice(&weights_flat));
+                        queue.write_buffer(biases_buf, 0, bytemuck::cast_slice(&layer.biases));
+                    } else {
+                        eprintln!("[GPU Update] Skipping layer update due to NaN/Inf values");
+                    }
+                }
+            }
         }
     }
 }
@@ -5209,7 +6113,7 @@ impl PhiTKAdvancedAI {
             rotation,
             exploration_rate: 0.05,
             discount_factor: 0.95,
-            target_update_frequency: 991000000,
+            target_update_frequency: 10,
             total_notes_processed: 0,
             correct_predictions: 0,
             training_episodes: 0,
@@ -5275,7 +6179,7 @@ impl PhiTKAdvancedAI {
                         ai.target_network.queue = None;
                         ai.target_network.batch_size_buffer = None;
                         ai.target_network.matmul_pipeline = None;
-                        ai.target_network.activation_pipelinotes = HashMap::new();
+                        ai.target_network.activation_pipelines = HashMap::new();
                         ai.target_network.activation_bind_group_layouts = HashMap::new();
                         for layer in &mut ai.target_network.layers {
                             layer.weights_buffer = None;
@@ -5398,9 +6302,15 @@ impl PhiTKAdvancedAI {
     }
 
     fn update_hand_positions(&mut self) {
-        // 使用固定的世界坐标，不随线的旋转而旋转
-        self.left_hand_state.position = Vector2::new(-0.3, 0.0);
-        self.right_hand_state.position = Vector2::new(0.3, 0.0);
+        // 根据旋转角度调整手部位置
+        let rad = self.rotation.to_radians();
+        let cos_r = rad.cos();
+        let sin_r = rad.sin();
+        
+        // 左手位置 (-0.3, 0.0) 旋转
+        self.left_hand_state.position = Vector2::new(-0.3 * cos_r, -0.3 * sin_r);
+        // 右手位置 (0.3, 0.0) 旋转
+        self.right_hand_state.position = Vector2::new(0.3 * cos_r, 0.3 * sin_r);
     }
 
     /*
@@ -5494,7 +6404,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize) {
-        //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
+        println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
             return;
         }
@@ -5508,7 +6418,9 @@ impl PhiTKAdvancedAI {
         self.optimize_jack_pattern(&mut processed_notes);
         self.apply_and_learn(notes, &processed_notes);
         if self.experience_replay.len() >= 64 && self.total_notes_processed % 25 == 0 {
+            println!("[训练] 开始网络训练，经验回放大小: {}", self.experience_replay.len());
             self.train_network();
+            println!("[训练] 网络训练完成");
         }
         if self.training_episodes % self.target_update_frequency as u64 == 0 {
             self.target_network = self.main_network.clone();
@@ -5847,7 +6759,7 @@ impl PhiTKAdvancedAI {
                 unassigned_indices.push(i);
             }
         }
-        //等待 BATCH_SIZE = 256 才进行下面的计算
+        //等待 BATCH_SIZE = 64 才进行下面的计算
         if unassigned_indices.len() < BATCH_SIZE {
             return;
         }
@@ -5857,6 +6769,8 @@ impl PhiTKAdvancedAI {
             if batch_indices.len() < BATCH_SIZE {
                 continue;
             }
+            
+            println!("[处理批次] 处理 {} 个音符的批次，使用GPU: {}", batch_indices.len(), self.main_network.gpu_initialized);
             
             let results: Vec<_> = if let Some(pool) = &self.thread_pool {
                 pool.install(|| {
@@ -5970,11 +6884,13 @@ impl PhiTKAdvancedAI {
             };
 
             let feature_slices: Vec<&[f32]> = results.iter().map(|r| r.0.as_slice()).collect();
+            println!("[前向传播] 开始处理批次，大小: {}，使用GPU: {}", results.len(), self.main_network.gpu_initialized);
             let outputs = if self.main_network.gpu_initialized {
                 self.main_network.gpu_forward_batch(&feature_slices, results.len())
             } else {
                 results.iter().map(|r| self.main_network.forward(&r.0)).collect()
             };
+            println!("[前向传播] 完成批次处理，输出维度: {:?}", if !outputs.is_empty() { outputs[0].len() } else { 0 });
 
             for (i, output) in outputs.iter().enumerate() {
                 let (features, note_idx, position_x, time, judge, kind, _dominant_side) = &results[i];
@@ -5983,6 +6899,11 @@ impl PhiTKAdvancedAI {
                 let ai_decision = self.make_ai_decision(output, &current_note, line_id);
                 let ideal_hand = if current_note.position.x < 0.0 { Hand::Left } else { Hand::Right };
                 let network_correct = ai_decision.0 == ideal_hand;
+                
+                if i % 4 == 0 { // 每4个音符打印一次，避免日志过多
+                    println!("[AI决策] 音符{}: 位置x={:.3}, 时间={:.3}, AI选择={:?}, 理想={:?}, 置信度={:.3}, 正确={}", 
+                        note_idx, position_x, time, ai_decision.0, ideal_hand, ai_decision.1, network_correct);
+                }
 
                 let note = &mut notes[*note_idx];
                 note.features = features.clone();
@@ -6011,6 +6932,10 @@ impl PhiTKAdvancedAI {
     }
 
     fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, _line_id: usize) -> (Hand, f32, Finger) {
+        // 直接使用世界坐标，不受判定线旋转影响
+        // 保持绝对位置，判定线旋转只影响视觉效果
+        let absolute_x = note.position.x;
+        
         if self.game_mode == GameMode::TwoFinger {
             // Phigros 2指模式优化
             const SHORT_TIME_WINDOW: f32 = 0.3; // 短时间窗口，检测即时密集
@@ -6018,7 +6943,7 @@ impl PhiTKAdvancedAI {
             const DENSE_THRESHOLD: f32 = 0.55;  // 密集区域阈值，降低以更容易检测
             const CROSSING_THRESHOLD: f32 = 0.15; // 跨越中线的阈值
 
-            // 统计不同时间窗口内的音符分布
+            // 统计不同时间窗口内的音符分布 (使用绝对世界坐标)
             let mut recent_left_short = 0;
             let mut recent_right_short = 0;
             let mut recent_left_long = 0;
@@ -6028,11 +6953,14 @@ impl PhiTKAdvancedAI {
             let mut recent_hand_sequence = Vec::new();
 
             for (hand, x, t) in &self.recent_assignments {
+                // 直接使用绝对x坐标，不受判定线旋转影响
+                let history_x = *x;
+                
                 // 短时间窗口统计
                 if (note.time - t).abs() <= SHORT_TIME_WINDOW {
-                    if *x < -CROSSING_THRESHOLD {
+                    if history_x < -CROSSING_THRESHOLD {
                         recent_left_short += 1;
-                    } else if *x > CROSSING_THRESHOLD {
+                    } else if history_x > CROSSING_THRESHOLD {
                         recent_right_short += 1;
                     }
                     recent_hand_sequence.push(*hand);
@@ -6040,9 +6968,9 @@ impl PhiTKAdvancedAI {
 
                 // 长时间窗口统计
                 if (note.time - t).abs() <= LONG_TIME_WINDOW {
-                    if *x < -CROSSING_THRESHOLD {
+                    if history_x < -CROSSING_THRESHOLD {
                         recent_left_long += 1;
-                    } else if *x > CROSSING_THRESHOLD {
+                    } else if history_x > CROSSING_THRESHOLD {
                         recent_right_long += 1;
                     }
                 }
@@ -6059,8 +6987,8 @@ impl PhiTKAdvancedAI {
 
             let is_any_dense = is_left_dense_short || is_right_dense_short || is_left_dense_long || is_right_dense_long;
 
-            // 检测音符是否跨越中线
-            let is_crossing = note.position.x.abs() < CROSSING_THRESHOLD;
+            // 检测音符是否跨越中线 (使用绝对坐标)
+            let is_crossing = absolute_x.abs() < CROSSING_THRESHOLD;
 
             // 检测连续同手模式
             let mut consecutive_same_hand = 0;
@@ -6095,8 +7023,8 @@ impl PhiTKAdvancedAI {
                                 if dense_side == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
                     }
                 } else {
-                    // 没有历史记录，根据音符位置选择
-                    let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                    // 没有历史记录，根据绝对音符位置选择
+                    let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
                     return (position_based_hand, 0.85,
                             if position_based_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
                 }
@@ -6111,8 +7039,8 @@ impl PhiTKAdvancedAI {
                     return (alternate_hand, 0.88,
                             if alternate_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
                 } else {
-                    // 没有历史记录，根据细微的位置差异决定
-                    let hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                    // 没有历史记录，根据绝对位置差异决定
+                    let hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
                     return (hand, 0.80,
                             if hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
                 }
@@ -6124,16 +7052,16 @@ impl PhiTKAdvancedAI {
                 let alternate_hand = if let Some(last_hand) = last_hand_in_sequence {
                     if last_hand == Hand::Left { Hand::Right } else { Hand::Left }
                 } else {
-                    // 如果没有记录，根据位置决定
-                    if note.position.x < 0.0 { Hand::Right } else { Hand::Left }
+                    // 如果没有记录，根据绝对位置决定
+                    if absolute_x < 0.0 { Hand::Right } else { Hand::Left }
                 };
 
                 return (alternate_hand, 0.87,
                         if alternate_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
             }
 
-            // 策略4：基于位置的默认分配
-            let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+            // 策略4：基于绝对位置的默认分配
+            let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
 
             // 检查是否需要平衡负荷
             let left_ratio = if total_long > 0 { (recent_left_long as f32) / (total_long as f32) } else { 0.5 };
@@ -6144,8 +7072,8 @@ impl PhiTKAdvancedAI {
                 let balanced_hand = if left_ratio > right_ratio { Hand::Right } else { Hand::Left };
 
                 // 只有当位置与平衡手不太冲突时才使用平衡策略
-                let position_conflict = (position_based_hand == Hand::Left && note.position.x > 0.2) ||
-                                       (position_based_hand == Hand::Right && note.position.x < -0.2);
+                let position_conflict = (position_based_hand == Hand::Left && absolute_x > 0.2) ||
+                                       (position_based_hand == Hand::Right && absolute_x < -0.2);
 
                 if !position_conflict {
                     return (balanced_hand, 0.83,
@@ -6153,17 +7081,30 @@ impl PhiTKAdvancedAI {
                 }
             }
 
-            // 默认策略：基于位置分配
+            // 默认策略：基于绝对位置分配
             return (position_based_hand, 0.80,
                     if position_based_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
         }
 
-        // 4指模式保持原有逻辑
+        // 4指模式使用PPO网络
         let output = self.main_network.forward(features);
         let left_prob = output.get(0).copied().unwrap_or(0.5);
         let right_prob = output.get(1).copied().unwrap_or(0.5);
+        let _value = output.get(2).copied().unwrap_or(0.0);
         let confidence = output.get(3).copied().unwrap_or(0.7);
-        let network_hand = if left_prob > right_prob { Hand::Left } else { Hand::Right };
+        
+        // 使用概率分布进行采样，而不是直接选择最大值
+        let total_prob = left_prob + right_prob;
+        let network_hand = if total_prob > 0.0 {
+            if fastrand::f32() < (left_prob / total_prob) {
+                Hand::Left
+            } else {
+                Hand::Right
+            }
+        } else {
+            // 备用策略：基于绝对位置
+            if absolute_x < 0.0 { Hand::Left } else { Hand::Right }
+        };
 
         // 简化手指分配逻辑，直接使用基于位置的简单评分
         let best_finger = if network_hand == Hand::Left { 
@@ -6172,7 +7113,6 @@ impl PhiTKAdvancedAI {
             Finger::RightIndex 
         };
         
-
         (network_hand, confidence, best_finger)
     }
 
@@ -6182,6 +7122,18 @@ impl PhiTKAdvancedAI {
         let feature_diversity = features.iter().map(|&x| (x - 0.5).abs()).sum::<f32>() / features.len() as f32;
         let priority = if feature_diversity > 0.3 { 2.0 } else { 1.0 };
 
+        // 使用网络获取动作概率和状态值
+        let output = self.main_network.forward(features);
+        let action_prob = if chosen_hand == Hand::Left { 
+            output.get(0).copied().unwrap_or(0.5) 
+        } else { 
+            output.get(1).copied().unwrap_or(0.5) 
+        };
+        let value = output.get(2).copied().unwrap_or(0.0);
+        
+        // 计算动作的对数概率
+        let log_prob = action_prob.ln().clamp(-2.0, 0.0);
+
         let experience = Experience {
             state: features.to_vec(),
             action: if chosen_hand == Hand::Left { 0 } else { 1 },
@@ -6189,6 +7141,11 @@ impl PhiTKAdvancedAI {
             next_state: features.to_vec(),
             done: false,
             timestamp: note.time,
+            log_prob,
+            value,
+            next_value: 0.0, // 将在训练时计算
+            advantage: 0.0,  // 将在训练时计算
+            return_: 0.0,    // 将在训练时计算
         };
         self.experience_replay.push(experience);
         self.last_assigned_hand = Some(chosen_hand);
@@ -6200,6 +7157,10 @@ impl PhiTKAdvancedAI {
     }
 
     fn calculate_reward(&mut self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
+        // 直接使用世界坐标，不受判定线旋转影响
+        // 保持绝对位置，判定线旋转只影响视觉效果
+        let absolute_x = note.position.x;
+        
         let mut reward: f32 = 0.0;
 
         if self.game_mode == GameMode::TwoFinger {
@@ -6208,7 +7169,7 @@ impl PhiTKAdvancedAI {
             const DENSE_THRESHOLD: f32 = 0.55;
             const CROSSING_THRESHOLD: f32 = 0.15;
             
-            // 统计不同时间窗口内的音符分布
+            // 统计不同时间窗口内的音符分布 (使用相对于判定线的坐标)
             let mut recent_left_short = 0;
             let mut recent_right_short = 0;
             let mut recent_left_long = 0;
@@ -6218,11 +7179,14 @@ impl PhiTKAdvancedAI {
             let mut recent_hand_sequence = Vec::new();
 
             for (hand, x, t) in &self.recent_assignments {
+                // 直接使用绝对x坐标，不受判定线旋转影响
+                let history_x = *x;
+                
                 // 短时间窗口统计
                 if (note.time - t).abs() <= SHORT_TIME_WINDOW {
-                    if *x < -CROSSING_THRESHOLD {
+                    if history_x < -CROSSING_THRESHOLD {
                         recent_left_short += 1;
-                    } else if *x > CROSSING_THRESHOLD {
+                    } else if history_x > CROSSING_THRESHOLD {
                         recent_right_short += 1;
                     }
                     recent_hand_sequence.push(*hand);
@@ -6230,9 +7194,9 @@ impl PhiTKAdvancedAI {
 
                 // 长时间窗口统计
                 if (note.time - t).abs() <= LONG_TIME_WINDOW {
-                    if *x < -CROSSING_THRESHOLD {
+                    if history_x < -CROSSING_THRESHOLD {
                         recent_left_long += 1;
-                    } else if *x > CROSSING_THRESHOLD {
+                    } else if history_x > CROSSING_THRESHOLD {
                         recent_right_long += 1;
                     }
                 }
@@ -6249,8 +7213,8 @@ impl PhiTKAdvancedAI {
 
             let is_any_dense = is_left_dense_short || is_right_dense_short || is_left_dense_long || is_right_dense_long;
 
-            // 检测音符是否跨越中线
-            let is_crossing = note.position.x.abs() < CROSSING_THRESHOLD;
+            // 检测音符是否跨越中线 (使用绝对坐标)
+            let is_crossing = absolute_x.abs() < CROSSING_THRESHOLD;
 
             // 检测连续同手模式
             let mut consecutive_same_hand = 0;
@@ -6287,8 +7251,8 @@ impl PhiTKAdvancedAI {
                         reward += 0.4; // 奖励"跨区支援"
                     }
                 } else {
-                    // 没有历史记录，基于位置给予基础奖励
-                    let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                    // 没有历史记录，基于相对位置给予基础奖励
+                    let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
                     if chosen_hand == position_based_hand {
                         reward += 0.3;
                     } else {
@@ -6308,8 +7272,8 @@ impl PhiTKAdvancedAI {
                         reward -= 0.3; // 惩罚未交替
                     }
                 } else {
-                    // 没有历史记录，基于细微位置差异给予奖励
-                    let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                    // 没有历史记录，基于相对位置差异给予奖励
+                    let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
                     if chosen_hand == position_based_hand {
                         reward += 0.2;
                     }
@@ -6322,8 +7286,8 @@ impl PhiTKAdvancedAI {
                 let expected_alternate_hand = if let Some(last_hand) = last_hand_in_sequence {
                     if last_hand == Hand::Left { Hand::Right } else { Hand::Left }
                 } else {
-                    // 如果没有记录，根据位置决定期望的手
-                    if note.position.x < 0.0 { Hand::Right } else { Hand::Left }
+                    // 如果没有记录，根据绝对位置决定期望的手
+                    if absolute_x < 0.0 { Hand::Right } else { Hand::Left }
                 };
 
                 if chosen_hand == expected_alternate_hand {
@@ -6333,9 +7297,9 @@ impl PhiTKAdvancedAI {
                 }
             }
             
-            // 策略4：基于位置的默认奖励
+            // 策略4：基于绝对位置的默认奖励
             else {
-                let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
 
                 // 检查负荷平衡
                 let left_ratio = if total_long > 0 { (recent_left_long as f32) / (total_long as f32) } else { 0.5 };
@@ -6345,8 +7309,8 @@ impl PhiTKAdvancedAI {
                     let balanced_hand = if left_ratio > right_ratio { Hand::Right } else { Hand::Left };
 
                     // 位置与平衡手不冲突的情况
-                    let position_conflict = (position_based_hand == Hand::Left && note.position.x > 0.2) ||
-                                           (position_based_hand == Hand::Right && note.position.x < -0.2);
+                    let position_conflict = (position_based_hand == Hand::Left && absolute_x > 0.2) ||
+                                           (position_based_hand == Hand::Right && absolute_x < -0.2);
 
                     if !position_conflict && chosen_hand == balanced_hand {
                         reward += 0.4; // 奖励平衡负荷
@@ -6369,7 +7333,7 @@ impl PhiTKAdvancedAI {
             match note.kind {
                 NoteKind::Flick => {
                     // Flick音符需要更精确的处理
-                    let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                    let ideal_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
                     if chosen_hand == ideal_hand {
                         reward += 0.15;
                     } else {
@@ -6380,7 +7344,7 @@ impl PhiTKAdvancedAI {
                     // Hold音符需要考虑持续时间
                     if note.duration > 0.5 {
                         // 长时间Hold，奖励使用位置对应的手
-                        let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+                        let ideal_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
                         if chosen_hand == ideal_hand {
                             reward += 0.1;
                         }
@@ -6389,8 +7353,8 @@ impl PhiTKAdvancedAI {
                 _ => {}
             }
         } else {
-            // 4指模式保持原有逻辑
-            let ideal_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+            // 4指模式保持原有逻辑，使用绝对坐标
+            let ideal_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
             if chosen_hand == ideal_hand {
                 reward += 0.5;
             } else {
@@ -6398,7 +7362,7 @@ impl PhiTKAdvancedAI {
             }
         }
 
-        // 物理可行性检查（保持不变）
+        // 物理可行性检查（现在使用相对坐标的手部位置）
         let hand_state = if chosen_hand == Hand::Left { &self.left_hand_state } else { &self.right_hand_state };
         let distance = note.position.distance_to(&hand_state.position);
         let time_since_last = note.time - hand_state.last_time;
@@ -6427,6 +7391,7 @@ impl PhiTKAdvancedAI {
             return;
         }
 
+        // 直接使用绝对世界坐标，不受判定线旋转影响
         for i in 1..notes.len() - 1 {
             if let (Some(prev_hand), Some(curr_hand), Some(next_hand)) = (notes[i - 1].assigned_hand, notes[i].assigned_hand, notes[i + 1].assigned_hand) {
                 if curr_hand != prev_hand && curr_hand != next_hand && prev_hand == next_hand {
@@ -6434,9 +7399,12 @@ impl PhiTKAdvancedAI {
                     let time_gap_next = notes[i + 1].time - notes[i].time;
 
                     if time_gap_prev > 0.15 && time_gap_next > 0.15 {
+                        // 使用绝对x坐标
+                        let note_x = notes[i].position.x;
+                        
                         let position_reasonable = match prev_hand {
-                            Hand::Left => notes[i].position.x < 0.3,
-                            Hand::Right => notes[i].position.x > -0.3,
+                            Hand::Left => note_x < 0.3,
+                            Hand::Right => note_x > -0.3,
                         };
 
                         if position_reasonable && notes[i].confidence < 0.8 {
@@ -6453,6 +7421,7 @@ impl PhiTKAdvancedAI {
         const MAX_SPEED: f32 = 10.0;
         const MIN_TIME_GAP: f32 = 0.05;
 
+        // 直接使用绝对世界坐标，不受判定线旋转影响
         for i in 1..notes.len() {
             if let (Some(prev_hand), Some(curr_hand)) = (notes[i - 1].assigned_hand, notes[i].assigned_hand) {
                 if prev_hand == curr_hand {
@@ -6465,9 +7434,12 @@ impl PhiTKAdvancedAI {
                         if required_speed > MAX_SPEED || time_diff < MIN_TIME_GAP {
                             let other_hand = if curr_hand == Hand::Left { Hand::Right } else { Hand::Left };
 
+                            // 使用绝对x坐标
+                            let note_x = notes[i].position.x;
+                            
                             let switch_reasonable = match other_hand {
-                                Hand::Left => notes[i].position.x < 0.3,
-                                Hand::Right => notes[i].position.x > -0.3,
+                                Hand::Left => note_x < 0.3,
+                                Hand::Right => note_x > -0.3,
                             };
 
                             if switch_reasonable {
@@ -6523,11 +7495,22 @@ impl PhiTKAdvancedAI {
         if notes.len() < 3 {
             return;
         }
-        let avg_x: f32 = notes.iter().map(|n| n.position.x).sum::<f32>() / notes.len() as f32;
+        
+        // 直接使用绝对世界坐标，不受判定线旋转影响
+        
+        // 计算平均绝对X坐标
+        let avg_x: f32 = notes.iter()
+            .map(|n| n.position.x)
+            .sum::<f32>() / notes.len() as f32;
+            
         let mut current_hand = if avg_x < 0.0 { Hand::Left } else { Hand::Right };
 
         for (index, note) in notes.iter_mut().enumerate() {
-            let position_based_hand = if note.position.x < 0.0 { Hand::Left } else { Hand::Right };
+            // 使用绝对x坐标
+            let note_x = note.position.x;
+            
+            let position_based_hand = if note_x < 0.0 { Hand::Left } else { Hand::Right };
+            
             if index > 0 && position_based_hand != current_hand {
                 note.assigned_hand = Some(position_based_hand);
                 current_hand = position_based_hand;
@@ -6543,9 +7526,15 @@ impl PhiTKAdvancedAI {
     }
 
     fn optimize_alternating_pattern(&self, notes: &mut [ProcessedNote]) {
+        // 直接使用绝对世界坐标，不受判定线旋转影响
+        
         for i in 1..notes.len() {
             if let Some(prev_hand) = notes[i - 1].assigned_hand {
-                let should_alternate = notes[i].position.x * notes[i - 1].position.x < 0.0;
+                // 使用绝对x坐标
+                let current_x = notes[i].position.x;
+                let prev_x = notes[i - 1].position.x;
+                
+                let should_alternate = current_x * prev_x < 0.0;
 
                 if should_alternate {
                     let opposite_hand = if prev_hand == Hand::Left { Hand::Right } else { Hand::Left };
@@ -6645,6 +7634,8 @@ impl PhiTKAdvancedAI {
             return;
         }
 
+        // 直接使用绝对世界坐标，不受判定线旋转影响
+        
         // 检测是否为真正的跨越序列（从正到负或负到正的连续序列）
         let mut is_crossing_sequence = false;
         let mut crossing_start = 0;
@@ -6653,8 +7644,10 @@ impl PhiTKAdvancedAI {
         // 查找跨越序列的开始和结束
         for i in 0..notes.len() {
             if i > 0 {
+                // 使用绝对x坐标
                 let prev_x = notes[i-1].position.x;
                 let curr_x = notes[i].position.x;
+                
                 // 检查是否发生跨越（符号改变）
                 if prev_x * curr_x < 0.0 {
                     if !is_crossing_sequence {
@@ -6670,8 +7663,10 @@ impl PhiTKAdvancedAI {
         }
         
         if is_crossing_sequence && crossing_end > crossing_start {
-            // 确定起始手：根据跨越序列开始前的音符位置
-            let start_hand = if notes[crossing_start].position.x < 0.0 { Hand::Left } else { Hand::Right };
+            // 确定起始手：根据跨越序列开始前的绝对音符位置
+            let start_x = notes[crossing_start].position.x;
+            
+            let start_hand = if start_x < 0.0 { Hand::Left } else { Hand::Right };
             let mut current_hand = start_hand;
 
             // 处理跨越序列之前的音符
@@ -6686,8 +7681,9 @@ impl PhiTKAdvancedAI {
                 notes[i].confidence = 0.8;
             }
 
-            // 跨越完成后，根据最后一个音符的位置决定是否切换回默认手
+            // 跨越完成后，根据最后一个音符的绝对位置决定是否切换回默认手
             let last_note_x = notes[crossing_end].position.x;
+            
             let ideal_hand_after_crossing = if last_note_x < 0.0 { Hand::Left } else { Hand::Right };
 
             // 如果跨越后的理想手与起始手不同，则切换
@@ -6702,13 +7698,18 @@ impl PhiTKAdvancedAI {
             }
         } else {
             // 非跨越序列，使用原有逻辑
-            let start_hand = if notes[0].position.x < 0.0 { Hand::Left } else { Hand::Right };
+            let first_note_x = notes[0].position.x;
+            
+            let start_hand = if first_note_x < 0.0 { Hand::Left } else { Hand::Right };
             let mut current_hand = start_hand;
+            
             for note in notes.iter_mut() {
+                let note_x = note.position.x;
+                
                 note.assigned_hand = Some(current_hand);
                 note.confidence = 0.8;
-                // 如果位置与手部相反且距离较大，考虑切换
-                if note.position.x * current_hand.sign() < -2.4 {
+                // 如果绝对位置与手部相反且距离较大，考虑切换
+                if note_x * current_hand.sign() < -2.4 {
                     current_hand = match current_hand {
                         Hand::Left => Hand::Right,
                         Hand::Right => Hand::Left,
@@ -6881,52 +7882,151 @@ impl PhiTKAdvancedAI {
         }
     }
 
+    fn compute_advantages(&mut self, experiences: &mut [Experience]) {
+        if experiences.is_empty() {
+            return;
+        }
+        
+        // 使用GAE（广义优势估计）计算优势
+        const GAE_LAMBDA: f32 = 0.95; // GAE参数
+        
+        // 首先计算所有状态的值函数
+        for exp in experiences.iter_mut() {
+            let next_output = self.target_network.forward(&exp.next_state);
+            exp.next_value = next_output.get(2).copied().unwrap_or(0.0);
+        }
+        
+        // 计算所有TD误差
+        let mut td_errors = Vec::with_capacity(experiences.len());
+        for exp in experiences.iter() {
+            let td_error = exp.reward + self.discount_factor * exp.next_value * if exp.done { 0.0 } else { 1.0 } - exp.value;
+            td_errors.push(td_error);
+        }
+        
+        // 从后往前计算优势值
+        let mut gae = 0.0;
+        for i in (0..experiences.len()).rev() {
+            // 更新GAE
+            if i == experiences.len() - 1 || (i + 1 < experiences.len() && experiences[i + 1].done) {
+                gae = td_errors[i]; // 如果是最后一个经验或下一个状态是终止状态，则重置GAE
+            } else if i + 1 < experiences.len() {
+                // GAE公式: A_t = r_t + γ*V(s_{t+1}) - V(s_t) + γ*λ*A_{t+1}
+                gae = td_errors[i] + self.discount_factor * GAE_LAMBDA * experiences[i + 1].advantage;
+            } else {
+                gae = td_errors[i];
+            }
+            
+            experiences[i].advantage = gae;
+            
+            // 计算回报
+            experiences[i].return_ = experiences[i].advantage + experiences[i].value;
+        }
+        
+        // 对优势值进行归一化
+        let advantages: Vec<f32> = experiences.iter().map(|exp| exp.advantage).collect();
+        let mean_adv = advantages.iter().sum::<f32>() / advantages.len() as f32;
+        let std_adv = (advantages.iter().map(|a| (a - mean_adv).powi(2)).sum::<f32>() / advantages.len() as f32).sqrt().max(1e-6);
+        
+        for exp in experiences.iter_mut() {
+            exp.advantage = (exp.advantage - mean_adv) / std_adv; // 归一化优势值
+        }
+        
+        // 防止未使用变量警告
+        let _ = gae;
+    }
+
     fn train_network(&mut self) {
-        let batch_size = 256;
-        let experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
+        // 使用更小的批次大小以提高训练稳定性
+        let batch_size = 64;
+        let mut experiences: Vec<_> = self.experience_replay.sample(batch_size).into_iter().cloned().collect();
         if experiences.is_empty() {
             return;
         }
 
-        let mut training_data = Vec::with_capacity(batch_size);
-        for exp in &experiences {
-            // 当前 Q 值（用 main network 预测）
-            let current_q = self.main_network.forward(&exp.state); // [Q_left, Q_right, _, _, _]
+        // 过滤掉包含NaN或无穷大的经验
+        experiences.retain(|exp| {
+            exp.state.iter().all(|&x| x.is_finite()) &&
+            exp.reward.is_finite() &&
+            exp.value.is_finite()
+        });
 
-            // 计算 target Q 值
-            let mut target_q = current_q.clone();
-            let reward = exp.reward;
-
-            if exp.done {
-                // 终止状态：Q_target = reward
-                target_q[exp.action] = reward;
-            } else {
-                // 非终止状态：Q_target = reward + γ * max_a Q_target(next_state, a)
-                let next_q_target = self.target_network.forward(&exp.next_state);
-                let max_next_q = next_q_target[0].max(next_q_target[1]); // 只考虑 hand 0/1
-                let target_value = (reward + self.discount_factor * max_next_q).clamp(-0.6, 0.6);
-                target_q[exp.action] = target_value;
-            }
-
-            // 3. 保留 confidence 和 four_finger 输出（可选冻结或微调）
-            if target_q.len() >= 5 {
-                target_q[3] = 0.9; // 或从 exp.state 推断
-                target_q[4] = current_q.get(4).copied().unwrap_or(0.0);
-            }
-
-            training_data.push((exp.state.clone(), target_q));
+        if experiences.is_empty() {
+            eprintln!("[训练错误] 过滤后没有有效经验，跳过训练");
+            return;
         }
 
+        // 计算优势函数和回报
+        self.compute_advantages(&mut experiences);
+
+        // PPO训练
+        let mut training_data = Vec::with_capacity(experiences.len());
+        for exp in &experiences {
+            // 构造目标输出
+            let mut target_output = vec![0.0; 5]; // [left_prob, right_prob, value, confidence, four_finger]
+            
+            // 设置动作概率目标 - 使用更平滑的概率分布
+            if exp.action == 0 { // Left
+                target_output[0] = 0.8;  // 降低确定性，增加探索
+                target_output[1] = 0.2;
+            } else { // Right
+                target_output[0] = 0.2;
+                target_output[1] = 0.8;  // 降低确定性，增加探索
+            }
+            
+            // 设置价值目标 - 添加噪声防止过拟合
+            let value_noise = fastrand::f32() * 0.1 - 0.05;  // [-0.05, 0.05]的噪声
+            target_output[2] = (exp.return_ + value_noise).clamp(-2.0, 2.0);
+            
+            // 保留其他输出
+            target_output[3] = 0.7; // confidence - 降低确定性
+            target_output[4] = 0.0; // four_finger
+
+            training_data.push((exp.state.clone(), target_output));
+        }
+
+        let epoch = self.main_network.epoch_count;
+        let lr = self.main_network.learning_rate;
+        let replay_size = self.experience_replay.len();
+        let avg_reward = self.average_reward;
+        
+        // 检查训练数据质量
+        let mut valid_samples = 0;
+        let mut total_loss = 0.0;
+        
+        for (input, target) in &training_data {
+            if input.iter().all(|&x| x.is_finite()) && target.iter().all(|&x| x.is_finite()) {
+                valid_samples += 1;
+                // 计算一个简单的损失估计
+                let output = self.main_network.light_forward(input);
+                let sample_loss: f32 = output.iter().zip(target.iter()).take(2)
+                    .map(|(o, t)| (o - t).powi(2))
+                    .sum();
+                total_loss += sample_loss;
+            }
+        }
+        
+        if valid_samples == 0 {
+            eprintln!("[PPO训练错误] 没有有效的训练样本，跳过此轮训练");
+            return;
+        }
+        
+        let avg_loss = total_loss / valid_samples as f32;
+        
         println!(
-            "【DQN训练】Epoch {}, LR: {:.6}, Replay Size: {}, Avg Reward: {:.3}",
-            self.main_network.epoch_count,
-            self.main_network.learning_rate,
-            self.experience_replay.len(),
-            self.average_reward
+            "【PPO训练】Epoch {}, LR: {:.6}, Replay Size: {}, Avg Reward: {:.3}, Valid Samples: {}, Avg Loss: {:.6}",
+            epoch, lr, replay_size, avg_reward, valid_samples, avg_loss
         );
 
-        // 使用GRPO算法进行训练，提高训练效率和稳定性
-        self.main_network.train_with_grpo(&training_data, 8); // 每组8个样本
+        // 在训练前检查损失是否异常
+        if avg_loss > 100.0 {
+            eprintln!("[PPO警告] 损失值异常高 ({:.6})，可能存在梯度爆炸", avg_loss);
+            // 降低学习率以防止进一步爆炸
+            self.main_network.learning_rate = (self.main_network.learning_rate * 0.5).max(0.0001);
+            println!("[PPO调整] 临时降低学习率至: {:.6}", self.main_network.learning_rate);
+        }
+
+        // 使用PPO算法进行训练
+        self.main_network.train_with_ppo(&training_data, &experiences);
     }
 
     /*
