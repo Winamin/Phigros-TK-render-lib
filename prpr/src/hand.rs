@@ -1,14 +1,23 @@
 use crate::config::Config;
+
 use crate::core::note::Hand;
+
 use crate::core::{BpmList, Note, NoteKind};
+
+use crate::hand_model::{ErgonomicHandSystem, HandModel, FingerModel, FingerType, ArmModel, Vector2};
 use crate::judge::JudgeStatus;
+
 use bincode;
+use bytemuck::{Pod, Zeroable};
+use crossbeam_channel::{unbounded, Receiver as CbReceiver, Sender as CbSender};
 use fastrand;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
+use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::panic;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,10 +26,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 use wgpu;
 use wgpu::util::DeviceExt;
-use crossbeam_channel::{unbounded, Receiver as CbReceiver, Sender as CbSender};
-use rayon::ThreadPool;
-use std::hash::{Hash, Hasher};
-use bytemuck::{Pod, Zeroable};
 
 type StdHashMap<K, V> = HashMap<K, V>;
 
@@ -394,12 +399,6 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
 
 pub fn default_max_grad_norm() -> f32 { 5.0_f32 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-struct Vector2 {
-    x: f32,
-    y: f32,
-}
-
 pub struct HandConfig {
     pub config: Config,
 }
@@ -428,6 +427,8 @@ struct PhiTKAdvancedAI {
     experience_replay: ExperienceReplay,
     left_hand_state: HandState,
     right_hand_state: HandState,
+    /// 人体工程学手部系统
+    ergonomic_hand_system: ErgonomicHandSystem,
     rotation: f32,
     exploration_rate: f32,
     discount_factor: f32,
@@ -486,6 +487,9 @@ struct Experience {
     next_value: f32,
     advantage: f32,
     return_: f32,
+    // 未来音符信息（4个未来音符）
+    // 每个未来音符：[hand_left_prob, hand_right_prob, position_x, time_delta]
+    future_notes: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -531,40 +535,55 @@ struct FingerState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+
 struct DeepNeuralNetwork {
+
     layers: Vec<NetworkLayer>,
+
     #[serde(default)]learning_rate: f32,
+
     #[serde(default)]momentum: f32,
+
     #[serde(default)]dropout_rate: f32,
+
     batch_size: usize,
+
     //#[serde(skip)]
+
     #[serde(default = "default_max_grad_norm")]
+
     max_grad_norm: f32,
+
     //#[serde(skip)]
+
     //weight_decay: f32,
+
     #[serde(default)]
+
     last_loss: f32,          // 用于学习率调整
+
     #[serde(default)]
+
     bad_epochs: usize,       // 用于学习率调整
+
     epoch_count: u64,
+
     #[serde(skip)]device: Option<wgpu::Device>,
+
     #[serde(skip)]queue: Option<wgpu::Queue>,
-    #[serde(skip)]matmul_pipeline: Option<wgpu::ComputePipeline>,
-    #[serde(skip)]matmul_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    #[serde(skip)]lstm_pipeline: Option<wgpu::ComputePipeline>,
-    #[serde(skip)]lstm_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    #[serde(skip)]attention_pipeline: Option<wgpu::ComputePipeline>,
-    #[serde(skip)]attention_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    #[serde(skip)]activation_pipelines: StdHashMap<ActivationFunction, wgpu::ComputePipeline>,
-    #[serde(
-        skip
-    )]activation_bind_group_layouts: StdHashMap<ActivationFunction, wgpu::BindGroupLayout>,
-    #[serde(skip)]residual_pipeline: Option<wgpu::ComputePipeline>,
-    #[serde(skip)]residual_bind_group_layout: Option<wgpu::BindGroupLayout>,
+
+    // 移除单个管线，使用统一的GPU执行器
+
+    #[serde(skip)]gpu_executor: Option<Arc<crate::gpu_utils::GpuNetworkExecutor>>,
+
     #[serde(skip)]gpu_initialized: bool,
+
     #[serde(skip)]batch_size_buffer: Option<wgpu::Buffer>,
+
     #[serde(skip)]initialization_attempted: bool,
+
     #[serde(skip)]initialization_failed: bool,
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -607,6 +626,7 @@ enum LayerType {
     LSTM,
     Attention,
     Residual,
+    Concat,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -706,11 +726,11 @@ struct DispatchParams {
 }
 
 impl Vector2 {
-    fn new(x: f32, y: f32) -> Self { Self { x, y } }
+    //fn new(x: f32, y: f32) -> Self { Self { x, y } }
 
-    fn distance_to(&self, other: &Vector2) -> f32 {
-        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
-    }
+    //fn distance_to(&self, other: &Vector2) -> f32 {
+    //    ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
+    //}
 
     fn rotate(&self, angle_rad: f32) -> Vector2 {
         let cos_a = angle_rad.cos();
@@ -719,23 +739,6 @@ impl Vector2 {
             x: self.x * cos_a - self.y * sin_a,
             y: self.x * sin_a + self.y * cos_a,
         }
-    }
-
-    fn magnitude(&self) -> f32 {
-        (self.x * self.x + self.y * self.y).sqrt()
-    }
-
-    fn normalize(&self) -> Vector2 {
-        let mag = self.magnitude();
-        if mag > 0.001 {
-            Vector2 { x: self.x / mag, y: self.y / mag }
-        } else {
-            *self
-        }
-    }
-
-    fn dot(&self, other: &Vector2) -> f32 {
-        self.x * other.x + self.y * other.y
     }
 
     pub fn clean(&mut self) {
@@ -776,7 +779,7 @@ impl DeepNeuralNetwork {
             learning_rate: 0.0008, //降低初始学习率以防止梯度爆炸
             momentum: 0.9,
             dropout_rate: 0.1,
-            batch_size: 512, //增加批次大小以提高GPU利用率
+            batch_size: 64, //增加批次大小以提高GPU利用率
             max_grad_norm: 2.0, //降低梯度裁剪阈值以更好地控制梯度爆炸
             //weight_decay: 0.0001,
             last_loss: f32::INFINITY, //损失
@@ -784,16 +787,7 @@ impl DeepNeuralNetwork {
             epoch_count: 0,
             device: None,
             queue: None,
-            matmul_pipeline: None,
-            matmul_bind_group_layout: None,
-            lstm_pipeline: None,
-            lstm_bind_group_layout: None,
-            attention_pipeline: None,
-            residual_bind_group_layout: None,
-            residual_pipeline: None,
-            attention_bind_group_layout: None,
-            activation_pipelines: StdHashMap::new(),
-            activation_bind_group_layouts: StdHashMap::new(),
+            gpu_executor: None,
             gpu_initialized: false,
             batch_size_buffer: None,
             initialization_attempted: false,
@@ -805,7 +799,138 @@ impl DeepNeuralNetwork {
         network
     }
 
-    pub fn clean(&mut self) {
+    /// 将hand_model转换为网络输入向量
+    pub fn hand_model_to_input(hand_system: &ErgonomicHandSystem) -> Vec<f32> {
+        let mut input = Vec::with_capacity(152);
+        
+        // 左手数据 (12维)
+        input.push(hand_system.left_hand.position.x);
+        input.push(hand_system.left_hand.position.y);
+        input.push(hand_system.left_hand.velocity.x);
+        input.push(hand_system.left_hand.velocity.y);
+        input.push(hand_system.left_hand.acceleration.x);
+        input.push(hand_system.left_hand.acceleration.y);
+        input.push(hand_system.left_hand.rotation);
+        input.push(hand_system.left_hand.openness);
+        input.push(hand_system.left_hand.fatigue);
+        input.push(hand_system.left_hand.dexterity);
+        input.push(hand_system.left_hand.last_update_time);
+        input.push(hand_system.left_hand.hand_type as u8 as f32);
+        
+        // 右手数据 (12维)
+        input.push(hand_system.right_hand.position.x);
+        input.push(hand_system.right_hand.position.y);
+        input.push(hand_system.right_hand.velocity.x);
+        input.push(hand_system.right_hand.velocity.y);
+        input.push(hand_system.right_hand.acceleration.x);
+        input.push(hand_system.right_hand.acceleration.y);
+        input.push(hand_system.right_hand.rotation);
+        input.push(hand_system.right_hand.openness);
+        input.push(hand_system.right_hand.fatigue);
+        input.push(hand_system.right_hand.dexterity);
+        input.push(hand_system.right_hand.last_update_time);
+        input.push(hand_system.right_hand.hand_type as u8 as f32);
+        
+        // 左手指数据 (10维 × 5手指 = 50维)
+        for finger in &hand_system.left_fingers {
+            input.push(finger.position.x);
+            input.push(finger.position.y);
+            input.push(finger.bend_angle);
+            input.push(finger.length);
+            input.push(finger.thickness);
+            input.push(finger.fatigue);
+            input.push(finger.dexterity);
+            input.push(if finger.is_pressed { 1.0 } else { 0.0 });
+            input.push(finger.press_time);
+            input.push(finger.finger_type as u8 as f32);
+        }
+        
+        // 右手指数据 (10维 × 5手指 = 50维)
+        for finger in &hand_system.right_fingers {
+            input.push(finger.position.x);
+            input.push(finger.position.y);
+            input.push(finger.bend_angle);
+            input.push(finger.length);
+            input.push(finger.thickness);
+            input.push(finger.fatigue);
+            input.push(finger.dexterity);
+            input.push(if finger.is_pressed { 1.0 } else { 0.0 });
+            input.push(finger.press_time);
+            input.push(finger.finger_type as u8 as f32);
+        }
+        
+        // 左臂数据 (12维)
+        input.push(hand_system.left_arm.shoulder_position.x);
+        input.push(hand_system.left_arm.shoulder_position.y);
+        input.push(hand_system.left_arm.elbow_position.x);
+        input.push(hand_system.left_arm.elbow_position.y);
+        input.push(hand_system.left_arm.wrist_position.x);
+        input.push(hand_system.left_arm.wrist_position.y);
+        input.push(hand_system.left_arm.angle);
+        input.push(hand_system.left_arm.length);
+        input.push(hand_system.left_arm.thickness);
+        input.push(hand_system.left_arm.fatigue);
+        input.push(hand_system.left_arm.strength);
+        input.push(hand_system.left_arm.flexibility);
+        
+        // 右臂数据 (12维)
+        input.push(hand_system.right_arm.shoulder_position.x);
+        input.push(hand_system.right_arm.shoulder_position.y);
+        input.push(hand_system.right_arm.elbow_position.x);
+        input.push(hand_system.right_arm.elbow_position.y);
+        input.push(hand_system.right_arm.wrist_position.x);
+        input.push(hand_system.right_arm.wrist_position.y);
+        input.push(hand_system.right_arm.angle);
+        input.push(hand_system.right_arm.length);
+        input.push(hand_system.right_arm.thickness);
+        input.push(hand_system.right_arm.fatigue);
+        input.push(hand_system.right_arm.strength);
+        input.push(hand_system.right_arm.flexibility);
+        
+        // 身体数据 (4维)
+        input.push(hand_system.body_center.x);
+        input.push(hand_system.body_center.y);
+        input.push(hand_system.body_tilt);
+        input.push(hand_system.difficulty_factor);
+        
+        // 确保所有值都是有限的
+        for x in &mut input {
+            if !x.is_finite() {
+                *x = 0.0;
+            }
+        }
+        
+        input
+    }
+    
+    /// 训练网络，使用hand_model作为输入
+    pub fn train_with_hand_model(&mut self, training_data: &[(ErgonomicHandSystem, Vec<f32>)]) {
+        if training_data.is_empty() {
+            eprintln!("警告: 训练数据为空，跳过训练");
+            return;
+        }
+        
+        // 转换hand_model为网络输入
+        let converted_data: Vec<(Vec<f32>, Vec<f32>)> = training_data.iter()
+            .map(|(hand_system, target)| {
+                let input = Self::hand_model_to_input(hand_system);
+                (input, target.clone())
+            })
+            .collect();
+        
+        // 调用现有的训练函数
+        self.train(&converted_data);
+    }
+    
+    /// 使用hand_model进行预测
+    pub fn predict_with_hand_model(&mut self, hand_system: &ErgonomicHandSystem) -> Vec<f32> {
+        let input = Self::hand_model_to_input(hand_system);
+        self.light_forward(&input)
+    }
+
+
+    
+    fn clean(&mut self) {
         for layer in &mut self.layers {
             for weights in &mut layer.weights {
                 for w in weights {
@@ -832,31 +957,8 @@ impl DeepNeuralNetwork {
                     *gradient = 0.0;
                 }
             }
-
-            for momentum_row in &mut layer.momentum_weights {
-                for momentum in momentum_row {
-                    if !momentum.is_finite() {
-                        *momentum = 0.0;
-                    }
-                }
-            }
-
-            for momentum_bias in &mut layer.momentum_biases {
-                if !momentum_bias.is_finite() {
-                    *momentum_bias = 0.0;
-                }
-            }
-
-            if layer.seq_len == 0 {
-                layer.seq_len = 1;
-            }
         }
-
-        if !self.learning_rate.is_finite() {self.learning_rate = 0.001; }
-        if !self.momentum.is_finite() { self.momentum = 0.9; }
-        if !self.dropout_rate.is_finite() { self.dropout_rate = 0.1; }
     }
-
 
     pub fn validate(&self) -> bool {
         for layer in &self.layers {
@@ -1037,6 +1139,7 @@ impl DeepNeuralNetwork {
     fn light_forward(&mut self, input: &[f32]) -> Vec<f32> {
         // 检查输入是否包含NaN或无穷大值
         let mut current_input: Vec<f32> = input.iter().map(|&x| if x.is_finite() { x } else { 0.0 }).collect();
+        let mut layer_outputs: Vec<Vec<f32>> = Vec::new();
 
         for layer in self.layers.iter_mut() {
             // 在每层处理前检查输入
@@ -1072,6 +1175,9 @@ impl DeepNeuralNetwork {
                         }
                     }
                 }
+                LayerType::Concat => {
+                    current_input = Self::concat_forward(layer, &layer_outputs);
+                }
             }
             
             // 在每层处理后检查输出
@@ -1080,15 +1186,10 @@ impl DeepNeuralNetwork {
                     *x = 0.0; // 将NaN或无穷大值替换为0
                 }
             }
+            
+            layer_outputs.push(current_input.clone());
         }
-
-        // 最终输出检查
-        for x in &mut current_input {
-            if !x.is_finite() {
-                *x = 0.0; // 将NaN或无穷大值替换为0
-            }
-        }
-
+        
         current_input
     }
 
@@ -1123,8 +1224,7 @@ impl DeepNeuralNetwork {
 
             let resources_valid = self.device.is_some()
                 && self.queue.is_some()
-                && self.batch_size_buffer.is_some()
-                && self.matmul_pipeline.is_some();
+                && self.gpu_executor.is_some();
 
             if init_result && resources_valid {
                 self.gpu_initialized = true;
@@ -1132,11 +1232,10 @@ impl DeepNeuralNetwork {
                 println!("[GPU] GPU initialization successful on first attempt");
             } else {
                 self.initialization_failed = true;
-                let missing = format!("device: {}, queue: {}, batch_size: {}, pipeline: {}",
+                let missing = format!("device: {}, queue: {}, executor: {}",
                                       self.device.is_some(),
                                       self.queue.is_some(),
-                                      self.batch_size_buffer.is_some(),
-                                      self.matmul_pipeline.is_some()
+                                      self.gpu_executor.is_some()
                 );
                 eprintln!("[GPU] GPU initialization partially failed - missing resources: {}", missing);
                 eprintln!("[GPU] Falling back to CPU implementation");
@@ -1144,9 +1243,7 @@ impl DeepNeuralNetwork {
                 self.device = None;
                 self.queue = None;
                 self.batch_size_buffer = None;
-                self.matmul_pipeline = None;
-                self.activation_pipelines.clear();
-                self.activation_bind_group_layouts.clear();
+                self.gpu_executor = None;
                 for layer in &mut self.layers {
                     layer.weights_buffer = None;
                     layer.biases_buffer = None;
@@ -1156,7 +1253,6 @@ impl DeepNeuralNetwork {
         }
         println!("[GPU INIT CHECK] gpu_initialized={}, device.is_some()={}",
                  self.gpu_initialized, self.device.is_some());
-
     }
 
     //初始化
@@ -1166,7 +1262,7 @@ impl DeepNeuralNetwork {
         }
 
         let instance_desc = wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::DX12 | wgpu::Backends::METAL,
             ..Default::default()
         };
         let instance = wgpu::Instance::new(&instance_desc);
@@ -1206,7 +1302,87 @@ impl DeepNeuralNetwork {
             return false;
         }
 
-        let (device, queue) = match adapter.request_device(&wgpu::DeviceDescriptor::default()).await {
+        // 获取适配器支持的极限
+        let adapter_limits = adapter.limits();
+        
+        // 设置最高性能的设备限制
+        let mut limits = wgpu::Limits::default();
+        // 提高所有限制到最大值以获得最佳性能
+        limits.max_texture_dimension_1d = adapter_limits.max_texture_dimension_1d;
+        limits.max_texture_dimension_2d = adapter_limits.max_texture_dimension_2d;
+        limits.max_texture_dimension_3d = adapter_limits.max_texture_dimension_3d;
+        limits.max_texture_array_layers = adapter_limits.max_texture_array_layers;
+        limits.max_bind_groups = adapter_limits.max_bind_groups;
+        limits.max_bindings_per_bind_group = adapter_limits.max_bindings_per_bind_group;
+        limits.max_dynamic_uniform_buffers_per_pipeline_layout = adapter_limits.max_dynamic_uniform_buffers_per_pipeline_layout;
+        limits.max_dynamic_storage_buffers_per_pipeline_layout = adapter_limits.max_dynamic_storage_buffers_per_pipeline_layout;
+        limits.max_sampled_textures_per_shader_stage = adapter_limits.max_sampled_textures_per_shader_stage;
+        limits.max_samplers_per_shader_stage = adapter_limits.max_samplers_per_shader_stage;
+        limits.max_storage_buffers_per_shader_stage = adapter_limits.max_storage_buffers_per_shader_stage;
+        limits.max_storage_textures_per_shader_stage = adapter_limits.max_storage_textures_per_shader_stage;
+        limits.max_uniform_buffers_per_shader_stage = adapter_limits.max_uniform_buffers_per_shader_stage;
+        limits.max_uniform_buffer_binding_size = adapter_limits.max_uniform_buffer_binding_size;
+        limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
+        limits.min_uniform_buffer_offset_alignment = adapter_limits.min_uniform_buffer_offset_alignment;
+        limits.min_storage_buffer_offset_alignment = adapter_limits.min_storage_buffer_offset_alignment;
+        limits.max_vertex_buffers = adapter_limits.max_vertex_buffers;
+        limits.max_buffer_size = adapter_limits.max_buffer_size;
+        limits.max_vertex_attributes = adapter_limits.max_vertex_attributes;
+        limits.max_vertex_buffer_array_stride = adapter_limits.max_vertex_buffer_array_stride;
+        limits.max_inter_stage_shader_components = adapter_limits.max_inter_stage_shader_components;
+        limits.max_compute_workgroup_storage_size = adapter_limits.max_compute_workgroup_storage_size;
+        limits.max_compute_invocations_per_workgroup = adapter_limits.max_compute_invocations_per_workgroup;
+        limits.max_compute_workgroup_size_x = adapter_limits.max_compute_workgroup_size_x;
+        limits.max_compute_workgroup_size_y = adapter_limits.max_compute_workgroup_size_y;
+        limits.max_compute_workgroup_size_z = adapter_limits.max_compute_workgroup_size_z;
+        limits.max_compute_workgroups_per_dimension = adapter_limits.max_compute_workgroups_per_dimension;
+        
+        // 启用所有可用的性能特性（只使用当前wgpu版本支持的特性）
+        let required_features = wgpu::Features::all()
+            & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+            & wgpu::Features::PIPELINE_STATISTICS_QUERY
+            & wgpu::Features::TIMESTAMP_QUERY
+            & wgpu::Features::INDIRECT_FIRST_INSTANCE
+            & wgpu::Features::SHADER_F16
+            & wgpu::Features::RG11B10UFLOAT_RENDERABLE
+            & wgpu::Features::BGRA8UNORM_STORAGE
+            & wgpu::Features::FLOAT32_FILTERABLE
+            & wgpu::Features::TEXTURE_COMPRESSION_BC
+            & wgpu::Features::TEXTURE_COMPRESSION_ETC2
+            & wgpu::Features::TEXTURE_COMPRESSION_ASTC
+            & wgpu::Features::TEXTURE_BINDING_ARRAY
+            & wgpu::Features::BUFFER_BINDING_ARRAY
+            & wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY
+            & wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+            & wgpu::Features::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING
+            & wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY
+            & wgpu::Features::MULTI_DRAW_INDIRECT
+            & wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
+            & wgpu::Features::PUSH_CONSTANTS
+            & wgpu::Features::ADDRESS_MODE_CLAMP_TO_BORDER
+            & wgpu::Features::ADDRESS_MODE_CLAMP_TO_ZERO
+            & wgpu::Features::POLYGON_MODE_LINE
+            & wgpu::Features::POLYGON_MODE_POINT
+            & wgpu::Features::CONSERVATIVE_RASTERIZATION
+            & wgpu::Features::VERTEX_WRITABLE_STORAGE
+            & wgpu::Features::CLEAR_TEXTURE
+            & wgpu::Features::SPIRV_SHADER_PASSTHROUGH
+            & wgpu::Features::MULTIVIEW
+            & wgpu::Features::SHADER_PRIMITIVE_INDEX
+            & wgpu::Features::SHADER_EARLY_DEPTH_TEST
+            & wgpu::Features::DEPTH32FLOAT_STENCIL8
+            & wgpu::Features::DEPTH_CLIP_CONTROL
+            & wgpu::Features::DUAL_SOURCE_BLENDING
+            & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+            & wgpu::Features::TEXTURE_COMPRESSION_ASTC_HDR;
+
+        let (device, queue) = match adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("High Performance GPU Device"),
+            required_features,
+            required_limits: limits,
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }).await {
             Ok((d, q)) => (d, q),
             Err(e) => {
                 eprintln!("Failed to request GPU device: {:?}", e);
@@ -1214,464 +1390,46 @@ impl DeepNeuralNetwork {
             }
         };
 
-        let batch_size_data = [self.batch_size as u32];
-        let batch_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Batch Size Buffer"),
-            contents: bytemuck::cast_slice(&batch_size_data),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+        // 创建GPU执行器，实现一次性上传所有数据的优化
+        let gpu_executor = Arc::new(crate::gpu_utils::GpuNetworkExecutor::new(
+            Arc::new(device.clone()),
+            Arc::new(queue.clone()),
+        ));
 
-        let matmul_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-            label: None,
-        });
-
-        let matmul_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[&matmul_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let matmul_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(include_str!("matmul.wgsl").into()),
-        });
-
-        let matmul_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: Some(&matmul_pipeline_layout),
-            module: &matmul_shader,
-            entry_point: Some("main"),
-            cache: None,
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        });
-
-        // 创建LSTM管线
-        let lstm_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-            label: Some("LSTM Bind Group Layout"),
-        });
-
-        let lstm_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("LSTM Pipeline Layout"),
-            bind_group_layouts: &[&lstm_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let lstm_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("LSTM Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("lstm.wgsl").into()),
-        });
-
-        let lstm_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("LSTM Pipeline"),
-            layout: Some(&lstm_pipeline_layout),
-            module: &lstm_shader,
-            entry_point: Some("main"),
-            cache: None,
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        });
-
-        // 创建注意力管线
-        let attention_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-            label: Some("Attention Bind Group Layout"),
-        });
-
-        let attention_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Attention Pipeline Layout"),
-            bind_group_layouts: &[&attention_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let attention_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Attention Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../attention.wgsl").into()),
-        });
-
-        let attention_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Attention Pipeline"),
-            layout: Some(&attention_pipeline_layout),
-            module: &attention_shader,
-            entry_point: Some("main"),
-            cache: None,
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        });
-
-        let mut activation_pipelines = StdHashMap::new();
-        let mut activation_bind_group_layouts = StdHashMap::new();
-        for func in [
-            ActivationFunction::ReLU,
-            ActivationFunction::Sigmoid,
-            ActivationFunction::Tanh,
-            ActivationFunction::Swish,
-            ActivationFunction::GELU,
-            ActivationFunction::Linear,
-        ] {
-            let activation_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-                label: Some(&format!("{:?} Activation Layout", func)),
-            });
-
-            let activation_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[&activation_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-            let shader_src = self.get_activation_shader(&func);
-            let activation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: None,
-                source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-            });
-
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: None,
-                layout: Some(&activation_pipeline_layout),
-                module: &activation_shader,
-                entry_point: Some("main"),
-                cache: None,
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            });
-
-            activation_pipelines.insert(func.clone(), pipeline);
-            activation_bind_group_layouts.insert(func, activation_bind_group_layout);
-        }
-        
-        // 创建残差层管线
-        let residual_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-            label: Some("Residual Bind Group Layout"),
-        });
-
-        let residual_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Residual Pipeline Layout"),
-            bind_group_layouts: &[&residual_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let residual_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Residual Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../residual.wgsl").into()),
-        });
-
-        let residual_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Residual Pipeline"),
-            layout: Some(&residual_pipeline_layout),
-            module: &residual_shader,
-            entry_point: Some("main"),
-            cache: None,
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        });
-
-        for layer in &mut self.layers {
+        // 预先准备GPU层数据
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            // 将权重展平为一维数组
             let weights_flat = layer.weights.iter().flatten().cloned().collect::<Vec<f32>>();
             layer.weights_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
+                label: Some(&format!("Layer {} weights buffer", index)),
                 contents: bytemuck::cast_slice(&weights_flat),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             }));
             layer.biases_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
+                label: Some(&format!("Layer {} biases buffer", index)),
                 contents: bytemuck::cast_slice(&layer.biases),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             }));
             layer.activations_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
+                label: Some(&format!("Layer {} activations buffer", index)),
                 size: (layer.activations.len() * size_of::<f32>()) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }));
         }
 
+        // 创建batch_size_buffer
+        let batch_size_data = [self.batch_size as u32];
+        self.batch_size_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Batch Size Buffer"),
+            contents: bytemuck::cast_slice(&batch_size_data),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        }));
+
         self.device = Some(device);
         self.queue = Some(queue);
-        self.matmul_pipeline = Some(matmul_pipeline);
-        self.matmul_bind_group_layout = Some(matmul_bind_group_layout);
-        self.lstm_pipeline = Some(lstm_pipeline);
-        self.lstm_bind_group_layout = Some(lstm_bind_group_layout);
-        self.attention_pipeline = Some(attention_pipeline);
-        self.attention_bind_group_layout = Some(attention_bind_group_layout);
-        self.activation_pipelines = activation_pipelines;
-        self.activation_bind_group_layouts = activation_bind_group_layouts;
-        self.residual_pipeline = Some(residual_pipeline);
-        self.residual_bind_group_layout = Some(residual_bind_group_layout);
-        self.batch_size_buffer = Some(batch_size_buffer);
+        self.gpu_executor = Some(gpu_executor);
+        self.gpu_initialized = true;
 
         true
     }
@@ -1710,7 +1468,13 @@ impl DeepNeuralNetwork {
     }
 
     fn gpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
-        println!("[GPU前向传播] 输入维度: {}", input.len());
+        // 检查输入是否有效
+        if input.is_empty() {
+            println!("[GPU前向传播] 输入为空，回退到CPU");
+            return self.light_forward(input);
+        }
+
+        //println!("[GPU前向传播] 输入维度: {}", input.len());
         if !self.gpu_initialized {
             self.init_gpu_sync();
             if !self.gpu_initialized {
@@ -1719,1277 +1483,193 @@ impl DeepNeuralNetwork {
             }
         }
 
-        let device = match self.device.as_ref() {
-            Some(d) => d,
-            None => {
-                println!("[GPU DEBUG] 'device' is None. FALLING BACK TO CPU (light_forward).");
-                return self.light_forward(input);
-            },
-        };
-
-        let queue = self.queue.as_ref().unwrap();
-
-        // 创建输入缓冲区
-        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Input Buffer"),
-            contents: bytemuck::cast_slice(input),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let mut current_input_buffer = input_buffer;
-        let mut current_input_size = input.len();
-
-        for i in 0..self.layers.len() {
-            let layer = &self.layers[i];
-            let output_size = match layer.layer_type {
-                LayerType::Dense => layer.weights.len(),
-                LayerType::LSTM => {
-                    // LSTM层输出大小
-                    layer.activations.len()
-                },
-                LayerType::Attention => {
-                    // 注意力层输出大小
-                    layer.activations.len()
-                },
-                LayerType::Residual => layer.weights.len(),
-            };
-
-            match layer.layer_type {
-                LayerType::Dense => {
-                    // 创建输出缓冲区
-                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Output Buffer Layer {}", i)),
-                        size: (output_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                        mapped_at_creation: false,
-                    });
-
-                    // 矩阵乘法
-                    let matmul_bind_group = self.create_matmul_bind_group(
-                        layer,
-                        &current_input_buffer,
-                        &output_buffer
-                    );
-
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Matmul Encoder"),
-                    });
-
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Matmul Pass"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
-                        cpass.set_bind_group(0, &matmul_bind_group, &[]);
-
-                        // 正确计算工作组数量
-                        let workgroup_count = ((output_size as u32) + 63) / 64;
-                        let workgroup_count = workgroup_count.min(65535);
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                    }
-
-                    queue.submit(Some(encoder.finish()));
-
-                    // 激活函数
-                    let activation_bind_group = self.create_activation_bind_group(
-                        layer,
-                        &output_buffer
-                    );
-
-                    let activation_pipeline = self.activation_pipelines
-                        .get(&layer.activation_func)
-                        .unwrap();
-
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Activation Encoder"),
-                    });
-
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Activation Pass"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(activation_pipeline);
-                        cpass.set_bind_group(0, &activation_bind_group, &[]);
-
-                        // 正确计算工作组数量
-                        let workgroup_count = ((output_size as u32) + 63) / 64;
-                        let workgroup_count = workgroup_count.min(65535);
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                    }
-
-                    queue.submit(Some(encoder.finish()));
-
-                    // 准备下一层的输入
-                    if i < self.layers.len() - 1 {
-                        let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some(&format!("Input Buffer Layer {}", i + 1)),
-                            size: (output_size * size_of::<f32>()) as u64,
-                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-
-                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Copy Encoder"),
-                        });
-
-                        encoder.copy_buffer_to_buffer(
-                            &output_buffer,
-                            0,
-                            &next_input_buffer,
-                            0,
-                            (output_size * size_of::<f32>()) as u64
-                        );
-
-                        queue.submit(Some(encoder.finish()));
-                        current_input_buffer = next_input_buffer;
-                        current_input_size = output_size;
-                    } else {
-                        // 最后一层，直接使用输出缓冲区
-                        current_input_buffer = output_buffer;
-                    }
-                },
-                LayerType::Residual => {
-                    // 创建输出缓冲区
-                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Residual Output Buffer Layer {}", i)),
-                        size: (output_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                        mapped_at_creation: false,
-                    });
-                    
-                    // 创建残差输入缓冲区（假设来自前一层）
-                    let residual_input_buffer = if i >= 2 {
-                        // 使用前两层的输出作为残差输入
-                        &current_input_buffer
-                    } else {
-                        // 如果没有足够的前层，使用当前输入
-                        &current_input_buffer
-                    };
-
-                    // 创建残差参数缓冲区
-                    #[repr(C)]
-                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-                    struct ResidualParams {
-                        input_size: u32,
-                        output_size: u32,
-                        batch_size: u32,
-                    }
-                    
-                    let params = ResidualParams {
-                        input_size: current_input_size as u32,
-                        output_size: output_size as u32,
-                        batch_size: 1, // 单个样本
-                    };
-                    
-                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(&format!("Residual Params Buffer Layer {}", i)),
-                        contents: bytemuck::cast_slice(&[params]),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    });
-                    
-                    // 创建残差绑定组
-                    let residual_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: self.residual_bind_group_layout.as_ref().unwrap(),
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: current_input_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: output_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: residual_input_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: params_buffer.as_entire_binding(),
-                            },
-                        ],
-                        label: Some(&format!("Residual Bind Group Layer {}", i)),
-                    });
-                    
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Residual Encoder"),
-                    });
-                    
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Residual Pass"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(self.residual_pipeline.as_ref().unwrap());
-                        cpass.set_bind_group(0, &residual_bind_group, &[]);
-                        
-                        // 计算工作组数量
-                        let workgroup_count = ((output_size as u32) + 63) / 64;
-                        let workgroup_count = workgroup_count.min(65535);
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                    }
-                    
-                    queue.submit(Some(encoder.finish()));
-                    
-                    // 准备下一层的输入
-                    if i < self.layers.len() - 1 {
-                        let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some(&format!("Input Buffer Layer {}", i + 1)),
-                            size: (output_size * size_of::<f32>()) as u64,
-                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-
-                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Copy Encoder"),
-                        });
-
-                        encoder.copy_buffer_to_buffer(
-                            &output_buffer,
-                            0,
-                            &next_input_buffer,
-                            0,
-                            (output_size * size_of::<f32>()) as u64
-                        );
-
-                        queue.submit(Some(encoder.finish()));
-                        current_input_buffer = next_input_buffer;
-                        current_input_size = output_size;
-                    } else {
-                        // 最后一层，直接使用输出缓冲区
-                        current_input_buffer = output_buffer;
-                    }
-                },
-                LayerType::LSTM => {
-                    let seq_len = layer.seq_len;
-                    let feature_dim = if seq_len > 0 { current_input_size / seq_len } else { current_input_size };
-                    let hidden_size = layer.activations.len() / (if layer.bidirectional { 2 } else { 1 });
-                    let num_directions = if layer.bidirectional { 2 } else { 1 };
-
-                    // 计算缓冲区大小（包含方向维度）
-                    let state_buffer_size = 1 * seq_len * num_directions * hidden_size; // batch=1
-                    let total_output_size = state_buffer_size; // output = hidden_states
-
-                    // 创建输出缓冲区
-                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("LSTM Output Buffer Layer {}", i)),
-                        size: (total_output_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                        mapped_at_creation: false,
-                    });
-
-                    // 创建隐藏状态和细胞状态缓冲区
-                    let hidden_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("LSTM Hidden States Buffer Layer {}", i)),
-                        size: (state_buffer_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-
-                    let cell_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("LSTM Cell States Buffer Layer {}", i)),
-                        size: (state_buffer_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-
-                    // 创建LSTM参数缓冲区
-                    let params = LSTMParams {
-                        input_size: feature_dim as u32,
-                        hidden_size: hidden_size as u32,
-                        seq_len: seq_len as u32,
-                        batch_size: 1, // 单个样本
-                        bidirectional: if layer.bidirectional { 1 } else { 0 },
-                    };
-
-                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(&format!("LSTM Params Buffer Layer {}", i)),
-                        contents: bytemuck::cast_slice(&[params]),
-                        usage: wgpu::BufferUsages::STORAGE,
-                    });
-
-                    let dispatch_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Dispatch Params Buffer Layer {}", i)),
-                        size: size_of::<DispatchParams>() as u64,
-                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
-                        mapped_at_creation: false,
-                    });
-                    
-                    let lstm_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: self.lstm_bind_group_layout.as_ref().unwrap(),
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: current_input_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: output_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: hidden_states_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: cell_states_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 6,
-                                resource: params_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 7,
-                                resource: dispatch_params_buffer.as_entire_binding(),
-                            }
-                        ],
-                        label: Some(&format!("LSTM Bind Group Layer {}", i)),
-                    });
-
-                    // 清零状态缓冲区
-                    {
-                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some(&format!("LSTM Clear States Layer {}", i)),
-                        });
-                        encoder.clear_buffer(&hidden_states_buffer, 0, None);
-                        encoder.clear_buffer(&cell_states_buffer, 0, None);
-                        queue.submit(Some(encoder.finish()));
-                    }
-
-                    // 按时间步和方向循环dispatch
-
-                    // 正向处理 (direction = 0)
-                    for t in 0..seq_len {
-                        // 写入当前dispatch参数
-                        let dispatch_data = DispatchParams {
-                            t: t as u32,
-                            direction: 0,
-                            _pad0: 0,
-                            _pad1: 0,
-                        };
-                        queue.write_buffer(
-                            &dispatch_params_buffer,
-                            0,
-                            bytemuck::bytes_of(&dispatch_data),
-                        );
-
-                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some(&format!("LSTM Forward Step {} Layer {}", t, i)),
-                        });
-
-                        {
-                            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                label: Some(&format!("LSTM Forward Pass t={}", t)),
-                                timestamp_writes: None,
-                            });
-                            cpass.set_pipeline(self.lstm_pipeline.as_ref().unwrap());
-                            cpass.set_bind_group(0, &lstm_bind_group, &[]);
-
-                            // 基于batch_size来计算工作组的数量，最大限制为65535
-                            let workgroup_count = ((params.batch_size + 63) / 64).min(65535);
-                            cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                        }
-
-                        queue.submit(Some(encoder.finish()));
-                    }
-
-                    // 反向处理 (if bidirectional)
-                    if layer.bidirectional {
-                        for t in 0..seq_len {
-                            // 写入反向dispatch参数
-                            let dispatch_data = DispatchParams {
-                                t: t as u32,
-                                direction: 1, // 反向
-                                _pad0: 0,
-                                _pad1: 0,
-                            };
-                            queue.write_buffer(
-                                &dispatch_params_buffer,
-                                0,
-                                bytemuck::bytes_of(&dispatch_data),
-                            );
-
-                            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some(&format!("LSTM Backward Step {} Layer {}", t, i)),
-                            });
-
-                            {
-                                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                    label: Some(&format!("LSTM Backward Pass t={}", t)),
-                                    timestamp_writes: None,
-                                });
-                                cpass.set_pipeline(self.lstm_pipeline.as_ref().unwrap());
-                                cpass.set_bind_group(0, &lstm_bind_group, &[]);
-
-                                let workgroup_count = ((params.batch_size + 63) / 64).min(65535);
-                                cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                            }
-
-                            queue.submit(Some(encoder.finish()));
-                        }
-                    }
-
-                    // 激活函数处理
-                    let activation_bind_group = self.create_activation_bind_group(
-                        layer,
-                        &output_buffer
-                    );
-
-                    let activation_pipeline = self.activation_pipelines
-                        .get(&layer.activation_func)
-                        .unwrap();
-
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("LSTM Activation Encoder"),
-                    });
-
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("LSTM Activation Pass"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(activation_pipeline);
-                        cpass.set_bind_group(0, &activation_bind_group, &[]);
-
-                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
-                        cpass.dispatch_workgroups(workgroup_count.min(65535), 1, 1);
-                    }
-
-                    queue.submit(Some(encoder.finish()));
-
-                    // 准备下一层的输入
-                    if i < self.layers.len() - 1 {
-                        let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some(&format!("Input Buffer Layer {}", i + 1)),
-                            size: (total_output_size * size_of::<f32>()) as u64,
-                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-
-                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Copy Encoder"),
-                        });
-
-                        encoder.copy_buffer_to_buffer(
-                            &output_buffer,
-                            0,
-                            &next_input_buffer,
-                            0,
-                            (total_output_size * size_of::<f32>()) as u64
-                        );
-
-                        queue.submit(Some(encoder.finish()));
-                        current_input_buffer = next_input_buffer;
-                        current_input_size = total_output_size;
-                    } else {
-                        // 最后一层，直接使用输出缓冲区
-                        current_input_buffer = output_buffer;
-                    }
-                },
-                LayerType::Attention => {
-                    // 注意力层：现在使用GPU实现
-                    // 创建输出缓冲区
-                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Attention Output Buffer Layer {}", i)),
-                        size: (output_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                        mapped_at_creation: false,
-                    });
-
-                    // 创建注意力参数缓冲区
-                    #[repr(C)]
-                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-                    struct AttentionParams {
-                        batch_size: u32,
-                        seq_len: u32,
-                        input_size: u32,
-                        num_heads: u32,
-                        head_dim: u32,
-                    }
-
-                    let seq_len = if current_input_size > 0 && layer.seq_len > 0 { 
-                        current_input_size / layer.seq_len 
-                    } else { 1 };
-                    
-                    let num_heads = 8; // 默认8个注意力头
-                    let head_dim = output_size / num_heads;
-                    
-                    let params = AttentionParams {
-                        batch_size: 1, // 单个样本
-                        seq_len: seq_len as u32,
-                        input_size: (if seq_len > 0 { current_input_size / seq_len } else { current_input_size }) as u32,
-                        num_heads: num_heads as u32,
-                        head_dim: head_dim as u32,
-                    };
-
-                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(&format!("Attention Params Buffer Layer {}", i)),
-                        contents: bytemuck::cast_slice(&[params]),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    });
-
-                    // 创建注意力绑定组
-                    // 权重缓冲区需要包含权重 + 偏置的合并数据
-                    let attention_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: self.attention_bind_group_layout.as_ref().unwrap(),
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: params_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: current_input_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(), // Q权重+偏置
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(), // K权重+偏置
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(), // V权重+偏置
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: output_buffer.as_entire_binding(),
-                            },
-                        ],
-                        label: Some(&format!("Attention Bind Group Layer {}", i)),
-                    });
-
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Attention Encoder"),
-                    });
-
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Attention Pass"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(self.attention_pipeline.as_ref().unwrap());
-                        cpass.set_bind_group(0, &attention_bind_group, &[]);
-
-                        // 安全的工作组计算，避免GPU过载
-                        let workgroup_size = 64usize;
-                        let total_output_size = output_size; // 注意力层的输出大小
-                        let workgroup_count = ((total_output_size + workgroup_size - 1) / workgroup_size) as u32;
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                    }
-
-                    queue.submit(Some(encoder.finish()));
-
-                    // 激活函数
-                    let activation_bind_group = self.create_activation_bind_group(
-                        layer,
-                        &output_buffer
-                    );
-
-                    let activation_pipeline = self.activation_pipelines
-                        .get(&layer.activation_func)
-                        .unwrap();
-
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Attention Activation Encoder"),
-                    });
-
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Attention Activation Pass"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(activation_pipeline);
-                        cpass.set_bind_group(0, &activation_bind_group, &[]);
-
-                        // 正确计算工作组数量
-                        let workgroup_count = ((output_size as u32) + 63) / 64;
-                        let workgroup_count = workgroup_count.min(65535);
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                    }
-
-                    queue.submit(Some(encoder.finish()));
-
-                    // 准备下一层的输入
-                    if i < self.layers.len() - 1 {
-                        let next_input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some(&format!("Input Buffer Layer {}", i + 1)),
-                            size: (output_size * size_of::<f32>()) as u64,
-                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-
-                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Copy Encoder"),
-                        });
-
-                        encoder.copy_buffer_to_buffer(
-                            &output_buffer,
-                            0,
-                            &next_input_buffer,
-                            0,
-                            (output_size * size_of::<f32>()) as u64
-                        );
-
-                        queue.submit(Some(encoder.finish()));
-                        current_input_buffer = next_input_buffer;
-                        current_input_size = output_size;
-                    } else {
-                        // 最后一层，直接使用输出缓冲区
-                        current_input_buffer = output_buffer;
-                    }
-                },
-            }
+        // 检查GPU资源是否完整
+        if self.device.is_none() || self.queue.is_none() || self.gpu_executor.is_none() {
+            println!("[GPU DEBUG] GPU resources not fully initialized. FALLING BACK TO CPU.");
+            return self.light_forward(input);
         }
 
-        // 读取结果
-        let result_size = self.layers.last().unwrap().activations.len();
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Staging Buffer"),
-            size: (result_size * size_of::<f32>()) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Readback Encoder"),
-        });
-
-        encoder.copy_buffer_to_buffer(
-            &current_input_buffer,
-            0,
-            &staging_buffer,
-            0,
-            (result_size * size_of::<f32>()) as u64
-        );
-
-        queue.submit(Some(encoder.finish()));
-
-        // 映射缓冲区并读取数据
-        let buffer_slice = staging_buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
-        });
-
-        let _ = device.poll(wgpu::PollType::Wait);
-
-        match receiver.recv() {
-            Ok(Ok(())) => {
-                let data = buffer_slice.get_mapped_range();
-                let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
-
-                // 更新最后一层的激活值
-                if let Some(last_layer) = self.layers.last_mut() {
-                    last_layer.activations = result.clone();
+        // 使用优化的GPU执行器
+        if let Some(ref executor) = self.gpu_executor {
+            // 转换层数据为GPU优化格式
+            let gpu_layers: Vec<crate::gpu_utils::NetworkLayerGPU> = self.layers.iter().map(|layer| {
+                crate::gpu_utils::NetworkLayerGPU {
+                    weights_flattened: layer.weights.iter().flatten().cloned().collect(),
+                    biases: layer.biases.clone(),
+                    output_size: match layer.layer_type {
+                        LayerType::Dense => layer.weights.len(),
+                        LayerType::LSTM => layer.activations.len(),
+                        LayerType::Attention => layer.activations.len(),
+                        LayerType::Residual => layer.weights.len(),
+                        LayerType::Concat => layer.activations.len(),
+                    },
+                    seq_len: layer.seq_len,
+                    layer_type: match layer.layer_type {
+                        LayerType::Dense => crate::gpu_utils::LayerTypeGPU::Dense,
+                        LayerType::LSTM => crate::gpu_utils::LayerTypeGPU::LSTM,
+                        LayerType::Attention => crate::gpu_utils::LayerTypeGPU::Attention,
+                        LayerType::Residual => crate::gpu_utils::LayerTypeGPU::Residual,
+                        LayerType::Concat => crate::gpu_utils::LayerTypeGPU::Concat,
+                    },
+                    num_inputs: if let LayerType::Concat = layer.layer_type {
+                        // 对于Concat层，weights中存储了层索引
+                        layer.weights.len()
+                    } else {
+                        0
+                    },
                 }
+            }).collect();
 
-                result
+            // 检查GPU层数据是否有效
+            if gpu_layers.is_empty() {
+                println!("[GPU DEBUG] No GPU layers prepared. FALLING BACK TO CPU.");
+                return self.light_forward(input);
             }
-            _ => {
-                // 失败时回退到CPU
-                println!("[GPU DEBUG] Buffer mapping failed. FALLING BACK TO CPU (light_forward).");
-                self.light_forward(input)
+
+            // 使用优化的执行器执行前向传播
+            let result_size = self.layers.last().unwrap().activations.len();
+            let result = executor.execute_network_forward(input, &gpu_layers, result_size);
+
+            // 更新最后一层的激活值
+            if let Some(last_layer) = self.layers.last_mut() {
+                last_layer.activations = result.clone();
             }
+
+            result
+        } else {
+            // 回退到CPU
+            println!("[GPU DEBUG] Executor not available. FALLING BACK TO CPU (light_forward).");
+            self.light_forward(input)
         }
     }
 
-    fn create_matmul_bind_group(
-        &self,
-        layer: &NetworkLayer,
-        input_buffer: &wgpu::Buffer,
-        output_buffer: &wgpu::Buffer,
-    ) -> wgpu::BindGroup {
-        let device = self.device.as_ref().unwrap();
-        let bind_group_layout = self.matmul_bind_group_layout.as_ref().unwrap();
-
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: input_buffer.as_entire_binding()
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding()
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: output_buffer.as_entire_binding()
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding()
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: self.batch_size_buffer.as_ref().unwrap(),
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-            ],
-            label: None,
-        })
-    }
-
-    fn create_activation_bind_group(
-        &self,
-        layer: &NetworkLayer,
-        buffer: &wgpu::Buffer,
-    ) -> wgpu::BindGroup {
-        let device = self.device.as_ref().unwrap();
-        let layout = self.activation_bind_group_layouts.get(&layer.activation_func).unwrap();
-
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding()
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: self.batch_size_buffer.as_ref().unwrap(),
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-            ],
-            label: None,
-        })
-    }
 
     fn gpu_forward_batch(&mut self, inputs: &[&[f32]], actual_batch_size: usize) -> Vec<Vec<f32>> {
-        println!("[GPU BATCH DEBUG] Processing batch with {} samples.", actual_batch_size);
-        if self.device.is_none() || self.queue.is_none() || self.matmul_pipeline.is_none() {
-            println!("[GPU DEBUG] Critical GPU resource (device/queue/pipeline) is None. FALLING BACK TO CPU.");
+        // 检查输入是否有效
+        if inputs.is_empty() || actual_batch_size == 0 {
+            println!("[GPU BATCH DEBUG] Empty batch, falling back to CPU");
             return inputs.iter().map(|input| self.light_forward(input)).collect();
         }
 
-        let device = self.device.as_ref().unwrap();
-        let queue = self.queue.as_ref().unwrap();
-        let input_size = inputs[0].len();
-        let total_input_size = input_size * actual_batch_size;
-        let mut batch_input_data = Vec::with_capacity(total_input_size);
-        for input in inputs {
-            batch_input_data.extend_from_slice(input);
-        }
-        let batch_input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Batch Input Buffer"),
-            contents: bytemuck::cast_slice(&batch_input_data),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let mut current_input_buffer = batch_input_buffer;
-        let mut layer_output_buffers = Vec::new();
-        
-        for i in 0..self.layers.len() {
-            let layer = &self.layers[i];
-            
-            match layer.layer_type {
-                LayerType::Dense | LayerType::Residual => {
-                    let output_size = layer.weights.len() as u32;
-                    let total_output_size = output_size * (actual_batch_size as u32);
-
-                    let activation_buffer = match layer.activations_buffer.as_ref() {
-                        Some(b) => b,
-                        None => panic!("Activation buffer for layer {} is not initialized.", i),
-                    };
-
-                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Batch Output Buffer for Layer {}", layer_output_buffers.len())),
-                        size: (total_output_size * size_of::<f32>() as u32) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                        mapped_at_creation: false,
-                    });
-
-                    let matmul_bind_group = self.create_matmul_bind_group(layer, &current_input_buffer, activation_buffer);
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Batch Matmul Encoder")
-                    });
-
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Batch Matmul Pass"),
-                            timestamp_writes: None,
-                        });
-
-                        cpass.set_pipeline(self.matmul_pipeline.as_ref().unwrap());
-                        cpass.set_bind_group(0, &matmul_bind_group, &[]);
-                        cpass.dispatch_workgroups(
-                            ((output_size * actual_batch_size as u32) + 63) / 64,
-                            1,
-                            1
-                        );
-                    }
-                    queue.submit(Some(encoder.finish()));
-
-                    let activation_bind_group = self.create_activation_bind_group(
-                        layer,
-                        &output_buffer,
-                    );
-                    let activation_pipeline = self.activation_pipelines
-                        .get(&layer.activation_func)
-                        .expect("Activation pipeline not initialized");
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Batch Activation Encoder")
-                    });
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Batch Activation Pass"),
-                            timestamp_writes: None,
-                        });
-
-                        cpass.set_pipeline(activation_pipeline);
-                        cpass.set_bind_group(0, &activation_bind_group, &[]);
-                        cpass.dispatch_workgroups(
-                            ((output_size * actual_batch_size as u32) + 63) / 64,
-                            1,
-                            1
-                        );
-                    }
-                    queue.submit(Some(encoder.finish()));
-
-                    current_input_buffer = output_buffer.clone();
-                    layer_output_buffers.push(output_buffer);
-                },
-                LayerType::LSTM => {
-                    // LSTM层：现在使用GPU实现
-                    let seq_len = layer.seq_len;
-                    let feature_dim = if seq_len > 0 { input_size / seq_len } else { input_size };
-                    let output_size = layer.activations.len() / (if layer.bidirectional { 2 } else { 1 });
-                    
-                    // 创建输出缓冲区
-                    let total_output_size = output_size * seq_len * (if layer.bidirectional { 2 } else { 1 }) * actual_batch_size;
-                    let _f32_size = size_of::<f32>() as u32;
-                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Batch LSTM Output Buffer for Layer {}", layer_output_buffers.len())),
-                        size: (total_output_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                        mapped_at_creation: false,
-                    });
-                    
-                    // 创建隐藏状态和细胞状态缓冲区
-                    let hidden_states_size = output_size * seq_len * actual_batch_size;
-                    let hidden_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Batch LSTM Hidden States Buffer for Layer {}", layer_output_buffers.len())),
-                        size: (hidden_states_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-                    
-                    let cell_states_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Batch LSTM Cell States Buffer for Layer {}", layer_output_buffers.len())),
-                        size: (hidden_states_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-                    
-                    // 创建LSTM参数缓冲区
-                    #[repr(C)]
-                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-                    struct LSTMParams {
-                        input_size: u32,
-                        hidden_size: u32,
-                        seq_len: u32,
-                        batch_size: u32,
-                        bidirectional: u32,
-                    }
-                    
-                    let params = LSTMParams {
-                        input_size: feature_dim as u32,
-                        hidden_size: output_size as u32,
-                        seq_len: seq_len as u32,
-                        batch_size: actual_batch_size as u32,
-                        bidirectional: if layer.bidirectional { 1 } else { 0 },
-                    };
-                    
-                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(&format!("Batch LSTM Params Buffer for Layer {}", layer_output_buffers.len())),
-                        contents: bytemuck::cast_slice(&[params]),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    });
-
-                    // 创建dispatch参数缓冲区
-                    let dispatch_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Batch Dispatch Params Buffer Layer {}", layer_output_buffers.len())),
-                        size: size_of::<DispatchParams>() as u64,
-                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
-                        mapped_at_creation: false,
-                    });
-
-                    // 创建LSTM绑定组
-                    let lstm_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: self.lstm_bind_group_layout.as_ref().unwrap(),
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: current_input_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: output_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: hidden_states_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: cell_states_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 6,
-                                resource: params_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 7,
-                                resource: dispatch_params_buffer.as_entire_binding(),
-                            },
-                        ],
-                        label: Some(&format!("Batch LSTM Bind Group for Layer {}", layer_output_buffers.len())),
-                    });
-                    
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Batch LSTM Encoder"),
-                    });
-                    
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Batch LSTM Pass"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(self.lstm_pipeline.as_ref().unwrap());
-                        cpass.set_bind_group(0, &lstm_bind_group, &[]);
-                        
-                        // 计算工作组数量，确保不超过 WebGPU 限制 (65535)
-                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
-                        let workgroup_count = workgroup_count.min(65535);
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                    }
-                    
-                    queue.submit(Some(encoder.finish()));
-                    
-                    // 激活函数
-                    let activation_bind_group = self.create_activation_bind_group(
-                        layer,
-                        &output_buffer,
-                    );
-                    let activation_pipeline = self.activation_pipelines
-                        .get(&layer.activation_func)
-                        .expect("Activation pipeline not initialized");
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Batch LSTM Activation Encoder")
-                    });
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Batch LSTM Activation Pass"),
-                            timestamp_writes: None,
-                        });
-
-                        cpass.set_pipeline(activation_pipeline);
-                        cpass.set_bind_group(0, &activation_bind_group, &[]);
-                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
-                        let workgroup_count = workgroup_count.min(65535);
-                        cpass.dispatch_workgroups(
-                            workgroup_count,
-                            1,
-                            1
-                        );
-                    }
-                    queue.submit(Some(encoder.finish()));
-
-                    current_input_buffer = output_buffer.clone();
-                    layer_output_buffers.push(output_buffer);
-                },
-                LayerType::Attention => {
-                    // 注意力层现在使用GPU实现
-                    let output_size = layer.activations.len();
-                    let total_output_size = output_size * actual_batch_size;
-
-                    // 输出缓冲区
-                    let _f32_size = size_of::<f32>() as u32;
-                    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("Batch Attention Output Buffer for Layer {}", layer_output_buffers.len())),
-                        size: (total_output_size * size_of::<f32>()) as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                        mapped_at_creation: false,
-                    });
-
-                    // 注意力参数缓冲区
-                    #[repr(C)]
-                    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-                    struct AttentionParams {
-                        batch_size: u32,
-                        seq_len: u32,
-                        input_size: u32,
-                        num_heads: u32,
-                        head_dim: u32,
-                    }
-
-                    let seq_len = if input_size > 0 && layer.seq_len > 0 { 
-                        input_size / layer.seq_len 
-                    } else { 1 };
-                    
-                    let num_heads = 8;
-                    let head_dim = output_size / num_heads;
-                    
-                    let params = AttentionParams {
-                        batch_size: actual_batch_size as u32,
-                        seq_len: seq_len as u32,
-                        input_size: (if seq_len > 0 { input_size / seq_len } else { input_size }) as u32,
-                        num_heads: num_heads as u32,
-                        head_dim: head_dim as u32,
-                    };
-
-                    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(&format!("Batch Attention Params Buffer for Layer {}", layer_output_buffers.len())),
-                        contents: bytemuck::cast_slice(&[params]),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    });
-
-                    // 注意力绑定组
-                    let attention_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: self.attention_bind_group_layout.as_ref().unwrap(),
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: params_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: current_input_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(), // Q权重+偏置
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: layer.biases_buffer.as_ref().unwrap().as_entire_binding(), // K权重+偏置
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: layer.weights_buffer.as_ref().unwrap().as_entire_binding(), // V权重+偏置
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: output_buffer.as_entire_binding(),
-                            },
-                        ],
-                        label: Some(&format!("Batch Attention Bind Group for Layer {}", layer_output_buffers.len())),
-                    });
-
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Batch Attention Encoder"),
-                    });
-
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Batch Attention Pass"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(self.attention_pipeline.as_ref().unwrap());
-                        cpass.set_bind_group(0, &attention_bind_group, &[]);
-
-                        // 安全的工作组计算，避免GPU过载
-                        let workgroup_size = 64usize;
-                        let total_output_size = output_size; // 批处理注意力层的输出大小
-                        let workgroup_count = ((total_output_size + workgroup_size - 1) / workgroup_size) as u32;
-                        cpass.dispatch_workgroups(workgroup_count, 1, 1);
-                    }
-
-                    queue.submit(Some(encoder.finish()));
-
-                    // 激活函数
-                    let activation_bind_group = self.create_activation_bind_group(
-                        layer,
-                        &output_buffer,
-                    );
-                    let activation_pipeline = self.activation_pipelines
-                        .get(&layer.activation_func)
-                        .expect("Activation pipeline not initialized");
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Batch Attention Activation Encoder")
-                    });
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Batch Attention Activation Pass"),
-                            timestamp_writes: None,
-                        });
-
-                        cpass.set_pipeline(activation_pipeline);
-                        cpass.set_bind_group(0, &activation_bind_group, &[]);
-                        let workgroup_count = ((total_output_size as u32) + 63) / 64;
-                        let workgroup_count = workgroup_count.min(65535);
-                        cpass.dispatch_workgroups(
-                            //((total_output_size as u32) + 63) / 64,
-                            workgroup_count,
-                            1,
-                            1
-                        );
-                    }
-                    queue.submit(Some(encoder.finish()));
-
-                    current_input_buffer = output_buffer.clone();
-                    layer_output_buffers.push(output_buffer);
-                },
-                
+        println!("[GPU BATCH DEBUG] Processing batch with {} samples.", actual_batch_size);
+        if !self.gpu_initialized {
+            self.init_gpu_sync();
+            if !self.gpu_initialized {
+                println!("[GPU] GPU not available, falling back to CPU");
+                return inputs.iter().map(|input| self.light_forward(input)).collect();
             }
         }
 
-        // 读取最终结果
-        let last_layer_output = layer_output_buffers.last().unwrap();
-        let output_size = self.layers.last().unwrap().activations.len();
-        let total_output_size = output_size * actual_batch_size;
-
-        let _f32_size = size_of::<f32>() as u32;
-        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Batch Staging Buffer"),
-            size: (total_output_size * size_of::<f32>()) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Batch Readback Encoder")
-        });
-
-        encoder.copy_buffer_to_buffer(
-            last_layer_output,
-            0,
-            &staging_buffer,
-            0,
-            (total_output_size * size_of::<f32>()) as u64
-        );
-
-        queue.submit(Some(encoder.finish()));
-
-        let buffer_slice = staging_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-
-        let _ = device.poll(wgpu::PollType::wait());
-
-        match rx.recv() {
-            Ok(Ok(())) => {},
-            _ => return inputs.iter().map(|input| self.light_forward(input)).collect(),
+        // 检查GPU资源是否完整
+        if self.device.is_none() || self.queue.is_none() || self.gpu_executor.is_none() {
+            println!("[GPU DEBUG] GPU resources not fully initialized. FALLING BACK TO CPU.");
+            return inputs.iter().map(|input| self.light_forward(input)).collect();
         }
 
-        let data = buffer_slice.get_mapped_range();
-        let batch_results: &[f32] = bytemuck::cast_slice(&data);
+        // 使用优化的GPU执行器
+        if let Some(ref executor) = self.gpu_executor {
+            // 转换层数据为GPU优化格式
+            let gpu_layers: Vec<crate::gpu_utils::NetworkLayerGPU> = self.layers.iter().map(|layer| {
+                crate::gpu_utils::NetworkLayerGPU {
+                    weights_flattened: layer.weights.iter().flatten().cloned().collect(),
+                    biases: layer.biases.clone(),
+                    output_size: match layer.layer_type {
+                        LayerType::Dense => layer.weights.len(),
+                        LayerType::LSTM => layer.activations.len(),
+                        LayerType::Attention => layer.activations.len(),
+                        LayerType::Residual => layer.weights.len(),
+                        LayerType::Concat => layer.activations.len(),
+                    },
+                    seq_len: layer.seq_len,
+                    layer_type: match layer.layer_type {
+                        LayerType::Dense => crate::gpu_utils::LayerTypeGPU::Dense,
+                        LayerType::LSTM => crate::gpu_utils::LayerTypeGPU::LSTM,
+                        LayerType::Attention => crate::gpu_utils::LayerTypeGPU::Attention,
+                        LayerType::Residual => crate::gpu_utils::LayerTypeGPU::Residual,
+                        LayerType::Concat => crate::gpu_utils::LayerTypeGPU::Concat,
+                    },
+                    num_inputs: if let LayerType::Concat = layer.layer_type {
+                        // 对于Concat层，weights中存储了层索引
+                        layer.weights.len()
+                    } else {
+                        0
+                    },
+                }
+            }).collect();
 
-        let mut results = Vec::with_capacity(actual_batch_size);
-        for i in 0..actual_batch_size {
-            let start = i * output_size;
-            let end = start + output_size;
-            results.push(batch_results[start..end].to_vec());
+            // 检查GPU层数据是否有效
+            if gpu_layers.is_empty() {
+                println!("[GPU DEBUG] No GPU layers prepared. FALLING BACK TO CPU.");
+                return inputs.iter().map(|input| self.light_forward(input)).collect();
+            }
+
+            // 处理批次输入
+            let input_size = inputs[0].len();
+            let total_input_size = input_size * actual_batch_size;
+            let mut batch_input_data = Vec::with_capacity(total_input_size);
+            for input in inputs {
+                batch_input_data.extend_from_slice(input);
+            }
+
+            // 使用优化的执行器执行批次前向传播
+            let result_size = self.layers.last().unwrap().activations.len();
+            let flat_result = executor.execute_network_forward(&batch_input_data, &gpu_layers, result_size * actual_batch_size);
+
+            // 将结果拆分为单个样本
+            let mut results = Vec::with_capacity(actual_batch_size);
+            for i in 0..actual_batch_size {
+                let start = i * result_size;
+                let end = start + result_size;
+                results.push(flat_result[start..end].to_vec());
+            }
+
+            results
+        } else {
+            // 回退到CPU
+            println!("[GPU DEBUG] Executor not available. FALLING BACK TO CPU.");
+            inputs.iter().map(|input| self.light_forward(input)).collect()
         }
-
-        drop(data);
-        staging_buffer.unmap();
-
-        results
     }
 
     /*
     * 构建神经网络架构
      */
     fn build_architecture(&mut self) {
-        const FEATURE_DIM: usize = 40;    // input_dim = 40
-        const SEQ_LEN: usize = 64;        // sequence_length = 64
-        // Layer 1: BiLSTM (40 → 128 hidden → 256 output)
-        self.add_lstm_layer_bi(FEATURE_DIM, 128, true, SEQ_LEN);
-        // Layer 2: BiLSTM (256 → 128 hidden → 256 output)
-        self.add_lstm_layer_bi(256, 128, true, SEQ_LEN);
-        // Layer 3: BiLSTM (256 → 128 hidden → 256 output)
-        self.add_lstm_layer_bi(256, 128, true, SEQ_LEN);
-        // Layer 4: Attention (256 → 128)
-        // Q/K/V: 256*128*3 + 128*3 = 98,304 + 384 = 98,688
-        self.add_attention_layer(256, 128);
-        // Layer 5: Attention (128 → 64)
-        // Q/K/V: 128*64*3 + 64*3 = 24,576 + 192 = 24,768
-        self.add_attention_layer(128, 64);
-        // Layer 6: Dense (64 → 512)
-        self.add_dense_layer(64, 512, ActivationFunction::GELU);
-        // Layer 7: Residual (512 → 512)
-        self.add_residual_layer(512, 512);
-        // Layer 8: Dense (512 → 256)
-        self.add_dense_layer(512, 256, ActivationFunction::GELU);
-        // Layer 9: Residual (256 → 256)
-        self.add_residual_layer(256, 256);
-        // Layer 10: Dense (256 → 128)
-        self.add_dense_layer(256, 128, ActivationFunction::GELU);
-        // Layer 11: Residual (128 → 128)
-        self.add_residual_layer(128, 128);
-        // Layer 12: Dense (128 → 64)
-        self.add_dense_layer(128, 64, ActivationFunction::GELU);
-        // Layer 13: Output (64 → 5) - [left_prob, right_prob, value, confidence, four_finger]
-        self.add_dense_layer(64, 5, ActivationFunction::Linear);
-        
-        // 添加反思层：用于自我验证和反思
-        // Reflection Layer: Dense (5 → 16 → 5)
-        self.add_reflection_layer(5, 16);
+        const INPUT_FUTURE_STEPS: usize = 16;
+        const OUTPUT_PREDICTION_STEPS: usize = 16;
+        const INPUT_DIM: usize = 194 + INPUT_FUTURE_STEPS * 4; // 258维总输入
+        const SEQ_LEN: usize = 32;
 
-        // BiLSTM ×3:
-        //   L1: 4*(128*(40+128)+128)*2 ≈ 173,056
-        //   L2/L3: 4*(128*(256+128)+128)*2 ≈ 394,240 each → ×2 = 788,480
-        //   BiLSTM total ≈ 173k + 788k = 961,536
-        //
-        // Attention ×2:
-        //   Att1 (256→128): 256*128*3 + 128*3 = 98,688
-        //   Att2 (128→64):  128*64*3 + 64*3 = 24,768
-        //   Total ≈ 123,456
-        //
-        // Dense ×4 + Residual ×3 + output + reflection:
-        //   64*512+512 = 33,280
-        //   512*512+512 = 262,656 (Residual)
-        //   512*256+256 = 131,328
-        //   256*256+256 = 65,792 (Residual)
-        //   256*128+128 = 32,896
-        //   128*128+128 = 16,512 (Residual)
-        //   128*64+64 = 8,256
-        //   64*5+5 = 325
-        //   5*16+16 = 96
-        //   16*5+5 = 85
-        //   Dense + Residual total ≈ 388,896 + 181 = 389,077
-        //
-        // GRAND TOTAL ≈ 961,536 + 123,456 + 389,077 ≈ **1,474,069 参数**
+        // 输入编码层 - 逐步降维避免信息损失
+        self.add_dense_layer(INPUT_DIM, 512, ActivationFunction::GELU);
+        self.add_dense_layer(512, 256, ActivationFunction::GELU);
+
+        // 序列建模层 - 并行使用注意力和LSTM捕获时序依赖
+        self.add_attention_layer(256, 256);
+        self.add_residual_layer(256, 256);
+        self.add_lstm_layer_bi(256, 128, true, SEQ_LEN); // 输出256维(128*2)
+
+        // 特征融合层 - 合并注意力和LSTM的输出
+        // 将256维(注意力层索引2)和256维(LSTM层索引4)合并为512维
+        self.add_concat_layer(&[256, 256], &[2, 4]);
+
+        // 深层特征提取
+        self.add_dense_layer(512, 256, ActivationFunction::GELU);
+        self.add_attention_layer(256, 256);
+        self.add_residual_layer(256, 256);
+
+        // 输出准备层
+        self.add_dense_layer(256, 128, ActivationFunction::GELU);
+        self.add_residual_layer(128, 128);
+
+        // 多任务输出头
+        // 主决策输出：9维
+        self.add_dense_layer(128, 64, ActivationFunction::GELU);
+        self.add_dense_layer(64, 9, ActivationFunction::Linear);
+
+        // 未来预测输出：48维(16*3)
+        self.add_dense_layer(128, 96, ActivationFunction::GELU);
+        self.add_dense_layer(96, OUTPUT_PREDICTION_STEPS * 3, ActivationFunction::Linear);
     }
 
     //TODO: 归一化输出
@@ -3166,9 +1846,30 @@ impl DeepNeuralNetwork {
     }
 
     fn add_residual_layer(&mut self, input_size: usize, output_size: usize) {
+        let mut weights = Vec::with_capacity(output_size);
+        let mut biases = Vec::with_capacity(output_size);
+        let mut momentum_weights = Vec::with_capacity(output_size);
+
+        let std_dev = (2.0 / input_size as f32).sqrt();
+
+        for _ in 0..output_size {
+            let mut row = Vec::with_capacity(input_size);
+            let mut momentum_row = Vec::with_capacity(input_size);
+
+            for _ in 0..input_size {
+                let weight = (fastrand::f32() * 2.0 - 1.0) * std_dev;
+                row.push(weight);
+                momentum_row.push(0.0);
+            }
+
+            weights.push(row);
+            biases.push(0.0);
+            momentum_weights.push(momentum_row);
+        }
+
         let layer = NetworkLayer {
-            weights: vec![vec![0.0; input_size]; output_size],
-            biases: vec![0.0; output_size],
+            weights,
+            biases,
             activations: vec![0.0; output_size],
             pre_activations: vec![0.0; output_size],
             gradients: vec![0.0; output_size],
@@ -3186,6 +1887,42 @@ impl DeepNeuralNetwork {
         self.layers.push(layer);
     }
     
+    // 添加连接层：用于合并多个输入流
+    fn add_concat_layer(&mut self, input_sizes: &[usize], layer_indices: &[usize]) {
+        let total_input_size: usize = input_sizes.iter().sum();
+        let output_size = total_input_size; // 连接层输出维度等于输入维度之和
+        
+        // 连接层不需要权重和偏置，只是将输入拼接
+        // 存储需要合并的层索引
+        let mut weights = Vec::new();
+        let mut biases = Vec::new();
+        
+        // 使用权重字段存储层索引（hack方式）
+        for &idx in layer_indices {
+            weights.push(vec![idx as f32]);
+            biases.push(idx as f32);
+        }
+        
+        let layer = NetworkLayer {
+            weights,
+            biases,
+            activations: vec![0.0; output_size],
+            pre_activations: vec![0.0; output_size],
+            gradients: vec![0.0; output_size],
+            momentum_weights: vec![],
+            momentum_biases: vec![],
+            bidirectional: false,
+            seq_len: 1,
+            layer_type: LayerType::Concat,
+            activation_func: ActivationFunction::Linear,
+            weights_buffer: None,
+            biases_buffer: None,
+            activations_buffer: None,
+        };
+        
+        self.layers.push(layer);
+    }
+    
     // 添加反思层：用于自我验证和反思
     fn add_reflection_layer(&mut self, input_size: usize, hidden_size: usize) {
         // 第一层：输入到隐藏层
@@ -3200,14 +1937,14 @@ impl DeepNeuralNetwork {
             eprintln!("[Forward Warning] NaN/Inf detected in input, replacing with zeros");
             // 创建一个清理后的输入向量
             let clean_input: Vec<f32> = input.iter().map(|&x| if x.is_finite() { x } else { 0.0 }).collect();
-            if self.device.is_some() {
+            if self.gpu_initialized && self.device.is_some() && self.gpu_executor.is_some() {
                 return self.gpu_forward(&clean_input);
             } else {
                 return self.cpu_forward(&clean_input);
             }
         }
-        
-        if self.device.is_some() {
+
+        if self.gpu_initialized && self.device.is_some() && self.gpu_executor.is_some() {
             self.gpu_forward(input)
         } else {
             self.cpu_forward(input)
@@ -3247,6 +1984,9 @@ impl DeepNeuralNetwork {
                     };
 
                     current_input = Self::residual_forward(layer, &current_input, &residual_input);
+                }
+                LayerType::Concat => {
+                    current_input = Self::concat_forward(layer, &layer_outputs);
                 }
             }
             
@@ -3807,6 +2547,22 @@ impl DeepNeuralNetwork {
             }
             output[i] = DeepNeuralNetwork::activate(sum, activation);
         }
+        output
+    }
+    
+    fn concat_forward(layer: &NetworkLayer, layer_outputs: &[Vec<f32>]) -> Vec<f32> {
+        // 从 layer.weights 中提取需要合并的层索引
+        let mut output = Vec::new();
+        
+        for idx_row in &layer.weights {
+            if let Some(&idx_f32) = idx_row.first() {
+                let idx = idx_f32 as usize;
+                if idx < layer_outputs.len() {
+                    output.extend_from_slice(&layer_outputs[idx]);
+                }
+            }
+        }
+        
         output
     }
 
@@ -6095,12 +4851,10 @@ impl PhiTKAdvancedAI {
             .num_threads(32)
             .build()
             .ok().map(Arc::new);
-
         let rad = rotation.to_radians();
         // 初始化时使用自动检测模式，先默认为TwoFinger
         let game_mode = GameMode::TwoFinger;
         let finger_states = Self::init_finger_states(game_mode, rad);
-
         let mut ai = Self {
             main_network: DeepNeuralNetwork::new(),
             target_network: DeepNeuralNetwork::new(),
@@ -6110,6 +4864,8 @@ impl PhiTKAdvancedAI {
             experience_replay: ExperienceReplay::new(600000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0)),
             right_hand_state: HandState::new(Hand::Right, Vector2::new(0.3, 0.0)),
+            // 初始化人体工程学手部系统
+            ergonomic_hand_system: ErgonomicHandSystem::new(),
             rotation,
             exploration_rate: 0.05,
             discount_factor: 0.95,
@@ -6139,11 +4895,9 @@ impl PhiTKAdvancedAI {
             hand_switch_count: 0,
             last_assigned_hand: None,
         };
-
         ai.target_network = DeepNeuralNetwork::new(); // 创建新实例
         //ai.target_network.build_architecture();       // 构建相同架构
         //ai.target_network.init_gpu_sync();
-
         ai.warm_thread_pool();
         ai
     }
@@ -6176,16 +4930,14 @@ impl PhiTKAdvancedAI {
 
                         // 重置并初始化 target_network GPU
                         ai.target_network.device = None;
-                        ai.target_network.queue = None;
-                        ai.target_network.batch_size_buffer = None;
-                        ai.target_network.matmul_pipeline = None;
-                        ai.target_network.activation_pipelines = HashMap::new();
-                        ai.target_network.activation_bind_group_layouts = HashMap::new();
-                        for layer in &mut ai.target_network.layers {
-                            layer.weights_buffer = None;
-                            layer.biases_buffer = None;
-                            layer.activations_buffer = None;
-                        }
+                                ai.target_network.queue = None;
+                                ai.target_network.batch_size_buffer = None;
+                                ai.target_network.gpu_executor = None;
+                                for layer in &mut ai.target_network.layers {
+                                    layer.weights_buffer = None;
+                                    layer.biases_buffer = None;
+                                    layer.activations_buffer = None;
+                                }
                         ai.target_network.initialization_attempted = false;
                         ai.target_network.initialization_failed = false;
                         ai.target_network.gpu_initialized = false;
@@ -6200,10 +4952,11 @@ impl PhiTKAdvancedAI {
                         }
 
                         // 重置游戏模式为自动检测模式
-                        ai.game_mode = GameMode::TwoFinger;
-                        ai.finger_states = Self::init_finger_states(ai.game_mode, rotation.to_radians());
-
-                        return ai;
+                                ai.game_mode = GameMode::TwoFinger;
+                                ai.finger_states = Self::init_finger_states(ai.game_mode, rotation.to_radians());
+                                // 初始化人体工程学手部系统
+                                ai.ergonomic_hand_system = ErgonomicHandSystem::new();
+                                return ai;
                             }
                             false => {
                                 eprintln!("[Model Error] 模型验证失败，将创建新模型");
@@ -6404,7 +5157,7 @@ impl PhiTKAdvancedAI {
     }
 
     fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize) {
-        println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
+        //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
             return;
         }
@@ -6427,7 +5180,7 @@ impl PhiTKAdvancedAI {
         }
         self.training_episodes += 1;
         self.last_save_episodes += 1;
-        if self.last_save_episodes >= 256 {
+        if self.last_save_episodes >= 128 {
             println!("Saving episodes to {}", self.last_save_episodes);
             println!("训练回合数，已保存: {}", self.training_episodes);
             self.save_model("phitk_ai_model.bin");
@@ -6546,10 +5299,29 @@ impl PhiTKAdvancedAI {
 
                     // 确定起始手
                     let start_hand = if recent_hands.is_empty() {
-                        // 没有历史记录，使用最左侧音符的手
-                        if sorted_group[0].0 < 0.0 { Hand::Left } else { Hand::Right }
+
+                        // 没有历史记录，使用人体工程学模型选择最左侧音符的手
+
+                        let first_note_idx = sorted_group[0].1;
+
+                        let first_note = &notes[first_note_idx];
+
+                        let note_position = crate::hand_model::Vector2::new(
+                            first_note.position.x,
+                            first_note.position.y,
+                        );
+
+                        let (hand, _, _) = self.ergonomic_hand_system.assign_note_hand(
+                            note_position,
+                            &first_note.kind,
+                            first_note.time,
+                        );
+
+                        hand
                     } else {
+
                         // 使用最近的手的相反手，以促进交替
+
                         if recent_hands[0] == Hand::Left { Hand::Right } else { Hand::Left }
                     };
 
@@ -6561,14 +5333,28 @@ impl PhiTKAdvancedAI {
                         if notes[note_idx].position.x.abs() < CROSSING_THRESHOLD {
                             current_hand = if current_hand == Hand::Left { Hand::Right } else { Hand::Left };
                         } else {
-                            // 对于不跨越中线的音符，根据位置和当前手决定
-                            let note_hand = if notes[note_idx].position.x < 0.0 { Hand::Left } else { Hand::Right };
+                            // 对于不跨越中线的音符，根据人体工程学模型决定
+
+                            let note_position = crate::hand_model::Vector2::new(
+                                notes[note_idx].position.x,
+                                notes[note_idx].position.y,
+                            );
+
+                            let (note_hand, _, _) = self.ergonomic_hand_system.assign_note_hand(
+                                note_position,
+                                &notes[note_idx].kind,
+                                notes[note_idx].time,
+                            );
+
 
                             // 如果音符手与当前手不同，且不是第一个音符，则切换
+
                             if idx > 0 && note_hand != current_hand {
                                 current_hand = note_hand;
                             }
+
                             // 否则保持当前手，促进交替
+
                         }
 
                         notes[note_idx].assigned_hand = Some(current_hand);
@@ -6630,7 +5416,7 @@ impl PhiTKAdvancedAI {
                 let end = (note_idx + CONTEXT_WINDOW / 2).min(notes.len());
                 let context = &notes[start..end];
                 let features = self.feature_extractor.extract_features(context, CONTEXT_WINDOW, bpm_list);
-                let ai_decision = self.make_ai_decision(&features, &notes[note_idx], line_id);
+                let ai_decision = self.make_ai_decision(&features, &notes[note_idx], line_id, note_idx, notes);
                 notes[note_idx].assigned_hand = Some(ai_decision.0);
                 notes[note_idx].confidence = ai_decision.1;
                 self.recent_assignments.push_back((ai_decision.0, notes[note_idx].position.x, notes[note_idx].time));
@@ -6751,7 +5537,7 @@ impl PhiTKAdvancedAI {
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
         const CONTEXT_WINDOW: usize = 64;
-        const BATCH_SIZE: usize = 256;
+        const BATCH_SIZE: usize = 64;
 
         let mut unassigned_indices = Vec::new();
         for i in 0..notes.len() {
@@ -6759,7 +5545,7 @@ impl PhiTKAdvancedAI {
                 unassigned_indices.push(i);
             }
         }
-        //等待 BATCH_SIZE = 64 才进行下面的计算
+        // 等待 BATCH_SIZE = 64 才进行下面的计算
         if unassigned_indices.len() < BATCH_SIZE {
             return;
         }
@@ -6769,9 +5555,9 @@ impl PhiTKAdvancedAI {
             if batch_indices.len() < BATCH_SIZE {
                 continue;
             }
-            
-            println!("[处理批次] 处理 {} 个音符的批次，使用GPU: {}", batch_indices.len(), self.main_network.gpu_initialized);
-            
+
+            //println!("[处理批次] 处理 {} 个音符的批次，使用GPU: {}", batch_indices.len(), self.main_network.gpu_initialized);
+
             let results: Vec<_> = if let Some(pool) = &self.thread_pool {
                 pool.install(|| {
                     batch_indices.par_iter().map(|&idx| {
@@ -6884,28 +5670,29 @@ impl PhiTKAdvancedAI {
             };
 
             let feature_slices: Vec<&[f32]> = results.iter().map(|r| r.0.as_slice()).collect();
-            println!("[前向传播] 开始处理批次，大小: {}，使用GPU: {}", results.len(), self.main_network.gpu_initialized);
+            //println!("[前向传播] 开始处理批次，大小: {}，使用GPU: {}", results.len(), self.main_network.gpu_initialized);
             let outputs = if self.main_network.gpu_initialized {
                 self.main_network.gpu_forward_batch(&feature_slices, results.len())
             } else {
                 results.iter().map(|r| self.main_network.forward(&r.0)).collect()
             };
-            println!("[前向传播] 完成批次处理，输出维度: {:?}", if !outputs.is_empty() { outputs[0].len() } else { 0 });
+            //println!("[前向传播] 完成批次处理，输出维度: {:?}", if !outputs.is_empty() { outputs[0].len() } else { 0 });
 
             for (i, output) in outputs.iter().enumerate() {
                 let (features, note_idx, position_x, time, judge, kind, _dominant_side) = &results[i];
                 let current_note = notes[*note_idx].clone();
 
-                let ai_decision = self.make_ai_decision(output, &current_note, line_id);
+                let ai_decision = self.make_ai_decision(output, &current_note, line_id, *note_idx, notes);
                 let ideal_hand = if current_note.position.x < 0.0 { Hand::Left } else { Hand::Right };
                 let network_correct = ai_decision.0 == ideal_hand;
-                
-                if i % 4 == 0 { // 每4个音符打印一次，避免日志过多
-                    println!("[AI决策] 音符{}: 位置x={:.3}, 时间={:.3}, AI选择={:?}, 理想={:?}, 置信度={:.3}, 正确={}", 
-                        note_idx, position_x, time, ai_decision.0, ideal_hand, ai_decision.1, network_correct);
-                }
 
-                let note = &mut notes[*note_idx];
+                //if i % 4 == 0 { // 每4个音符打印一次，避免日志过多
+                //    println!("[AI决策] 音符{}: 位置x={:.3}, 时间={:.3}, AI选择={:?}, 理想={:?}, 置信度={:.3}, 正确={}",
+                //        note_idx, position_x, time, ai_decision.0, ideal_hand, ai_decision.1, network_correct);
+                //}
+
+                // Avoid mutable borrow here
+                let mut note = notes[*note_idx].clone();
                 note.features = features.clone();
                 note.assigned_hand = Some(ai_decision.0);
                 note.confidence = ai_decision.1;
@@ -6926,204 +5713,167 @@ impl PhiTKAdvancedAI {
                     Hand::Right => self.right_hand_state.update_state(note.position, note.time, success, &kind),
                 }
 
-                self.record_experience(&features, note, ai_decision.0, ai_decision.1, network_correct);
+                // Record experience after modifying the note
+                self.record_experience(&features, &mut note, ai_decision.0, ai_decision.1, network_correct, *note_idx, notes);
+
+                // Update the original note
+                notes[*note_idx] = note;
             }
         }
     }
 
-    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, _line_id: usize) -> (Hand, f32, Finger) {
-        // 直接使用世界坐标，不受判定线旋转影响
-        // 保持绝对位置，判定线旋转只影响视觉效果
-        let absolute_x = note.position.x;
+    fn make_ai_decision(&mut self, features: &[f32], note: &ProcessedNote, _line_id: usize, note_idx: usize, notes: &[ProcessedNote]) -> (Hand, f32, Finger) {
+        // 构建完整输入：AdvancedFeatureExtractor特征(40维) + hand_model数据(152维) = 192维
+        let mut full_input = Vec::with_capacity(192);
         
-        if self.game_mode == GameMode::TwoFinger {
-            // Phigros 2指模式优化
-            const SHORT_TIME_WINDOW: f32 = 0.3; // 短时间窗口，检测即时密集
-            const LONG_TIME_WINDOW: f32 = 1.0;  // 长时间窗口，检测整体趋势
-            const DENSE_THRESHOLD: f32 = 0.55;  // 密集区域阈值，降低以更容易检测
-            const CROSSING_THRESHOLD: f32 = 0.15; // 跨越中线的阈值
-
-            // 统计不同时间窗口内的音符分布 (使用绝对世界坐标)
-            let mut recent_left_short = 0;
-            let mut recent_right_short = 0;
-            let mut recent_left_long = 0;
-            let mut recent_right_long = 0;
-
-            // 统计最近的手分配历史
-            let mut recent_hand_sequence = Vec::new();
-
-            for (hand, x, t) in &self.recent_assignments {
-                // 直接使用绝对x坐标，不受判定线旋转影响
-                let history_x = *x;
-                
-                // 短时间窗口统计
-                if (note.time - t).abs() <= SHORT_TIME_WINDOW {
-                    if history_x < -CROSSING_THRESHOLD {
-                        recent_left_short += 1;
-                    } else if history_x > CROSSING_THRESHOLD {
-                        recent_right_short += 1;
-                    }
-                    recent_hand_sequence.push(*hand);
-                }
-
-                // 长时间窗口统计
-                if (note.time - t).abs() <= LONG_TIME_WINDOW {
-                    if history_x < -CROSSING_THRESHOLD {
-                        recent_left_long += 1;
-                    } else if history_x > CROSSING_THRESHOLD {
-                        recent_right_long += 1;
-                    }
-                }
-            }
-
-            // 检测密集区域
-            let total_short = recent_left_short + recent_right_short;
-            let total_long = recent_left_long + recent_right_long;
-
-            let is_left_dense_short = total_short > 0 && (recent_left_short as f32) / (total_short as f32) > DENSE_THRESHOLD;
-            let is_right_dense_short = total_short > 0 && (recent_right_short as f32) / (total_short as f32) > DENSE_THRESHOLD;
-            let is_left_dense_long = total_long > 0 && (recent_left_long as f32) / (total_long as f32) > DENSE_THRESHOLD;
-            let is_right_dense_long = total_long > 0 && (recent_right_long as f32) / (total_long as f32) > DENSE_THRESHOLD;
-
-            let is_any_dense = is_left_dense_short || is_right_dense_short || is_left_dense_long || is_right_dense_long;
-
-            // 检测音符是否跨越中线 (使用绝对坐标)
-            let is_crossing = absolute_x.abs() < CROSSING_THRESHOLD;
-
-            // 检测连续同手模式
-            let mut consecutive_same_hand = 0;
-            let mut last_hand_in_sequence = None;
-            for &hand in recent_hand_sequence.iter().rev().take(6) {
-                if last_hand_in_sequence == Some(hand) {
-                    consecutive_same_hand += 1;
-                } else {
-                    break;
-                }
-                last_hand_in_sequence = Some(hand);
-            }
-
-            // 策略1：密集区域积极交替
-            if is_any_dense {
-                let dense_side = if is_left_dense_short || is_left_dense_long {
-                    Hand::Left
-                } else {
-                    Hand::Right
-                };
-
-                // 在密集区域内，强制交替策略
-                if let Some(last_hand) = self.last_assigned_hand {
-                    // 如果上一个音符与密集区域同侧，则交替
-                    if last_hand == dense_side {
-                        let alternate_hand = if dense_side == Hand::Left { Hand::Right } else { Hand::Left };
-                        return (alternate_hand, 0.95,
-                                if alternate_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                    } else {
-                        // 如果上一个音符已经交替，则继续使用密集区域的手
-                        return (dense_side, 0.90,
-                                if dense_side == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                    }
-                } else {
-                    // 没有历史记录，根据绝对音符位置选择
-                    let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
-                    return (position_based_hand, 0.85,
-                            if position_based_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                }
-            }
-
-            // 策略2：跨越中线音符的特殊处理
-            if is_crossing {
-                // 跨越中线的音符，根据最近的手分配历史决定
-                if let Some(last_hand) = self.last_assigned_hand {
-                    // 优先使用与上一只手不同的手，以促进交替
-                    let alternate_hand = if last_hand == Hand::Left { Hand::Right } else { Hand::Left };
-                    return (alternate_hand, 0.88,
-                            if alternate_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                } else {
-                    // 没有历史记录，根据绝对位置差异决定
-                    let hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
-                    return (hand, 0.80,
-                            if hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                }
-            }
-
-            // 策略3：防止连续同手过多
-            if consecutive_same_hand >= 2 {
-                // 强制交替
-                let alternate_hand = if let Some(last_hand) = last_hand_in_sequence {
-                    if last_hand == Hand::Left { Hand::Right } else { Hand::Left }
-                } else {
-                    // 如果没有记录，根据绝对位置决定
-                    if absolute_x < 0.0 { Hand::Right } else { Hand::Left }
-                };
-
-                return (alternate_hand, 0.87,
-                        if alternate_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-            }
-
-            // 策略4：基于绝对位置的默认分配
-            let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
-
-            // 检查是否需要平衡负荷
-            let left_ratio = if total_long > 0 { (recent_left_long as f32) / (total_long as f32) } else { 0.5 };
-            let right_ratio = if total_long > 0 { (recent_right_long as f32) / (total_long as f32) } else { 0.5 };
-
-            // 如果负荷不平衡，优先使用负荷较轻的手
-            if (left_ratio - right_ratio).abs() > 0.3 {
-                let balanced_hand = if left_ratio > right_ratio { Hand::Right } else { Hand::Left };
-
-                // 只有当位置与平衡手不太冲突时才使用平衡策略
-                let position_conflict = (position_based_hand == Hand::Left && absolute_x > 0.2) ||
-                                       (position_based_hand == Hand::Right && absolute_x < -0.2);
-
-                if !position_conflict {
-                    return (balanced_hand, 0.83,
-                            if balanced_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-                }
-            }
-
-            // 默认策略：基于绝对位置分配
-            return (position_based_hand, 0.80,
-                    if position_based_hand == Hand::Left { Finger::LeftIndex } else { Finger::RightIndex });
-        }
-
-        // 4指模式使用PPO网络
-        let output = self.main_network.forward(features);
-        let left_prob = output.get(0).copied().unwrap_or(0.5);
-        let right_prob = output.get(1).copied().unwrap_or(0.5);
-        let _value = output.get(2).copied().unwrap_or(0.0);
-        let confidence = output.get(3).copied().unwrap_or(0.7);
+        // 第一部分：AdvancedFeatureExtractor的40维特征
+        full_input.extend_from_slice(features);
         
-        // 使用概率分布进行采样，而不是直接选择最大值
-        let total_prob = left_prob + right_prob;
-        let network_hand = if total_prob > 0.0 {
-            if fastrand::f32() < (left_prob / total_prob) {
+        // 第二部分：hand_model的152维数据
+        let hand_model_input = DeepNeuralNetwork::hand_model_to_input(&self.ergonomic_hand_system);
+        full_input.extend_from_slice(&hand_model_input);
+        
+        // 使用神经网络进行决策，完整输入作为输入
+        // 注意：网络现在有两个输出层，第一个是9维的当前预测，第二个是12维的未来预测
+        let network_outputs = self.main_network.forward(&full_input);
+        
+        // 解析第一个输出层（当前音符预测，9维）
+        // [left_prob, right_prob, left_index_prob, left_middle_prob, right_index_prob, right_middle_prob, value, confidence, four_finger_mode]
+        let left_prob = network_outputs.get(0).copied().unwrap_or(0.5).clamp(0.0, 1.0);
+        let right_prob = network_outputs.get(1).copied().unwrap_or(0.5).clamp(0.0, 1.0);
+        let left_index_prob = network_outputs.get(2).copied().unwrap_or(0.5).clamp(0.0, 1.0);
+        let left_middle_prob = network_outputs.get(3).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        let right_index_prob = network_outputs.get(4).copied().unwrap_or(0.5).clamp(0.0, 1.0);
+        let right_middle_prob = network_outputs.get(5).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        let _value = network_outputs.get(6).copied().unwrap_or(0.0); // 状态价值，暂时不用
+        let confidence = network_outputs.get(7).copied().unwrap_or(0.7).clamp(0.0, 1.0);
+        let _four_finger_mode = network_outputs.get(8).copied().unwrap_or(0.0); // 四指模式指示器
+        
+        // 根据概率选择手（添加探索机制）
+        let chosen_hand = if fastrand::f32() < self.exploration_rate {
+            // 探索：随机选择
+            if fastrand::bool() { Hand::Left } else { Hand::Right }
+        } else {
+            // 利用：根据网络输出选择
+            if left_prob > right_prob {
                 Hand::Left
             } else {
                 Hand::Right
             }
-        } else {
-            // 备用策略：基于绝对位置
-            if absolute_x < 0.0 { Hand::Left } else { Hand::Right }
-        };
-
-        // 简化手指分配逻辑，直接使用基于位置的简单评分
-        let best_finger = if network_hand == Hand::Left { 
-            Finger::LeftIndex 
-        } else { 
-            Finger::RightIndex 
         };
         
-        (network_hand, confidence, best_finger)
+        // 根据游戏模式选择手指概率
+        let chosen_finger = match self.game_mode {
+            GameMode::TwoFinger => {
+                // 2指模式：只能选择食指
+                if chosen_hand == Hand::Left {
+                    Finger::LeftIndex
+                } else {
+                    Finger::RightIndex
+                }
+            },
+            GameMode::FourFinger => {
+                // 4指模式：根据概率选择最佳手指
+                if chosen_hand == Hand::Left {
+                    if left_index_prob > left_middle_prob {
+                        Finger::LeftIndex
+                    } else {
+                        Finger::LeftMiddle
+                    }
+                } else {
+                    if right_index_prob > right_middle_prob {
+                        Finger::RightIndex
+                    } else {
+                        Finger::RightMiddle
+                    }
+                }
+            }
+        };
+        
+        // 将手指类型转换为手指索引
+        let finger_index = match chosen_finger {
+            Finger::LeftIndex => 0,
+            Finger::LeftMiddle => 1,
+            Finger::RightIndex => 0,
+            Finger::RightMiddle => 1,
+        };
+        
+        // 应用手指按下状态
+        self.ergonomic_hand_system.apply_finger_press(chosen_hand, finger_index, note.time);
+        
+        // 解析第二个输出层（未来音符预测，12维 = 4个未来音符 × 3个值）
+        // 每个未来音符预测：[hand_prob_left, hand_prob_right, position_x]
+        if network_outputs.len() >= 21 { // 9 + 12 = 21
+            let future_predictions = &network_outputs[9..21];
+            self.process_future_predictions(future_predictions, note.time, note_idx, notes);
+        }
+        
+        (chosen_hand, confidence, chosen_finger)
     }
 
-    fn record_experience(&mut self, features: &[f32], note: &ProcessedNote, chosen_hand: Hand, confidence: f32, network_correct: bool) {
+    fn process_future_predictions(&mut self, predictions: &[f32], current_time: f32, note_idx: usize, notes: &[ProcessedNote]) {
+        // 处理未来4个音符的预测
+        // predictions: [hand_left_1, hand_right_1, pos_x_1, hand_left_2, hand_right_2, pos_x_2, ...]
+        const FUTURE_STEPS: usize = 4;
+        
+        for i in 0..FUTURE_STEPS {
+            let offset = i * 3;
+            if offset + 2 >= predictions.len() {
+                break;
+            }
+            
+            let left_prob = predictions[offset].clamp(0.0, 1.0);
+            let right_prob = predictions[offset + 1].clamp(0.0, 1.0);
+            let predicted_pos_x = predictions[offset + 2].clamp(-1.0, 1.0);
+            
+            // 计算预测的时间点（使用真实的音符间隔）
+            let future_idx = note_idx + i + 1;
+            let time_delta = if future_idx < notes.len() {
+                notes[future_idx].time - current_time
+            } else {
+                (i as f32 + 1.0) * 0.1 // 如果没有足够的未来音符，使用默认值
+            };
+            let predicted_time = current_time + time_delta;
+            
+            // 根据预测调整当前决策（例如，如果未来音符都在右侧，当前可能选择左手以准备）
+            self.adjust_current_decision_based_on_future(left_prob, right_prob, predicted_pos_x, predicted_time);
+        }
+    }
+
+    fn adjust_current_decision_based_on_future(&mut self, left_prob: f32, right_prob: f32, pos_x: f32, _time: f32) {
+        // 简单的启发式：如果未来音符明显偏向一侧，当前选择另一侧以准备
+        // 这只是一个简单的实现，可以根据需要扩展
+        let future_bias = right_prob - left_prob;
+        
+        // 如果未来音符强烈偏向右侧（概率差 > 0.5），且位置在右侧
+        if future_bias > 0.5 && pos_x > 0.3 {
+            // 当前可能更倾向于选择左手，为即将到来的右手音符做准备
+            // 实际实现中可以调整探索率或偏置当前决策
+            self.exploration_rate = self.exploration_rate * 0.95; // 稍微降低探索率
+        } else if future_bias < -0.5 && pos_x < -0.3 {
+            // 如果未来音符强烈偏向左侧，且位置在左侧
+            self.exploration_rate = self.exploration_rate * 0.95;
+        }
+    }
+
+    fn record_experience(&mut self, features: &[f32], note: &ProcessedNote, chosen_hand: Hand, confidence: f32, network_correct: bool, note_idx: usize, all_notes: &[ProcessedNote]) {
+        // 构建完整状态向量：AdvancedFeatureExtractor特征(40维) + hand_model数据(152维) = 192维
+        let mut full_state = Vec::with_capacity(192);
+        
+        // 第一部分：AdvancedFeatureExtractor的40维特征
+        full_state.extend_from_slice(features);
+        
+        // 第二部分：hand_model的152维数据
+        let hand_model_input = DeepNeuralNetwork::hand_model_to_input(&self.ergonomic_hand_system);
+        full_state.extend_from_slice(&hand_model_input);
+        
         //println!("Recording experience, replay size now: {}", self.experience_replay.len());
         let reward = self.calculate_reward(note, chosen_hand, confidence);
         let feature_diversity = features.iter().map(|&x| (x - 0.5).abs()).sum::<f32>() / features.len() as f32;
         let priority = if feature_diversity > 0.3 { 2.0 } else { 1.0 };
 
-        // 使用网络获取动作概率和状态值
-        let output = self.main_network.forward(features);
+        // 使用网络获取动作概率和状态值（使用完整状态）
+        let output = self.main_network.forward(&full_state);
         let action_prob = if chosen_hand == Hand::Left { 
             output.get(0).copied().unwrap_or(0.5) 
         } else { 
@@ -7134,11 +5884,37 @@ impl PhiTKAdvancedAI {
         // 计算动作的对数概率
         let log_prob = action_prob.ln().clamp(-2.0, 0.0);
 
+        // 获取真实的未来音符信息（4个未来音符）
+        let mut future_notes = Vec::with_capacity(16); // 4个音符 × 4个值 = 16维
+        const FUTURE_STEPS: usize = 4;
+        
+        for i in 1..=FUTURE_STEPS {
+            let future_idx = note_idx + i;
+            if future_idx < all_notes.len() {
+                let future_note = &all_notes[future_idx];
+                
+                // 编码未来音符的信息：
+                // [hand_left_prob, hand_right_prob, position_x, time_delta]
+                let left_prob = if future_note.position.x < 0.0 { 0.8 } else { 0.2 };
+                let right_prob = if future_note.position.x >= 0.0 { 0.8 } else { 0.2 };
+                let pos_x = future_note.position.x.clamp(-1.0, 1.0);
+                let time_delta = (future_note.time - note.time).clamp(0.0, 2.0); // 限制最大时间差为2秒
+                
+                future_notes.push(left_prob);
+                future_notes.push(right_prob);
+                future_notes.push(pos_x);
+                future_notes.push(time_delta);
+            } else {
+                // 如果没有足够的未来音符，填充0
+                future_notes.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+            }
+        }
+        
         let experience = Experience {
-            state: features.to_vec(),
+            state: full_state.clone(),
             action: if chosen_hand == Hand::Left { 0 } else { 1 },
             reward: reward * priority,
-            next_state: features.to_vec(),
+            next_state: full_state.clone(), // 简化处理，实际应该计算下一个状态
             done: false,
             timestamp: note.time,
             log_prob,
@@ -7146,6 +5922,7 @@ impl PhiTKAdvancedAI {
             next_value: 0.0, // 将在训练时计算
             advantage: 0.0,  // 将在训练时计算
             return_: 0.0,    // 将在训练时计算
+            future_notes,    // 真实的未来音符信息
         };
         self.experience_replay.push(experience);
         self.last_assigned_hand = Some(chosen_hand);
@@ -7157,233 +5934,85 @@ impl PhiTKAdvancedAI {
     }
 
     fn calculate_reward(&mut self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
-        // 直接使用世界坐标，不受判定线旋转影响
-        // 保持绝对位置，判定线旋转只影响视觉效果
-        let absolute_x = note.position.x;
-        
-        let mut reward: f32 = 0.0;
-
-        if self.game_mode == GameMode::TwoFinger {
-            const SHORT_TIME_WINDOW: f32 = 0.3;
-            const LONG_TIME_WINDOW: f32 = 1.0;
-            const DENSE_THRESHOLD: f32 = 0.55;
-            const CROSSING_THRESHOLD: f32 = 0.15;
-            
-            // 统计不同时间窗口内的音符分布 (使用相对于判定线的坐标)
-            let mut recent_left_short = 0;
-            let mut recent_right_short = 0;
-            let mut recent_left_long = 0;
-            let mut recent_right_long = 0;
-
-            // 统计最近的手分配序列
-            let mut recent_hand_sequence = Vec::new();
-
-            for (hand, x, t) in &self.recent_assignments {
-                // 直接使用绝对x坐标，不受判定线旋转影响
-                let history_x = *x;
-                
-                // 短时间窗口统计
-                if (note.time - t).abs() <= SHORT_TIME_WINDOW {
-                    if history_x < -CROSSING_THRESHOLD {
-                        recent_left_short += 1;
-                    } else if history_x > CROSSING_THRESHOLD {
-                        recent_right_short += 1;
-                    }
-                    recent_hand_sequence.push(*hand);
-                }
-
-                // 长时间窗口统计
-                if (note.time - t).abs() <= LONG_TIME_WINDOW {
-                    if history_x < -CROSSING_THRESHOLD {
-                        recent_left_long += 1;
-                    } else if history_x > CROSSING_THRESHOLD {
-                        recent_right_long += 1;
-                    }
-                }
-            }
-
-            // 检测密集区域
-            let total_short = recent_left_short + recent_right_short;
-            let total_long = recent_left_long + recent_right_long;
-
-            let is_left_dense_short = total_short > 0 && (recent_left_short as f32) / (total_short as f32) > DENSE_THRESHOLD;
-            let is_right_dense_short = total_short > 0 && (recent_right_short as f32) / (total_short as f32) > DENSE_THRESHOLD;
-            let is_left_dense_long = total_long > 0 && (recent_left_long as f32) / (total_long as f32) > DENSE_THRESHOLD;
-            let is_right_dense_long = total_long > 0 && (recent_right_long as f32) / (total_long as f32) > DENSE_THRESHOLD;
-
-            let is_any_dense = is_left_dense_short || is_right_dense_short || is_left_dense_long || is_right_dense_long;
-
-            // 检测音符是否跨越中线 (使用绝对坐标)
-            let is_crossing = absolute_x.abs() < CROSSING_THRESHOLD;
-
-            // 检测连续同手模式
-            let mut consecutive_same_hand = 0;
-            let mut last_hand_in_sequence = None;
-            for &hand in recent_hand_sequence.iter().rev().take(6) {
-                if last_hand_in_sequence == Some(hand) {
-                    consecutive_same_hand += 1;
+        // 使用人体工程学手部系统评估分配的合理性
+        let note_position = crate::hand_model::Vector2::new(note.position.x, note.position.y);
+        let (optimal_hand, _optimal_finger, _optimal_confidence) = self.ergonomic_hand_system.assign_note_hand(
+            note_position,
+            &note.kind,
+            note.time,
+        );
+        // 基础奖励：根据人体工程学系统判断的最优手与实际选择手的匹配程度
+        let mut reward: f32 = if chosen_hand == optimal_hand { 0.5 } else { -0.3 };
+        // 根据音符类型调整奖励
+        match note.kind {
+            NoteKind::Flick => {
+                // Flick音符需要快速反应，人体工程学评估更重要
+                let hand_model = if chosen_hand == Hand::Left {
+                    &self.ergonomic_hand_system.left_hand
                 } else {
-                    break;
-                }
-                last_hand_in_sequence = Some(hand);
-            }
-
-            // 策略1：密集区域奖励
-            if is_any_dense {
-                let dense_side = if is_left_dense_short || is_left_dense_long {
-                    Hand::Left
-                } else {
-                    Hand::Right
+                    &self.ergonomic_hand_system.right_hand
                 };
+                let difficulty = self.ergonomic_hand_system.calculate_hand_difficulty(hand_model, &note_position, &note.kind);
 
-                // 在密集区域内，强烈奖励交替，惩罚连续同手
-                if let Some(last_hand) = self.last_assigned_hand {
-                    if last_hand == chosen_hand && consecutive_same_hand >= 1 {
-                        // 连续使用同一只手，大幅惩罚
-                        reward -= 0.9 - (consecutive_same_hand as f32 * 0.1); // 连续越多，惩罚越大
-                    } else {
-                        // 成功交替，大幅奖励
-                        reward += 0.8;
-                    }
+                reward -= difficulty * 0.3; // 人体工程学难度越高，奖励越低
 
-                    // 额外奖励：如果非密集区域的手进入密集区帮助
-                    if chosen_hand != dense_side {
-                        reward += 0.4; // 奖励"跨区支援"
-                    }
-                } else {
-                    // 没有历史记录，基于相对位置给予基础奖励
-                    let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
-                    if chosen_hand == position_based_hand {
-                        reward += 0.3;
-                    } else {
-                        reward -= 0.1;
-                    }
-                }
-            }
+            },
 
-            // 策略2：跨越中线音符的奖励
-            else if is_crossing {
-                // 跨越中线的音符，奖励交替策略
-                if let Some(last_hand) = self.last_assigned_hand {
-                    let alternate_hand = if last_hand == Hand::Left { Hand::Right } else { Hand::Left };
-                    if chosen_hand == alternate_hand {
-                        reward += 0.7; // 奖励成功交替
-                    } else {
-                        reward -= 0.3; // 惩罚未交替
-                    }
+            NoteKind::Hold { .. } => {
+                // Hold音符需要长时间保持，考虑手部疲劳
+                let hand_fatigue = if chosen_hand == Hand::Left {
+                    self.ergonomic_hand_system.left_hand.fatigue
                 } else {
-                    // 没有历史记录，基于相对位置差异给予奖励
-                    let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
-                    if chosen_hand == position_based_hand {
-                        reward += 0.2;
-                    }
-                }
-            }
-            
-            // 策略3：防止连续同手过多的奖励
-            else if consecutive_same_hand >= 2 {
-                // 强制交替的情况
-                let expected_alternate_hand = if let Some(last_hand) = last_hand_in_sequence {
-                    if last_hand == Hand::Left { Hand::Right } else { Hand::Left }
-                } else {
-                    // 如果没有记录，根据绝对位置决定期望的手
-                    if absolute_x < 0.0 { Hand::Right } else { Hand::Left }
+                    self.ergonomic_hand_system.right_hand.fatigue
                 };
-
-                if chosen_hand == expected_alternate_hand {
-                    reward += 0.6; // 奖励正确交替
-                } else {
-                    reward -= 0.5; // 惩罚未交替
-                }
-            }
-            
-            // 策略4：基于绝对位置的默认奖励
-            else {
-                let position_based_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
-
-                // 检查负荷平衡
-                let left_ratio = if total_long > 0 { (recent_left_long as f32) / (total_long as f32) } else { 0.5 };
-                let right_ratio = if total_long > 0 { (recent_right_long as f32) / (total_long as f32) } else { 0.5 };
-
-                if (left_ratio - right_ratio).abs() > 0.3 {
-                    let balanced_hand = if left_ratio > right_ratio { Hand::Right } else { Hand::Left };
-
-                    // 位置与平衡手不冲突的情况
-                    let position_conflict = (position_based_hand == Hand::Left && absolute_x > 0.2) ||
-                                           (position_based_hand == Hand::Right && absolute_x < -0.2);
-
-                    if !position_conflict && chosen_hand == balanced_hand {
-                        reward += 0.4; // 奖励平衡负荷
-                    } else if chosen_hand == position_based_hand {
-                        reward += 0.2; // 基础位置奖励
-                    } else {
-                        reward -= 0.15; // 位置冲突惩罚
-                    }
-                } else {
-                    // 没有明显负荷不平衡，使用基础位置奖励
-                    if chosen_hand == position_based_hand {
-                        reward += 0.25;
-                    } else {
-                        reward -= 0.1;
-                    }
-                }
-            }
-            
-            // 额外奖励：基于音符类型的特殊处理
-            match note.kind {
-                NoteKind::Flick => {
-                    // Flick音符需要更精确的处理
-                    let ideal_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
-                    if chosen_hand == ideal_hand {
-                        reward += 0.15;
-                    } else {
-                        reward -= 0.2;
-                    }
-                },
-                NoteKind::Hold { .. } => {
-                    // Hold音符需要考虑持续时间
-                    if note.duration > 0.5 {
-                        // 长时间Hold，奖励使用位置对应的手
-                        let ideal_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
-                        if chosen_hand == ideal_hand {
-                            reward += 0.1;
-                        }
-                    }
-                },
-                _ => {}
-            }
-        } else {
-            // 4指模式保持原有逻辑，使用绝对坐标
-            let ideal_hand = if absolute_x < 0.0 { Hand::Left } else { Hand::Right };
-            if chosen_hand == ideal_hand {
-                reward += 0.5;
-            } else {
-                reward -= 0.3;
-            }
+                reward -= hand_fatigue * 0.2; // 疲劳度越高，奖励越低
+            },
+            _ => {}
         }
-
-        // 物理可行性检查（现在使用相对坐标的手部位置）
+        // 物理可行性检查
         let hand_state = if chosen_hand == Hand::Left { &self.left_hand_state } else { &self.right_hand_state };
         let distance = note.position.distance_to(&hand_state.position);
         let time_since_last = note.time - hand_state.last_time;
-
         if time_since_last > 0.001 {
             let speed = distance / time_since_last;
-            if speed > 12.0 { 
-                reward -= 0.6;
-            } else if speed < 4.0 { 
-                reward += 0.1;
+            if speed > 15.0 { // 增加速度阈值以适应人体工程学模型
+                reward -= 0.5; // 速度过快，惩罚
+            } else if speed < 3.0 { // 减少低速奖励以适应人体工程学模型
+                reward += 0.05; // 低速操作，小幅奖励
             }
         }
-
         // 基于置信度的奖励调整
         if confidence > 0.8 {
-            reward += 0.05;
+            reward += 0.1; // 高置信度奖励
         } else if confidence < 0.5 {
-            reward -= 0.05;
+            reward -= 0.1; // 低置信度惩罚
         }
+        // 应用连续分配模式的奖励/惩罚
 
+        if let Some(last_hand) = self.last_assigned_hand {
+            // 防止连续同手分配过多
+            let consecutive_same = self.count_consecutive_same_hand(chosen_hand);
+            if consecutive_same > 3 {
+                reward -= 0.2 * (consecutive_same as f32 - 3.0); // 连续过多惩罚
+            }
+            // 鼓励手部交替（如果人体工程学评估支持交替）
+            if last_hand == chosen_hand && chosen_hand != optimal_hand {
+                reward -= 0.2; // 与上次相同手但不是最优选择，惩罚
+            }
+        }
         reward.clamp(-1.0, 1.0)
+    }
+    /// 计算连续相同手的分配次数
+    fn count_consecutive_same_hand(&self, current_hand: Hand) -> usize {
+        let mut count = 0;
+        for (hand, _, _) in self.recent_assignments.iter().rev() {
+            if *hand == current_hand {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count
     }
 
     fn smooth_hand_transitions(&self, notes: &mut [ProcessedNote]) {
@@ -7499,11 +6128,24 @@ impl PhiTKAdvancedAI {
         // 直接使用绝对世界坐标，不受判定线旋转影响
         
         // 计算平均绝对X坐标
-        let avg_x: f32 = notes.iter()
+        let _avg_x: f32 = notes.iter()
             .map(|n| n.position.x)
             .sum::<f32>() / notes.len() as f32;
-            
-        let mut current_hand = if avg_x < 0.0 { Hand::Left } else { Hand::Right };
+
+        // 使用人体工程学模型选择初始手
+
+        let first_note = &notes[0];
+
+        let note_position = crate::hand_model::Vector2::new(
+            first_note.position.x,
+            first_note.position.y,
+        );
+
+        let (mut current_hand, _, _) = self.ergonomic_hand_system.assign_note_hand(
+            note_position,
+            &first_note.kind,
+            first_note.time,
+        );
 
         for (index, note) in notes.iter_mut().enumerate() {
             // 使用绝对x坐标
@@ -7681,10 +6323,20 @@ impl PhiTKAdvancedAI {
                 notes[i].confidence = 0.8;
             }
 
-            // 跨越完成后，根据最后一个音符的绝对位置决定是否切换回默认手
-            let last_note_x = notes[crossing_end].position.x;
-            
-            let ideal_hand_after_crossing = if last_note_x < 0.0 { Hand::Left } else { Hand::Right };
+            // 跨越完成后，根据人体工程学模型决定是否切换回默认手
+
+            let last_note = &notes[crossing_end];
+
+            let last_note_position = crate::hand_model::Vector2::new(
+                last_note.position.x,
+                last_note.position.y,
+            );
+
+            let (ideal_hand_after_crossing, _, _) = self.ergonomic_hand_system.assign_note_hand(
+                last_note_position,
+                &last_note.kind,
+                last_note.time,
+            );
 
             // 如果跨越后的理想手与起始手不同，则切换
             if ideal_hand_after_crossing != start_hand {
@@ -7958,28 +6610,57 @@ impl PhiTKAdvancedAI {
         // 计算优势函数和回报
         self.compute_advantages(&mut experiences);
 
-        // PPO训练
+        // PPO训练 - 新的9维输出格式 + 时序预测
         let mut training_data = Vec::with_capacity(experiences.len());
         for exp in &experiences {
-            // 构造目标输出
-            let mut target_output = vec![0.0; 5]; // [left_prob, right_prob, value, confidence, four_finger]
+            // 构造目标输出 - 现在包含9维当前预测 + 12维未来预测
+            let mut target_output = vec![0.0; 21]; // 9维当前 + 12维未来 = 21维
+            // [left_prob, right_prob, left_index_prob, left_middle_prob, right_index_prob, right_middle_prob, value, confidence, four_finger_mode]
             
-            // 设置动作概率目标 - 使用更平滑的概率分布
+            // 设置手部分配概率目标
             if exp.action == 0 { // Left
-                target_output[0] = 0.8;  // 降低确定性，增加探索
-                target_output[1] = 0.2;
+                target_output[0] = 0.8;  // left_prob
+                target_output[1] = 0.2;  // right_prob
+                target_output[2] = 0.85; // left_index_prob
+                target_output[3] = 0.15; // left_middle_prob
+                target_output[4] = 0.2;  // right_index_prob
+                target_output[5] = 0.1;  // right_middle_prob
             } else { // Right
-                target_output[0] = 0.2;
-                target_output[1] = 0.8;  // 降低确定性，增加探索
+                target_output[0] = 0.2;  // left_prob
+                target_output[1] = 0.8;  // right_prob
+                target_output[2] = 0.2;  // left_index_prob
+                target_output[3] = 0.1;  // left_middle_prob
+                target_output[4] = 0.85; // right_index_prob
+                target_output[5] = 0.15; // right_middle_prob
             }
             
             // 设置价值目标 - 添加噪声防止过拟合
             let value_noise = fastrand::f32() * 0.1 - 0.05;  // [-0.05, 0.05]的噪声
-            target_output[2] = (exp.return_ + value_noise).clamp(-2.0, 2.0);
+            target_output[6] = (exp.return_ + value_noise).clamp(-2.0, 2.0); // value
             
-            // 保留其他输出
-            target_output[3] = 0.7; // confidence - 降低确定性
-            target_output[4] = 0.0; // four_finger
+            // 置信度和模式
+            target_output[7] = 0.7; // confidence - 降低确定性
+            target_output[8] = if self.game_mode == GameMode::FourFinger { 1.0 } else { 0.0 }; // four_finger_mode
+            
+            // ===== 未来音符预测目标（12维 = 4个未来音符 × 3个值）=====
+            // 每个未来音符：[hand_prob_left, hand_prob_right, position_x]
+            // 使用真实的未来音符数据生成目标
+            for i in 0..4 {
+                let offset = 9 + i * 3;
+                let future_offset = i * 4; // future_notes中每个音符占4个值
+                
+                if future_offset + 3 < exp.future_notes.len() {
+                    // 使用真实的未来音符数据
+                    target_output[offset] = exp.future_notes[future_offset];     // hand_prob_left
+                    target_output[offset + 1] = exp.future_notes[future_offset + 1]; // hand_prob_right
+                    target_output[offset + 2] = exp.future_notes[future_offset + 2]; // position_x
+                } else {
+                    // 如果没有足够的未来音符数据，使用默认值
+                    target_output[offset] = 0.5;     // hand_prob_left
+                    target_output[offset + 1] = 0.5; // hand_prob_right
+                    target_output[offset + 2] = 0.0; // position_x (中心)
+                }
+            }
 
             training_data.push((exp.state.clone(), target_output));
         }
@@ -7998,7 +6679,8 @@ impl PhiTKAdvancedAI {
                 valid_samples += 1;
                 // 计算一个简单的损失估计
                 let output = self.main_network.light_forward(input);
-                let sample_loss: f32 = output.iter().zip(target.iter()).take(2)
+                // 只计算当前预测的损失（前9维）
+                let sample_loss: f32 = output.iter().zip(target.iter()).take(9)
                     .map(|(o, t)| (o - t).powi(2))
                     .sum();
                 total_loss += sample_loss;
