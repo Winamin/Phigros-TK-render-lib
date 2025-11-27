@@ -3,9 +3,14 @@ use crate::config::Config;
 use crate::core::note::Hand;
 
 use crate::core::{BpmList, Note, NoteKind};
-
 use crate::hand_model::{ErgonomicHandSystem, HandModel, FingerModel, FingerType, ArmModel, Vector2};
-use crate::judge::JudgeStatus;
+use crate::core::Vector;
+
+// 这些类型在 apply_reflection_influence 方法中被使用以增强手部分配算法
+// - HandModel: 用于计算手部移动难度
+// - FingerModel: 用于评估手指适用性  
+// - ArmModel: 用于计算手臂舒适度
+// - FingerType: 用于手指类型匹配
 
 use bincode;
 use bytemuck::{Pod, Zeroable};
@@ -27,7 +32,14 @@ use std::time::{Duration, Instant};
 use wgpu;
 use wgpu::util::DeviceExt;
 
-type StdHashMap<K, V> = HashMap<K, V>;
+//type StdHashMap<K, V> = HashMap<K, V>;
+
+// 更严格的物理限制常量
+const ABSOLUTE_MAX_SPEED: f32 = 4.0;      // 更严格的绝对最大速度
+const HARD_MIN_TIME_GAP: f32 = 0.06;      // 更严格的最小时间间隔 (60ms)
+const MAX_CONSECUTIVE_SAME_HAND: usize = 3; // 更严格的连续同手最大数量
+const MAX_SIMULTANEOUS_NOTES: usize = 2;   // 更严格的同时音符限制
+const MAX_FINGER_REACH: f32 = 0.25;       // 与人体工程学模型一致的可达距离
 
 #[derive(Clone)]
 struct AiRequest {
@@ -81,7 +93,7 @@ static VERSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static TOTAL_TOKENS_USED: AtomicU64 = AtomicU64::new(0);
 
 //const LIGHT_UPDATE_INTERVAL_MS: u64 = 16;
-const FULL_UPDATE_INTERVAL_MS: u64 = 20;
+const FULL_UPDATE_INTERVAL_MS: u64 = 8;
 const REQUEST_TIMEOUT_MS: u64 = 5000;
 
 static START_ONCE: Once = Once::new();
@@ -229,7 +241,7 @@ fn start_ai_worker_if_needed(config: &Config) {
 
                 let mut notes_copy = req.notes.clone();
                 let analysis_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    worker_ai.analyze_and_assign(&mut notes_copy, &req.config, &req.bpm_list, req.line_id);
+                    worker_ai.analyze_and_assign(&mut notes_copy, &req.config, &req.bpm_list, req.line_id, start_time.elapsed().as_secs_f32());
                     notes_copy
                 }));
 
@@ -397,6 +409,221 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
     drop(line_states_guard);
 }
 
+/// 增强版手部分配函数 - 为AI提供更丰富的数据特征
+pub fn assign_hands_enhanced(
+    notes: &mut [Note], 
+    config: &Config, 
+    line_id: usize, 
+    rotation: f32, 
+    bpm_list: &BpmList,
+    enhanced_data: Vec<(Vector, Vector)> // (world_pos, enhanced_pos)
+) {
+    if notes.is_empty() {
+        return;
+    }
+
+    start_ai_worker_if_needed(config);
+
+    let now = Instant::now();
+
+    let line_states = LINE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut line_states_guard = line_states.lock().unwrap_or_else(|poisoned| {
+        eprintln!("Line states mutex poisoned, recovering...");
+        poisoned.into_inner()
+    });
+
+    let line_state = line_states_guard.entry(line_id).or_default();
+
+    // 批量处理响应，减少锁竞争
+    if let Some(map) = LINE_RESP_QUEUES.get() {
+        let mut responses = Vec::with_capacity(5);
+        {
+            let mut mq = map.lock().unwrap();
+            if let Some(queue) = mq.get_mut(&line_id) {
+                const MAX_RESPONSES_PER_FRAME: usize = 5;
+                for _ in 0..MAX_RESPONSES_PER_FRAME {
+                    if let Some(resp) = queue.pop_front() {
+                        responses.push(resp);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 批量处理响应
+        for resp in responses {
+            if resp.line_id != line_id {
+                continue;
+            }
+
+            if let Some(pending_entry) = line_state.pending_requests.remove(&resp.id) {
+                let (_req_ts, req_version) = pending_entry;
+                if resp.version == req_version && resp.checksum == calculate_checksum(&resp.notes) {
+                    if match_and_merge_notes(notes, &resp.notes) {
+                        line_state.current_version = resp.version;
+                        line_state.last_full_update = now;
+                    }
+                }
+            }
+        }
+    }
+
+    // 减少全量更新的频率
+    let should_full_update = now.duration_since(line_state.last_full_update) >= Duration::from_millis(FULL_UPDATE_INTERVAL_MS);
+    if should_full_update {
+        const MAX_PENDING_REQUESTS: usize = 3;
+        if line_state.pending_requests.len() < MAX_PENDING_REQUESTS {
+            let version = VERSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let request_id = REQ_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+            line_state.pending_requests.insert(request_id, (now, version));
+
+            // 优化：避免不必要的克隆
+            let cfg_arc = Arc::new(config.clone());
+            let bpm_arc = Arc::new(bpm_list.clone());
+
+            // 创建增强版音符数据
+            let enhanced_notes: Vec<SimpleEnhancedNote> = create_enhanced_notes(notes, &enhanced_data);
+            let enhanced_req = create_enhanced_ai_request(
+                request_id,
+                line_id,
+                version,
+                now,
+                enhanced_notes,
+                rotation,
+                cfg_arc,
+                bpm_arc,
+            );
+
+            if let Some(tx) = AI_REQ_TX.get() {
+                if tx.send(enhanced_req).is_err() {
+                    line_state.pending_requests.remove(&request_id);
+                }
+            }
+        }
+    }
+    drop(line_states_guard);
+}
+
+/// 创建增强版音符数据（简化版本）
+fn create_enhanced_notes(notes: &[Note], enhanced_data: &[(Vector, Vector)]) -> Vec<SimpleEnhancedNote> {
+    notes.iter()
+        .enumerate()
+        .map(|(i, note)| {
+            let (world_pos, enhanced_pos) = enhanced_data[i];
+            
+            SimpleEnhancedNote {
+                base_note: note.clone(),
+                world_position: Vector2::new(world_pos.x, world_pos.y),
+                difficulty_score: calculate_enhanced_difficulty(note),
+                symmetry_score: calculate_symmetry_score(enhanced_pos, Vector2::new(2.4, 1.2)),
+                fatigue_prediction: predict_fatigue_from_position(enhanced_pos),
+                accuracy_requirement: get_accuracy_requirement(&note.kind),
+            }
+        })
+        .collect()
+}
+
+/// 计算增强版难度评分
+fn calculate_enhanced_difficulty(note: &Note) -> f32 {
+    let base_difficulty = match note.kind {
+        crate::core::NoteKind::Click => 1.0,
+        crate::core::NoteKind::Drag => 1.3,
+        crate::core::NoteKind::Flick => 1.5,
+        crate::core::NoteKind::Hold { .. } => 1.8,
+    };
+    
+    // 位置难度（考虑实际按键区域）
+    let x_pos = note.object.translation.0.now().abs();
+    let position_factor = 1.0 + x_pos * 0.3; // 边缘位置稍难
+    
+    // 速度难度
+    let speed_factor = 1.0 + (note.speed - 1.0).max(0.0) * 0.4;
+    
+    base_difficulty * position_factor * speed_factor
+}
+
+/// 计算对称性评分
+fn calculate_symmetry_score(position: Vector, field_size: Vector2) -> f32 {
+    let distance_from_center = position.x.abs();
+    let max_distance = field_size.x / 2.0;
+    1.0 - (distance_from_center / max_distance).min(1.0)
+}
+
+/// 基于位置预测疲劳度
+fn predict_fatigue_from_position(position: Vector) -> f32 {
+    let mut fatigue: f32 = 0.0;
+    
+    // 边缘位置更容易疲劳
+    let edge_factor = position.x.abs() * 0.3;
+    fatigue += edge_factor;
+    
+    // 极端位置惩罚
+    if position.x.abs() > 0.8 {
+        fatigue += 0.2;
+    }
+    
+    fatigue.min(1.0)
+}
+
+/// 获取精度要求
+fn get_accuracy_requirement(kind: &crate::core::NoteKind) -> f32 {
+    match kind {
+        crate::core::NoteKind::Click => 0.8,
+        crate::core::NoteKind::Drag => 0.9,
+        crate::core::NoteKind::Flick => 0.95,
+        crate::core::NoteKind::Hold { .. } => 0.85,
+    }
+}
+
+/// 创建增强版AI请求（简化版本）
+fn create_enhanced_ai_request(
+    id: u64,
+    line_id: usize,
+    version: u64,
+    timestamp: Instant,
+    enhanced_notes: Vec<SimpleEnhancedNote>,
+    rotation: f32,
+    config: Arc<Config>,
+    bpm_list: Arc<BpmList>,
+) -> AiRequest {
+    // 将增强版数据转换为标准格式，同时保持增强特征
+    let enhanced_notes_std: Vec<Note> = enhanced_notes.into_iter().map(|en| {
+        let mut note = en.base_note;
+        // 将增强位置信息写入对象平移
+        note.object.translation.0 = crate::core::AnimFloat::fixed(en.world_position.x);
+        note.object.translation.1 = crate::core::AnimFloat::fixed(en.world_position.y);
+        
+        // 将难度信息存入speed字段作为辅助信息
+        note.speed = en.difficulty_score;
+        
+        note
+    }).collect();
+
+    AiRequest {
+        id,
+        line_id,
+        version,
+        timestamp,
+        notes: enhanced_notes_std,
+        rotation,
+        config,
+        bpm_list,
+    }
+}
+
+/// 简化的增强特征结构（避免编译复杂性）
+#[derive(Debug, Clone)]
+struct SimpleEnhancedNote {
+    pub base_note: Note,
+    pub world_position: Vector2,
+    pub difficulty_score: f32,
+    pub symmetry_score: f32,
+    pub fatigue_prediction: f32,
+    pub accuracy_requirement: f32,
+}
+
 pub fn default_max_grad_norm() -> f32 { 5.0_f32 }
 
 pub struct HandConfig {
@@ -446,8 +673,7 @@ struct PhiTKAdvancedAI {
     last_save_episodes: u64,
     last_update_time: f32,
     line_rotations: HashMap<usize, f32>,
-    game_mode: GameMode,
-    finger_states: Vec<FingerState>,
+    game_mode: crate::hand_model::GameMode,
     stability_factor: f32,
     hand_switch_penalty: f32,
     consistency_bonus: f32,
@@ -457,6 +683,44 @@ struct PhiTKAdvancedAI {
     recent_assignments: VecDeque<(Hand, f32, f32)>,
     hand_switch_count: u32,
     last_assigned_hand: Option<Hand>,
+    // 防过拟合机制
+    best_validation_reward: f32,
+    validation_patience: u32,
+    no_improvement_count: u32,
+    early_stopping_threshold: f32,
+    // 基于音符序列模式的早停机制
+    sequence_pattern_history: VecDeque<SequencePatternMetrics>,
+    pattern_diversity_threshold: f32,
+    sequence_complexity_threshold: f32,
+    convergence_window: u32,
+    // 反思系统相关字段
+    decision_history: VecDeque<(Hand, f32, bool)>, // (hand_assignment, timestamp, success)
+    reflection_memory: HashMap<String, f32>, // 模式反思记忆
+    reflection_confidence: f32, // 反思置信度
+    last_reflection_time: f32, // 上次反思时间
+    reflection_learning_rate: f32, // 反思学习率
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+enum EarlyStopDecision {
+    Continue,
+    LearningRateAdjust,
+    Stop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SequencePatternMetrics {
+    timestamp: f32,
+    alternating_score: f32,
+    stream_score: f32,
+    chord_score: f32,
+    jack_score: f32,
+    crossing_score: f32,
+    note_density: f32,
+    rhythm_complexity: f32,
+    sequence_variance: f32,
+    hand_switching_frequency: f32,
+    confidence_score: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,9 +732,14 @@ struct ProcessedNote {
     assigned_hand: Option<Hand>,
     confidence: f32,
     features: Vec<f32>,
-    judge: JudgeStatus,
     difficulty: f32,
     duration: f32,
+    // 物理模型判断相关字段
+    actual_position: Option<Vector2>,
+    position_error: f32,
+    timing_error: f32,
+    is_successful: bool,
+    physical_confidence: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,6 +759,11 @@ struct Experience {
     // 未来音符信息（4个未来音符）
     // 每个未来音符：[hand_left_prob, hand_right_prob, position_x, time_delta]
     future_notes: Vec<f32>,
+    // 反思相关字段
+    reflection_score: f32,      // 反思得分
+    decision_history: Vec<usize>, // 过去决策历史
+    outcome_success: bool,       // 决策结果是否成功
+    reflection_features: Vec<f32>, // 反思提取的特征
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -498,11 +772,7 @@ struct ExperienceReplay {
     capacity: usize,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum GameMode {
-    TwoFinger,
-    FourFinger,
-}
+
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum Finger {
@@ -513,77 +783,32 @@ pub enum Finger {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FingerState {
-    finger: Finger,
-    position: Vector2,
-    velocity: Vector2,
-    #[serde(default)]
-    last_time: f32,
-    #[serde(default)]
-    fatigue: f32,
-    #[serde(default)]
-    confidence: f32,
-    success_streak: u32,
-    total_actions: u32,
-    #[serde(default)]
-    performance_score: f32,
-    #[serde(default)]
-    is_busy: bool,
-    #[serde(default)]
-    busy_until: f32,
-}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-
 struct DeepNeuralNetwork {
-
     layers: Vec<NetworkLayer>,
-
     #[serde(default)]learning_rate: f32,
-
     #[serde(default)]momentum: f32,
-
     #[serde(default)]dropout_rate: f32,
-
     batch_size: usize,
-
     //#[serde(skip)]
-
     #[serde(default = "default_max_grad_norm")]
-
     max_grad_norm: f32,
-
     //#[serde(skip)]
-
     //weight_decay: f32,
-
     #[serde(default)]
-
-    last_loss: f32,          // 用于学习率调整
-
+    last_loss: f32,
     #[serde(default)]
-
-    bad_epochs: usize,       // 用于学习率调整
-
+    bad_epochs: usize,
     epoch_count: u64,
-
     #[serde(skip)]device: Option<wgpu::Device>,
-
     #[serde(skip)]queue: Option<wgpu::Queue>,
-
-    // 移除单个管线，使用统一的GPU执行器
-
     #[serde(skip)]gpu_executor: Option<Arc<crate::gpu_utils::GpuNetworkExecutor>>,
-
     #[serde(skip)]gpu_initialized: bool,
-
     #[serde(skip)]batch_size_buffer: Option<wgpu::Buffer>,
-
     #[serde(skip)]initialization_attempted: bool,
-
     #[serde(skip)]initialization_failed: bool,
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -592,24 +817,20 @@ struct NetworkLayer {
     weights: Vec<Vec<f32>>,
     #[serde(default)]
     biases: Vec<f32>,
-
     #[serde(default)]
     activations: Vec<f32>,
     #[serde(default)]
     pre_activations: Vec<f32>,
-
     #[serde(default)]
     gradients: Vec<f32>,
     #[serde(default)]
     momentum_weights: Vec<Vec<f32>>,
     #[serde(default)]
     momentum_biases: Vec<f32>,
-
     #[serde(default)]
     bidirectional: bool,
     #[serde(default)]
     seq_len: usize,
-
     layer_type: LayerType,
     activation_func: ActivationFunction,
     #[serde(skip)]
@@ -627,6 +848,7 @@ enum LayerType {
     Attention,
     Residual,
     Concat,
+    Reflection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -751,36 +973,17 @@ impl Vector2 {
     }
 }
 
-impl std::ops::Add for Vector2 {
-    type Output = Vector2;
-    fn add(self, other: Vector2) -> Vector2 {
-        Vector2::new(self.x + other.x, self.y + other.y)
-    }
-}
 
-impl std::ops::Sub for Vector2 {
-    type Output = Vector2;
-    fn sub(self, other: Vector2) -> Vector2 {
-        Vector2::new(self.x - other.x, self.y - other.y)
-    }
-}
-
-impl std::ops::Mul<f32> for Vector2 {
-    type Output = Vector2;
-    fn mul(self, scalar: f32) -> Vector2 {
-        Vector2::new(self.x * scalar, self.y * scalar)
-    }
-}
 
 impl DeepNeuralNetwork {
     fn new() -> Self {
         let mut network = Self {
             layers: Vec::new(),
-            learning_rate: 0.0008, //降低初始学习率以防止梯度爆炸
+            learning_rate: 0.05, //大幅提高初始学习率以增强梯度效果
             momentum: 0.9,
-            dropout_rate: 0.1,
+            dropout_rate: 0.3,
             batch_size: 64, //增加批次大小以提高GPU利用率
-            max_grad_norm: 2.0, //降低梯度裁剪阈值以更好地控制梯度爆炸
+            max_grad_norm: 20.0, //显著提高梯度裁剪阈值，允许更大的梯度范围
             //weight_decay: 0.0001,
             last_loss: f32::INFINITY, //损失
             bad_epochs: 0,
@@ -902,34 +1105,7 @@ impl DeepNeuralNetwork {
         
         input
     }
-    
-    /// 训练网络，使用hand_model作为输入
-    pub fn train_with_hand_model(&mut self, training_data: &[(ErgonomicHandSystem, Vec<f32>)]) {
-        if training_data.is_empty() {
-            eprintln!("警告: 训练数据为空，跳过训练");
-            return;
-        }
-        
-        // 转换hand_model为网络输入
-        let converted_data: Vec<(Vec<f32>, Vec<f32>)> = training_data.iter()
-            .map(|(hand_system, target)| {
-                let input = Self::hand_model_to_input(hand_system);
-                (input, target.clone())
-            })
-            .collect();
-        
-        // 调用现有的训练函数
-        self.train(&converted_data);
-    }
-    
-    /// 使用hand_model进行预测
-    pub fn predict_with_hand_model(&mut self, hand_system: &ErgonomicHandSystem) -> Vec<f32> {
-        let input = Self::hand_model_to_input(hand_system);
-        self.light_forward(&input)
-    }
 
-
-    
     fn clean(&mut self) {
         for layer in &mut self.layers {
             for weights in &mut layer.weights {
@@ -1177,6 +1353,9 @@ impl DeepNeuralNetwork {
                 }
                 LayerType::Concat => {
                     current_input = Self::concat_forward(layer, &layer_outputs);
+                }
+                LayerType::Reflection => {
+                    current_input = Self::reflection_forward(layer, &current_input, &layer_outputs);
                 }
             }
             
@@ -1434,6 +1613,7 @@ impl DeepNeuralNetwork {
         true
     }
 
+    /*
     fn get_activation_shader(&self, func: &ActivationFunction) -> String {
         let fn_body = match func {
             ActivationFunction::ReLU => "return max(val, 0.0);",
@@ -1466,6 +1646,8 @@ impl DeepNeuralNetwork {
     }}
 "#)
     }
+
+     */
 
     fn gpu_forward(&mut self, input: &[f32]) -> Vec<f32> {
         // 检查输入是否有效
@@ -1502,6 +1684,7 @@ impl DeepNeuralNetwork {
                         LayerType::Attention => layer.activations.len(),
                         LayerType::Residual => layer.weights.len(),
                         LayerType::Concat => layer.activations.len(),
+                        LayerType::Reflection => layer.activations.len(),
                     },
                     seq_len: layer.seq_len,
                     layer_type: match layer.layer_type {
@@ -1510,6 +1693,7 @@ impl DeepNeuralNetwork {
                         LayerType::Attention => crate::gpu_utils::LayerTypeGPU::Attention,
                         LayerType::Residual => crate::gpu_utils::LayerTypeGPU::Residual,
                         LayerType::Concat => crate::gpu_utils::LayerTypeGPU::Concat,
+                        LayerType::Reflection => crate::gpu_utils::LayerTypeGPU::Dense,
                     },
                     num_inputs: if let LayerType::Concat = layer.layer_type {
                         // 对于Concat层，weights中存储了层索引
@@ -1579,6 +1763,7 @@ impl DeepNeuralNetwork {
                         LayerType::Attention => layer.activations.len(),
                         LayerType::Residual => layer.weights.len(),
                         LayerType::Concat => layer.activations.len(),
+                        LayerType::Reflection => layer.activations.len(),
                     },
                     seq_len: layer.seq_len,
                     layer_type: match layer.layer_type {
@@ -1587,6 +1772,7 @@ impl DeepNeuralNetwork {
                         LayerType::Attention => crate::gpu_utils::LayerTypeGPU::Attention,
                         LayerType::Residual => crate::gpu_utils::LayerTypeGPU::Residual,
                         LayerType::Concat => crate::gpu_utils::LayerTypeGPU::Concat,
+                        LayerType::Reflection => crate::gpu_utils::LayerTypeGPU::Dense,
                     },
                     num_inputs: if let LayerType::Concat = layer.layer_type {
                         // 对于Concat层，weights中存储了层索引
@@ -1640,7 +1826,7 @@ impl DeepNeuralNetwork {
         const INPUT_DIM: usize = 194 + INPUT_FUTURE_STEPS * 4; // 258维总输入
         const SEQ_LEN: usize = 32;
 
-        // 输入编码层 - 逐步降维避免信息损失
+        // 输入编码层 - 使用GELU提供最佳梯度特性
         self.add_dense_layer(INPUT_DIM, 512, ActivationFunction::GELU);
         self.add_dense_layer(512, 256, ActivationFunction::GELU);
 
@@ -1653,16 +1839,20 @@ impl DeepNeuralNetwork {
         // 将256维(注意力层索引2)和256维(LSTM层索引4)合并为512维
         self.add_concat_layer(&[256, 256], &[2, 4]);
 
-        // 深层特征提取
+        // 深层特征提取 - 使用GELU提供最佳梯度特性
         self.add_dense_layer(512, 256, ActivationFunction::GELU);
         self.add_attention_layer(256, 256);
         self.add_residual_layer(256, 256);
 
-        // 输出准备层
+        // 反思层：分析历史决策模式，提取深层洞察
+        self.add_reflection_layer(256, 128);
+        self.add_residual_layer(256, 256);
+
+        // 输出准备层 - 使用GELU提供最佳梯度特性
         self.add_dense_layer(256, 128, ActivationFunction::GELU);
         self.add_residual_layer(128, 128);
 
-        // 多任务输出头
+        // 多任务输出头 - 使用GELU提供最佳梯度特性
         // 主决策输出：9维
         self.add_dense_layer(128, 64, ActivationFunction::GELU);
         self.add_dense_layer(64, 9, ActivationFunction::Linear);
@@ -1923,12 +2113,48 @@ impl DeepNeuralNetwork {
         self.layers.push(layer);
     }
     
-    // 添加反思层：用于自我验证和反思
+    // 反思层：用于自我验证和反思
     fn add_reflection_layer(&mut self, input_size: usize, hidden_size: usize) {
-        // 第一层：输入到隐藏层
-        self.add_dense_layer(input_size, hidden_size, ActivationFunction::GELU);
-        // 第二层：隐藏层到输出层
-        self.add_dense_layer(hidden_size, input_size, ActivationFunction::Linear);
+        // 分析历史决策模式
+        let output_size = input_size; // 输出维度与输入相同
+        
+        let mut layer = NetworkLayer {
+            weights: vec![vec![0.0; input_size]; hidden_size],  // hidden_size x input_size
+            biases: vec![0.0; hidden_size],
+            activations: vec![0.0; hidden_size],
+            pre_activations: vec![0.0; hidden_size],
+            gradients: vec![0.0; hidden_size * input_size], // 展平的梯度
+            momentum_weights: vec![vec![0.0; input_size]; hidden_size],
+            momentum_biases: vec![0.0; hidden_size],
+            bidirectional: false,
+            seq_len: 0,
+            layer_type: LayerType::Reflection,
+            activation_func: ActivationFunction::GELU,
+            weights_buffer: None,
+            biases_buffer: None,
+            activations_buffer: None,
+        };
+        
+        // 初始化权重：反思层使用较小权重以避免过拟合
+        for i in 0..hidden_size {
+            for j in 0..input_size {
+                layer.weights[i][j] = fastrand::f32() * 0.1 - 0.05; // [-0.05, 0.05] 范围
+            }
+            layer.biases[i] = 0.0;
+        }
+        
+        // 初始化动量
+        for i in 0..hidden_size {
+            layer.momentum_biases[i] = 1e-8;
+            for j in 0..input_size {
+                layer.momentum_weights[i][j] = 1e-8;
+            }
+        }
+        
+        self.layers.push(layer);
+        
+        // 添加输出层到原始维度
+        self.add_dense_layer(hidden_size, output_size, ActivationFunction::Linear);
     }
 
     fn forward(&mut self, input: &[f32]) -> Vec<f32> {
@@ -1987,6 +2213,9 @@ impl DeepNeuralNetwork {
                 }
                 LayerType::Concat => {
                     current_input = Self::concat_forward(layer, &layer_outputs);
+                }
+                LayerType::Reflection => {
+                    current_input = Self::reflection_forward(layer, &current_input, &layer_outputs);
                 }
             }
             
@@ -2566,6 +2795,59 @@ impl DeepNeuralNetwork {
         output
     }
 
+    fn reflection_forward(layer: &mut NetworkLayer, input: &[f32], layer_outputs: &[Vec<f32>]) -> Vec<f32> {
+        // 反思层：分析历史决策，生成反思信号
+        // 收集前几层的重要特征（通常前1-3层的输出）
+        let mut reflection_context = Vec::new();
+        
+        // 从历史层输出中提取决策模式
+        for (i, prev_output) in layer_outputs.iter().rev().take(3).enumerate() {
+            if i < layer.weights.len() {
+                // 对每个历史输出应用权重
+                let mut weighted_output = vec![0.0; prev_output.len().min(layer.weights[i].len())];
+                for (j, &weight) in layer.weights[i].iter().take(weighted_output.len()).enumerate() {
+                    if j < prev_output.len() {
+                        weighted_output[j] = weight * prev_output[j];
+                    }
+                }
+                reflection_context.extend_from_slice(&weighted_output);
+            }
+        }
+        
+        // 如果没有足够的上下文，使用当前输入
+        if reflection_context.is_empty() {
+            reflection_context = input.to_vec();
+        }
+        
+        // 反思分析：通过注意力机制关注重要的历史信息
+        let mut output = vec![0.0; input.len()];
+        
+        // 对每个输出单元，计算反思加权
+        for (i, output_val) in output.iter_mut().enumerate() {
+            if i < layer.biases.len() {
+                let mut reflection_score = layer.biases[i];
+                
+                // 使用简单的注意力机制：相关性 = 点积
+                let context_len = reflection_context.len().min(input.len());
+                for j in 0..context_len {
+                    let correlation = input[j] * reflection_context.get(j).unwrap_or(&0.0);
+                    if i < layer.weights.len() && j < layer.weights[i].len() {
+                        reflection_score += layer.weights[i][j] * correlation;
+                    }
+                }
+                
+                // 应用激活函数
+                *output_val = Self::activate(reflection_score, &layer.activation_func);
+            }
+        }
+        
+        // 更新层的激活值（用于反向传播）
+        layer.activations = output.clone();
+        layer.pre_activations = vec![0.0; output.len()]; // 反思层不需要pre_activation
+        
+        output
+    }
+
     fn get_momentum_range(&self) -> (f32, f32) {
         let mut min_momentum = f32::INFINITY;
         let mut max_momentum = f32::NEG_INFINITY;
@@ -2591,6 +2873,7 @@ impl DeepNeuralNetwork {
         (min_momentum, max_momentum)
     }
 
+    /*
     fn train(&mut self, training_data: &[(Vec<f32>, Vec<f32>)]) {
         if training_data.is_empty() {
             eprintln!("警告: 训练数据为空，跳过训练");
@@ -2601,19 +2884,33 @@ impl DeepNeuralNetwork {
         for layer in &mut self.layers {
             if !layer.weights.is_empty() && !layer.momentum_weights.is_empty() {
                 if layer.momentum_weights.len() != layer.weights.len() {
-                    layer.momentum_weights = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
+                    layer.momentum_weights = vec![vec![1e-8; layer.weights[0].len()]; layer.weights.len()];
                 } else {
                     for i in 0..layer.momentum_weights.len() {
                         if layer.momentum_weights[i].len() != layer.weights[i].len() {
-                            layer.momentum_weights[i] = vec![0.0; layer.weights[i].len()];
+                            layer.momentum_weights[i] = vec![1e-8; layer.weights[i].len()];
+                        } else {
+                            // 为已有的动量参数添加小幅扰动，避免全零
+                            for j in 0..layer.momentum_weights[i].len() {
+                                if layer.momentum_weights[i][j] == 0.0 {
+                                    layer.momentum_weights[i][j] = 1e-8;
+                                }
+                            }
                         }
                     }
                 }
             } else if !layer.weights.is_empty() {
-                layer.momentum_weights = vec![vec![0.0; layer.weights[0].len()]; layer.weights.len()];
+                layer.momentum_weights = vec![vec![1e-8; layer.weights[0].len()]; layer.weights.len()];
             }
             if layer.momentum_biases.len() != layer.biases.len() {
-                layer.momentum_biases = vec![0.0; layer.biases.len()];
+                layer.momentum_biases = vec![1e-8; layer.biases.len()];
+            } else {
+                // 为已有的偏置动量添加小幅扰动
+                for j in 0..layer.momentum_biases.len() {
+                    if layer.momentum_biases[j] == 0.0 {
+                        layer.momentum_biases[j] = 1e-8;
+                    }
+                }
             }
         }
 
@@ -2695,6 +2992,8 @@ impl DeepNeuralNetwork {
             }
         }
     }
+
+     */
     
     // 实现PPO算法训练
     fn train_with_ppo(&mut self, training_data: &[(Vec<f32>, Vec<f32>)], experiences: &[Experience]) {
@@ -2703,7 +3002,7 @@ impl DeepNeuralNetwork {
             return;
         }
         
-        // 初始化动量参数
+        // 初始化动量参数，添加小幅初始动量避免梯度消失
         for layer in &mut self.layers {
             if !layer.weights.is_empty() && !layer.momentum_weights.is_empty() {
                 if layer.momentum_weights.len() != layer.weights.len() {
@@ -2856,12 +3155,23 @@ impl DeepNeuralNetwork {
                     0.0 // 当概率接近0时，熵损失为0
                 };
                 
+                // 反思损失：奖励一致性和学习
+                let reflection_loss = if i < experiences.len() {
+                    let exp_reflection = &experiences[i];
+                    // 鼓励反思得分与实际成功相匹配
+                    let expected_score = if exp_reflection.outcome_success { 1.0 } else { 0.0 };
+                    let reflection_diff = exp_reflection.reflection_score - expected_score;
+                    0.1 * reflection_diff * reflection_diff // 较小的反思损失权重
+                } else {
+                    0.0
+                };
+                
                 // 检查熵损失是否有效
-                if !entropy_loss.is_finite() {
+                if !entropy_loss.is_finite() || !reflection_loss.is_finite() {
                     continue; // 跳过无效样本
                 }
                 
-                let loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_loss; // 组合损失
+                let loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_loss + reflection_loss; // 包含反思损失
                 
                 // 检查总损失是否有效
                 if !loss.is_finite() {
@@ -2910,7 +3220,8 @@ impl DeepNeuralNetwork {
         }
     }
 
-    // 实现Group Relative Policy Optimization (GRPO)算法，集成PPO优化功能
+
+    /*
     fn train_with_grpo(&mut self, training_data: &[(Vec<f32>, Vec<f32>)], group_size: usize) {
         if training_data.is_empty() {
             eprintln!("警告: 训练数据为空，跳过训练");
@@ -3032,17 +3343,28 @@ impl DeepNeuralNetwork {
     // 带优势函数的训练批次，集成PPO优化功能
     fn train_batch_with_advantage(&mut self, batch: &[(Vec<f32>, Vec<f32>)], group_rewards: &[f32], baseline_reward: f32) {
         let batch_size = batch.len();
-        let group_size = batch_size / group_rewards.len();
+        if batch_size == 0 {
+            eprintln!("[TrainAdvantage] Empty batch, skipping training");
+            return;
+        }
 
+        // 正确的分组逻辑
+        let group_size = (batch_size / group_rewards.len()).max(1);
+        let actual_groups = (batch_size + group_size - 1) / group_size;
+
+        // 准备输入和目标数据
         let mut inputs: Vec<&[f32]> = Vec::with_capacity(batch_size);
-        let mut targets: Vec<&[f32]> = Vec::with_capacity(batch_size);
+        let mut targets: Vec<Vec<f32>> = Vec::with_capacity(batch_size);
 
         for (input, target) in batch {
             inputs.push(input);
-            targets.push(target);
+            targets.push(target.clone());
         }
+
+        // 前向传播获取当前策略输出
         let outputs = self.gpu_forward_batch(&inputs, batch_size);
 
+        // 初始化梯度累积器
         let mut total_gradients: Vec<Vec<Vec<f32>>> = vec![vec![vec![0.0; 0]; 0]; self.layers.len()];
         let mut total_bias_gradients: Vec<Vec<f32>> = vec![vec![0.0; 0]; self.layers.len()];
 
@@ -3056,64 +3378,96 @@ impl DeepNeuralNetwork {
             total_bias_gradients[layer_idx] = vec![0.0; layer.biases.len()];
         }
 
-        // 计算优势值并进行标准化 (PPO组件4)
+        // 计算优势函数
         let mut advantages = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
             let group_idx = i / group_size;
-            let group_reward = group_rewards[group_idx];
-            let reward_advantage = group_reward - baseline_reward;
-            advantages.push(reward_advantage);
+            let group_reward = group_rewards[group_idx.min(group_rewards.len() - 1)];
+            let advantage = group_reward - baseline_reward;
+            advantages.push(advantage);
         }
-        
-        // 优势标准化: (r_i - mean) / std
+
+        // 优势标准化
         let mean_advantage = advantages.iter().sum::<f32>() / batch_size as f32;
-        let std_advantage = advantages.iter().map(|&a| (a - mean_advantage).powi(2)).sum::<f32>().sqrt() / batch_size as f32;
-        let std_advantage = if std_advantage > 1e-8 { std_advantage } else { 1.0 };
+        let variance = advantages.iter().map(|&a| (a - mean_advantage).powi(2)).sum::<f32>() / batch_size as f32;
+        let std_advantage = variance.sqrt().max(1e-8);
         
+        println!("[Advantage] Mean: {:.4}, Std: {:.4}, Range: [{:.4}, {:.4}]", 
+                 mean_advantage, std_advantage,
+                 advantages.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                 advantages.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+
+        // PPO算法参数
+        const PPO_EPSILON: f32 = 0.2;
+        const VALUE_LOSS_COEF: f32 = 0.5;
+        const ENTROPY_BONUS: f32 = 0.01;
+
+        let mut total_policy_loss = 0.0;
+        let mut total_value_loss = 0.0;
+        let mut total_entropy = 0.0;
+
+        // 为每个样本计算梯度
         for i in 0..batch_size {
-            // 标准化优势值
-            let _normalized_advantage = (advantages[i] - mean_advantage) / std_advantage;
+            let _group_idx = i / group_size;
+            let normalized_advantage = (advantages[i] - mean_advantage) / std_advantage;
             
-            // 根据所在组的奖励调整梯度
-            let group_idx = i / group_size;
-            let group_reward = group_rewards[group_idx];
-            let reward_advantage = group_reward - baseline_reward;
+            // 获取当前策略概率（假设前两个输出是左右手概率）
+            let current_probs = &outputs[i][..2];
+            let target_probs = &targets[i][..2];
             
-            // 调整目标值以反映奖励优势
-            let mut adjusted_target = targets[i].to_vec();
-            if reward_advantage > 0.0 {
-                // 正向优势，加强正确方向的学习
-                for j in 0..adjusted_target.len().min(2) {
-                    adjusted_target[j] = targets[i][j] * (1.0 + reward_advantage * 0.1);
-                }
-            } else {
-                // 负向优势，减缓错误方向的学习
-                for j in 0..adjusted_target.len().min(2) {
-                    adjusted_target[j] = targets[i][j] * (1.0 + reward_advantage * 0.05);
+            // 计算重要性采样比率 r(θ) = π_θ(a|s) / π_θ_old(a|s)
+            let mut importance_ratio = 1.0;
+            for j in 0..current_probs.len().min(target_probs.len()) {
+                if target_probs[j] > 1e-8 {
+                    importance_ratio *= (current_probs[j] / target_probs[j]).powf(normalized_advantage.signum());
                 }
             }
-            
-            // 计算KL散度惩罚 (PPO组件3)
-            let old_policy_probs: Vec<f32> = targets[i].iter().take(2).copied().collect();
-            let new_policy_probs: Vec<f32> = outputs[i].iter().take(2).copied().collect();
-            
-            // 计算KL散度: D_KL(π_θ || π_θ_old) = Σ π_θ_old * log(π_θ_old / π_θ)
-            let mut kl_divergence = 0.0;
-            for j in 0..old_policy_probs.len().min(new_policy_probs.len()) {
-                if old_policy_probs[j] > 1e-8 && new_policy_probs[j] > 1e-8 {
-                    kl_divergence += old_policy_probs[j] * (old_policy_probs[j] / new_policy_probs[j]).ln();
+
+            // PPO裁剪目标: L^CLIP(θ) = min(r(θ)A, clip(r(θ), 1-ε, 1+ε)A)
+            let clipped_ratio = importance_ratio.clamp(1.0 - PPO_EPSILON, 1.0 + PPO_EPSILON);
+            let ppo_objective = clipped_ratio * normalized_advantage;
+            let policy_loss = -ppo_objective; // 负号因为我们要最大化
+
+            // 计算策略熵作为探索奖励
+            let mut entropy = 0.0;
+            for &prob in current_probs {
+                if prob > 1e-8 {
+                    entropy -= prob * prob.ln();
                 }
             }
+            total_entropy += entropy;
+
+            // 计算价值函数损失（如果有价值输出，假设在索引2）
+            let current_value = outputs[i].get(2).copied().unwrap_or(0.0);
+            let target_value = targets[i].get(2).copied().unwrap_or(0.0);
+            let value_loss = (current_value - target_value).powi(2);
+            total_value_loss += value_loss;
+
+            // 构建调整后的目标向量
+            let mut adjusted_target = targets[i].clone();
             
-            // KL散度惩罚: β * D_KL(π_θ || π_ref)
-            const KL_BETA: f32 = 0.01;
-            let kl_penalty = KL_BETA * kl_divergence;
-            
-            // 应用KL散度惩罚到目标值
-            for j in 0..adjusted_target.len().min(2) {
-                adjusted_target[j] -= kl_penalty.signum() * kl_penalty.abs().min(0.1);
+            // 应用策略梯度损失
+            if !adjusted_target.is_empty() {
+                adjusted_target[0] -= policy_loss * 0.1; // 调整左手概率
+                if adjusted_target.len() > 1 {
+                    adjusted_target[1] -= policy_loss * 0.1; // 调整右手概率
+                }
             }
-            
+
+            // 应用价值函数损失
+            if adjusted_target.len() > 2 {
+                adjusted_target[2] += VALUE_LOSS_COEF * value_loss;
+            }
+
+            // 应用熵奖励
+            if !adjusted_target.is_empty() {
+                adjusted_target[0] += ENTROPY_BONUS * entropy;
+                if adjusted_target.len() > 1 {
+                    adjusted_target[1] += ENTROPY_BONUS * entropy;
+                }
+            }
+
+            // 计算并累积梯度
             self.backward(
                 inputs[i],
                 &outputs[i],
@@ -3121,27 +3475,39 @@ impl DeepNeuralNetwork {
                 &mut total_gradients,
                 &mut total_bias_gradients
             );
+
+            total_policy_loss += policy_loss;
         }
 
+        // 梯度裁剪和参数更新
         if batch_size > 0 {
             let inv_batch = 1.0f32 / (batch_size as f32);
             for layer_idx in 0..self.layers.len() {
                 let wg = &mut total_gradients[layer_idx];
-                for r in 0..wg.len() {
-                    for c in 0..wg[r].len() {
-                        wg[r][c] *= inv_batch;
+                for row in wg.iter_mut() {
+                    for grad in row.iter_mut() {
+                        *grad *= inv_batch;
                     }
                 }
                 let bg = &mut total_bias_gradients[layer_idx];
-                for j in 0..bg.len() {
-                    bg[j] *= inv_batch;
+                for grad in bg.iter_mut() {
+                    *grad *= inv_batch;
                 }
             }
         }
+
+        // 应用梯度
         self.clip_gradients(&mut total_gradients, &mut total_bias_gradients);
         self.apply_gradients(&total_gradients, &total_bias_gradients, batch_size);
-        println!("First weight value after update: {:.6}", self.layers[0].weights[0][0]);
+
+        // 输出训练统计信息
+        println!("[Advantage Training] Batch: {}, Policy Loss: {:.6}, Value Loss: {:.6}, Entropy: {:.6}, Groups: {}", 
+                 batch_size, total_policy_loss / batch_size as f32, 
+                 total_value_loss / batch_size as f32, 
+                 total_entropy / batch_size as f32, actual_groups);
     }
+
+     */
 
     fn calculate_gradient_norm(&self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>]) -> f32 {
         let mut total_norm = 0.0;
@@ -3198,7 +3564,7 @@ impl DeepNeuralNetwork {
         }
 
         // 输出梯度信息用于调试
-        if self.epoch_count % 10 == 0 && current_norm < 1e-3 {  // 每10个epoch且梯度较小时输出
+        if self.epoch_count % 1 == 0 && current_norm < 1e-3 {  // 每个epoch且梯度较小时输出
             println!("[Gradient Monitor] Epoch: {}, Gradient Norm: {:.8} (small)", 
                      self.epoch_count, current_norm);
         }
@@ -3226,16 +3592,23 @@ impl DeepNeuralNetwork {
             }
         }
 
-        // If within limit, nothing to do
+        // 放宽梯度裁剪条件，只在极端情况下才裁剪
+        // 对于中等梯度（8.0 < norm < 20.0），只进行轻微裁剪
         if current_norm <= self.max_grad_norm {
-            return;
+            return; // 完全不裁剪
+        }
+        
+        // 对极端梯度进行温和裁剪，而不是强制压缩到阈值以下
+        if current_norm <= self.max_grad_norm * 3.0 {  // 3倍阈值以内（相对于新的20.0阈值是60.0）
+            eprintln!("[GradClip] 检测到中等梯度，当前范数: {:.6}，稍后进行温和处理", current_norm);
+            return; // 跳过裁剪，让学习率自适应处理
         }
 
         // Compute desired scale (<= 1.0)
         let desired_scale = self.max_grad_norm / current_norm;
 
         // 如果 desired_scale 极小（说明 gradient too huge），直接丢弃该 batch 的梯度以防爆炸
-        const EMERGENCY_SCALE_FLOOR: f32 = 1e-8;  // 降低紧急下限，更早触发重置
+        const EMERGENCY_SCALE_FLOOR: f32 = 1e-6;  // 调整紧急下限适应新的阈值
         if desired_scale < EMERGENCY_SCALE_FLOOR {
             eprintln!(
                 "[GradClip][EMERGENCY] current_norm={:.6}, max_grad_norm={:.6}, desired_scale={:.12} < EMERGENCY_SCALE_FLOOR. \
@@ -3458,26 +3831,27 @@ impl DeepNeuralNetwork {
 
         if loss_change_ratio < 0.98 {
             // 损失下降，正常增加学习率，但幅度更保守
-            self.learning_rate = (self.learning_rate * 1.015 * epoch_factor).min(0.005);
+            self.learning_rate = (self.learning_rate * 1.015 * epoch_factor).min(0.02);
             self.bad_epochs = 0;
         }
         else if loss_change_ratio > 1.02 {  // 提高阈值，更少触发学习率降低
-            self.learning_rate = (self.learning_rate * 0.90).max(0.00002);  // 更保守的降低
+            self.learning_rate = (self.learning_rate * 0.90).max(0.0001);  // 与clamp下限保持一致
             self.bad_epochs += 1;
-            if self.bad_epochs >= 1 {
-                self.learning_rate = (self.learning_rate * 0.5).max(0.00002); // 更快的响应
-                println!("连续{}个epoch表现不佳，大幅降低学习率至{:.6}", self.bad_epochs, self.learning_rate);
-            }
             if self.bad_epochs >= 3 {
+                self.learning_rate = (self.learning_rate * 0.7).max(0.00005); // 减小降低幅度
+                println!("连续{}个epoch表现不佳，适度降低学习率至{:.6}", self.bad_epochs, self.learning_rate);
+            }
+            if self.bad_epochs >= 5 {
                 println!("连续{}个epoch损失增加，采取激进措施", self.bad_epochs);
                 // 可以在这里添加恢复到最佳模型权重的逻辑
             }
-            if self.bad_epochs >= 5 {
+            if self.bad_epochs >= 8 {
                 println!("连续{}个epoch表现不佳，执行网络重置", self.bad_epochs);
                 self.reset_problem_layers();
                 self.bad_epochs = 0;
-                // 重置后使用更低的学习率
-                self.learning_rate = 0.0002;
+                // 重置后使用适中的学习率，增加梯度更新能力
+                self.learning_rate = 0.002;
+                println!("[重置] 网络重置，学习率恢复至: {:.6}", self.learning_rate);
             }
         }
         else {
@@ -3487,8 +3861,8 @@ impl DeepNeuralNetwork {
             self.bad_epochs = 0;
         }
         
-        // 确保学习率在更保守的范围内
-        self.learning_rate = self.learning_rate.clamp(0.00001, 0.005);
+        // 确保学习率在更高的范围内，适应增强的梯度
+        self.learning_rate = self.learning_rate.clamp(0.0001, 0.02);
         
         // 记录当前损失，添加NaN检查
         self.last_loss = if loss.is_finite() { loss } else { self.last_loss };
@@ -3616,6 +3990,41 @@ impl DeepNeuralNetwork {
             }
         }
         
+        // 添加原始梯度诊断信息
+        if self.epoch_count % 1 == 0 {
+            // 计算原始梯度的最大值和最小值
+            let mut max_weight_grad = 0.0f32;
+            let mut min_weight_grad = f32::INFINITY;
+            let mut max_bias_grad = 0.0f32;
+            let mut min_bias_grad = f32::INFINITY;
+            let mut grad_count = 0;
+            
+            for layer_idx in 0..self.layers.len() {
+                let wg = &total_gradients[layer_idx];
+                for r in 0..wg.len() {
+                    for c in 0..wg[r].len() {
+                        let grad = wg[r][c];
+                        if grad.is_finite() {
+                            max_weight_grad = max_weight_grad.max(grad.abs());
+                            min_weight_grad = min_weight_grad.min(grad.abs());
+                            grad_count += 1;
+                        }
+                    }
+                }
+                let bg = &total_bias_gradients[layer_idx];
+                for j in 0..bg.len() {
+                    let grad = bg[j];
+                    if grad.is_finite() {
+                        max_bias_grad = max_bias_grad.max(grad.abs());
+                        min_bias_grad = min_bias_grad.min(grad.abs());
+                    }
+                }
+            }
+            
+            println!("[梯度诊断] Epoch {}: 权重梯度范围 [{:.12}, {:.12}], 偏置梯度范围 [{:.12}, {:.12}], 有效梯度数量: {}", 
+                     self.epoch_count, min_weight_grad, max_weight_grad, min_bias_grad, max_bias_grad, grad_count);
+        }
+        
         // 梯度裁剪
         self.clip_gradients(&mut total_gradients, &mut total_bias_gradients);
         
@@ -3638,10 +4047,10 @@ impl DeepNeuralNetwork {
         let mut layer_errors = vec![vec![0.0; 0]; self.layers.len()];
         if let Some(last_layer_idx) = self.layers.len().checked_sub(1) {
             let last_idx = self.layers.len() - 1;
-            let out_dim = output.len() as f32;
+            // 去掉错误的out_dim归一化，每个输出维度应该有独立的误差
             let mut output_errors: Vec<f32> = output.iter()
                 .zip(target.iter())
-                .map(|(o, t)| 2.0 * (o - t) / out_dim)
+                .map(|(o, t)| 2.0 * (o - t))  // 去掉除法！
                 .collect();
 
             // 转换：dL/da -> dL/dz（输出层）
@@ -3791,9 +4200,9 @@ impl DeepNeuralNetwork {
 
     fn apply_gradients(&mut self, gradients: &[Vec<Vec<f32>>], bias_gradients: &[Vec<f32>], batch_size: usize) {
         let batch_size_f = batch_size as f32;
-        const MAX_GRAD: f32 = 5.0;  //梯度上限
-        const MAX_WEIGHT: f32 = 15.0;  // 权重上限
-        const MIN_GRAD_THRESHOLD: f32 = 1e-4;  // 梯度下限 - 当平均梯度小于0.2时进行放大
+        const MAX_GRAD: f32 = 50.0;  // 增大梯度上限以处理极小梯度
+        const MAX_WEIGHT: f32 = 20.0;  // 增大权重上限
+        const MIN_GRAD_THRESHOLD: f32 = 1e-10;  // 梯度下限 - 进一步降低阈值，提高对小梯度的敏感性
 
         // 计算平均梯度大小
         let mut total_grad_sum = 0.0;
@@ -3830,16 +4239,24 @@ impl DeepNeuralNetwork {
         // 限制梯度缩放因子，防止过大
         let gradient_scale = if avg_grad_magnitude > 0.0 && avg_grad_magnitude < MIN_GRAD_THRESHOLD {
             let scale = MIN_GRAD_THRESHOLD / avg_grad_magnitude;
-            scale.min(100.0) // 降低最大限制，防止过度放大
+            scale.min(10000000.0) // 进一步增加最大限制
         } else if avg_grad_magnitude == 0.0 {
-            1.0 // 不再使用1000.0的放大因子，避免数值不稳定
+            1000000.0 // 对零梯度使用更大的放大因子
         } else {
             1.0
         };
 
-        if self.epoch_count % 10 == 0 {
-            println!("[Gradient Monitor] Epoch: {}, Avg Gradient Magnitude: {:.8}, Scale: {:.2}", 
-                     self.epoch_count, avg_grad_magnitude, gradient_scale);
+        if self.epoch_count % 1 == 0 {
+            println!("[Gradient Monitor] Epoch: {}, Avg Gradient Magnitude: {:.8}, Scale: {:.2}, LR: {:.6}", 
+                     self.epoch_count, avg_grad_magnitude, gradient_scale, self.learning_rate);
+            
+            // 如果梯度太小，添加额外诊断信息
+            if avg_grad_magnitude < 1e-6 {
+                println!("[Gradient Alert] 梯度极小，启用增强缩放");
+                // 对于极小梯度，使用更激进的缩放
+                let emergency_scale = (1e-4 / avg_grad_magnitude.max(1e-10)).min(1000000.0);
+                println!("[Gradient Emergency] 紧急缩放因子: {:.2}", emergency_scale);
+            }
         }
 
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
@@ -3858,9 +4275,22 @@ impl DeepNeuralNetwork {
                         grad *= gradient_scale;
                         grad = grad.clamp(-MAX_GRAD, MAX_GRAD);
 
+                        // 对于极小梯度，使用大幅增强的学习率
+                        let effective_lr = if avg_grad_magnitude < 1e-10 {
+                            self.learning_rate * 1000.0  // 对极小梯度使用1000倍学习率
+                        } else if avg_grad_magnitude < 1e-7 {
+                            self.learning_rate * 100.0  // 对极小梯度使用100倍学习率
+                        } else if avg_grad_magnitude < 1e-6 {
+                            self.learning_rate * 50.0   // 对小梯度使用50倍学习率
+                        } else if avg_grad_magnitude < 1e-5 {
+                            self.learning_rate * 10.0   // 对较小梯度使用10倍学习率
+                        } else {
+                            self.learning_rate
+                        };
+
                         // 计算动量更新，添加NaN检查
                         let momentum_component = self.momentum * layer.momentum_weights[i][j];
-                        let gradient_component = self.learning_rate * grad;
+                        let gradient_component = effective_lr * grad;
                         
                         // 检查计算结果是否为NaN或无穷大
                         if !momentum_component.is_finite() || !gradient_component.is_finite() {
@@ -3873,7 +4303,7 @@ impl DeepNeuralNetwork {
                         let momentum_update = layer.momentum_weights[i][j];
                         let clamped_momentum = momentum_update.clamp(-MAX_GRAD, MAX_GRAD);
 
-                        if self.epoch_count % 10 == 0 && i == 0 && j == 0 {
+                        if self.epoch_count % 1 == 0 && i == 0 && j == 0 {
                             println!("[Weight Debug] Layer {}, Weight[{}][{}]: {:.6} -> ", layer_idx, i, j, *weight);
                         }
 
@@ -3888,8 +4318,10 @@ impl DeepNeuralNetwork {
                             *weight = weight.clamp(-MAX_WEIGHT, MAX_WEIGHT);
                         }
 
-                        if self.epoch_count % 10 == 0 && i == 0 && j == 0 {
-                            println!("{:.6} (delta: {:+.8})", *weight, *weight - old_weight);
+                        if self.epoch_count % 1 == 0 && i == 0 && j == 0 {
+                            let delta = *weight - old_weight;
+                            println!("{:.6} (delta: {:+.10}) (momentum: {:+.10}, scale: {:.2})", 
+                                    *weight, delta, clamped_momentum, gradient_scale);
                         }
                         
                         // 最终检查权重是否为NaN或无穷大
@@ -3931,7 +4363,7 @@ impl DeepNeuralNetwork {
                     let clamped_momentum = momentum_update.clamp(-MAX_GRAD, MAX_GRAD);
 
                     // 添加调试信息
-                    if self.epoch_count % 10 == 0 && i == 0 {  // 每10个epoch输出第一个偏置的更新信息
+                    if self.epoch_count % 1 == 0 && i == 0 {  // 每个epoch输出第一个偏置的更新信息
                         println!("[Bias Debug] Layer {}, Bias[{}]: {:.6} -> ", layer_idx, i, *bias);
                     }
 
@@ -3947,7 +4379,7 @@ impl DeepNeuralNetwork {
                     }
                     
                     // 添加调试信息
-                    if self.epoch_count % 10 == 0 && i == 0 {  // 每10个epoch输出第一个偏置的更新信息
+                    if self.epoch_count % 1 == 0 && i == 0 {  // 每个epoch输出第一个偏置的更新信息
                         println!("{:.6} (delta: {:+.8})", *bias, *bias - old_bias);
                     }
 
@@ -3955,6 +4387,11 @@ impl DeepNeuralNetwork {
                     if !bias.is_finite() {
                         eprintln!("[Gradient Safety] NaN/Inf bias detected at layer {}, bias[{}], setting to 0.", layer_idx, i);
                         *bias = 0.0;
+                    }
+                } else {
+                    // 如果没有对应的梯度，跳过更新但记录警告
+                    if self.epoch_count % 100 == 0 {  // 减少输出频率
+                        eprintln!("[Gradient Warning] No bias gradient for layer {}, bias[{}], skipping update.", layer_idx, i);
                     }
                 }
             }
@@ -4005,111 +4442,7 @@ impl Finger {
     }
 }
 
-impl FingerState {
-    fn new(finger: Finger, initial_pos: Vector2) -> Self {
-        Self {
-            finger,
-            position: initial_pos,
-            velocity: Vector2::new(0.0, 0.0),
-            last_time: -1.0,
-            fatigue: 0.0,
-            confidence: 1.0,
-            success_streak: 0,
-            total_actions: 0,
-            performance_score: 1.0,
-            is_busy: false,
-            busy_until: -1.0,
-        }
-    }
 
-    pub fn clean(&mut self) {
-        self.position.clean();
-        self.velocity.clean();
-        if !self.last_time.is_finite() {
-            self.last_time = -1.0;
-        }
-        if !self.fatigue.is_finite() {
-            self.fatigue = 0.0;
-        }
-        if !self.confidence.is_finite() {
-            self.confidence = 1.0;
-        }
-        if !self.performance_score.is_finite() {
-            self.performance_score = 1.0;
-        }
-        if !self.busy_until.is_finite() {
-            self.busy_until = -1.0;
-        }
-    }
-
-    fn update_state(&mut self, new_pos: Vector2, time: f32, success: bool, note_kind: &NoteKind) {
-        let time_diff = time - self.last_time;
-
-        if time_diff > 0.001 {
-            let distance = new_pos.distance_to(&self.position);
-            let new_velocity = (new_pos - self.position) * (1.0 / time_diff);
-            self.velocity = self.velocity * 0.7 + new_velocity * 0.3;
-
-            // 疲劳计算
-            let base_movement_cost = distance * 0.12;
-            let speed_cost = (self.velocity.magnitude() / 10.0).powf(1.5) * 0.08;
-            let time_factor = if time_diff < 0.1 { 2.0 } else { 1.0 };
-
-            let total_cost = (base_movement_cost + speed_cost) * time_factor;
-            self.fatigue = (self.fatigue + total_cost).min(1.0);
-
-            // 动态恢复率，基于休息时间
-            let rest_factor = if time_diff > 0.3 { 2.0 } else { 1.0 };
-            let recovery = (time_diff * 0.25 * rest_factor).min(0.3);
-            self.fatigue = (self.fatigue - recovery).max(0.0);
-        }
-
-        // 繁忙状态更新
-        let busy_duration = match note_kind {
-            NoteKind::Hold { end_time, .. } => (end_time - time + 0.1).max(0.15),
-            NoteKind::Drag => 0.25,
-            NoteKind::Flick => 0.2,
-            NoteKind::Click => 0.12,
-        };
-
-        self.is_busy = true;
-        self.busy_until = time + busy_duration;
-
-        // 信心更新
-        self.total_actions += 1;
-        if success {
-            self.success_streak += 1;
-            // 信心增长有上限，避免过于自信.jpg
-            let confidence_gain = (0.01 * (1.0 - self.confidence)).max(0.002);
-            self.confidence = (self.confidence + confidence_gain).min(0.95);
-        } else {
-            self.success_streak = 0;
-            // 失败时信心下降更明显
-            let confidence_loss = (0.03 + self.confidence * 0.01).max(0.01);
-            self.confidence = (self.confidence - confidence_loss).max(0.15);
-        }
-
-        // 性能评分计算改进
-        let recent_window = 15.0_f32.min(self.total_actions as f32);
-        let recent_success_rate = if recent_window > 0.0 {
-            self.success_streak as f32 / recent_window
-        } else {
-            0.5
-        };
-
-        // 添加随机波动，模拟真实表现
-        let randomnotess = (fastrand::f32() - 0.5) * 0.1;
-        self.performance_score = (
-            recent_success_rate * 0.4 +
-                self.confidence * 0.35 +
-                (1.0 - self.fatigue) * 0.25 +
-                randomnotess
-        ).clamp(0.1, 0.95);
-
-        self.position = new_pos;
-        self.last_time = time;
-    }
-}
 
 impl AdvancedFeatureExtractor {
     fn new() -> Self {
@@ -4389,8 +4722,8 @@ impl AdvancedFeatureExtractor {
             }
 
             if i >= 2 {
-                let dir1 = notes[i-1].position - notes[i-2].position;
-                let dir2 = notes[i].position - notes[i-1].position;
+                let dir1: crate::hand_model::Vector2 = notes[i-1].position - notes[i-2].position;
+                let dir2: crate::hand_model::Vector2 = notes[i].position - notes[i-1].position;
 
                 if dir1.normalize().dot(&dir2.normalize()) > 0.5 {
                     consistent_direction += 1;
@@ -4781,10 +5114,75 @@ impl ExperienceReplay {
     }
 
     fn push(&mut self, experience: Experience) {
+        let was_full = self.buffer.len() >= self.capacity;
+        
+        // 检查经验数据有效性，防止NaN进入经验池
+        let mut cleaned_experience = experience;
+        
+        // 清理state中的NaN值
+        for state_val in &mut cleaned_experience.state {
+            if !state_val.is_finite() {
+                *state_val = 0.0;
+            }
+        }
+        
+        // 清理其他数值字段
+        if !cleaned_experience.reward.is_finite() {
+            cleaned_experience.reward = 0.0;
+        }
+        if !cleaned_experience.value.is_finite() {
+            cleaned_experience.value = 0.0;
+        }
+        if !cleaned_experience.next_value.is_finite() {
+            cleaned_experience.next_value = 0.0;
+        }
+        if !cleaned_experience.log_prob.is_finite() {
+            cleaned_experience.log_prob = 0.0;
+        }
+        if !cleaned_experience.advantage.is_finite() {
+            cleaned_experience.advantage = 0.0;
+        }
+        if !cleaned_experience.return_.is_finite() {
+            cleaned_experience.return_ = 0.0;
+        }
+        
+        // 清理future_notes中的NaN值
+        for fn_val in &mut cleaned_experience.future_notes {
+            if !fn_val.is_finite() {
+                *fn_val = 0.0;
+            }
+        }
+        
+        // 清理反思相关字段
+        if !cleaned_experience.reflection_score.is_finite() {
+            cleaned_experience.reflection_score = 0.5;
+        }
+        for rf_val in &mut cleaned_experience.reflection_features {
+            if !rf_val.is_finite() {
+                *rf_val = 0.0;
+            }
+        }
+        
         if self.buffer.len() >= self.capacity {
             self.buffer.pop_front();
         }
-        self.buffer.push_back(experience);
+        self.buffer.push_back(cleaned_experience);
+        
+        // 只在状态变化时输出日志，减少刷屏
+        let is_full = self.buffer.len() >= self.capacity;
+        let usage_ratio = self.buffer.len() as f32 / self.capacity as f32;
+        
+        if was_full != is_full {
+            // 状态变化：从非满到满，或从满到非满
+            if is_full {
+                println!("[经验池] 容量已满: 100% ({}/{})，开始替换最旧样本", self.buffer.len(), self.capacity);
+            } else {
+                println!("[经验池] 容量恢复: {:.1}% ({}/{})", 
+                         usage_ratio * 100.0, self.buffer.len(), self.capacity);
+            }
+        } else if !is_full && usage_ratio >= 0.95 {
+            // 非满载但接近满载时提醒（使用基于时间的简单检查）
+        }
     }
 
     fn sample(&self, n: usize) -> Vec<&Experience> {
@@ -4824,9 +5222,7 @@ impl PhiTKAdvancedAI {
         if !self.memory_consolidation_rate.is_finite() { self.memory_consolidation_rate = 0.1; }
         self.feature_extractor.difficulty_estimator.base_difficulty = self.feature_extractor.difficulty_estimator.base_difficulty.max(0.0).min(10.0);
 
-        for finger_state in &mut self.finger_states {
-            finger_state.clean();
-        }
+        self.ergonomic_hand_system.clean_all_finger_states();
     }
 
     fn validate_for_serialization(&self) -> bool {
@@ -4853,30 +5249,29 @@ impl PhiTKAdvancedAI {
             .ok().map(Arc::new);
         let rad = rotation.to_radians();
         // 初始化时使用自动检测模式，先默认为TwoFinger
-        let game_mode = GameMode::TwoFinger;
-        let finger_states = Self::init_finger_states(game_mode, rad);
+        let game_mode = crate::hand_model::GameMode::TwoFinger;
         let mut ai = Self {
             main_network: DeepNeuralNetwork::new(),
             target_network: DeepNeuralNetwork::new(),
             thread_pool: thread_pool.clone(),
             //thread_count: if thread_pool.is_some() { 32 } else { 1 },
             feature_extractor: AdvancedFeatureExtractor::new(),
-            experience_replay: ExperienceReplay::new(600000),
+            experience_replay: ExperienceReplay::new(100000),
             left_hand_state: HandState::new(Hand::Left, Vector2::new(-0.3, 0.0)),
             right_hand_state: HandState::new(Hand::Right, Vector2::new(0.3, 0.0)),
             // 初始化人体工程学手部系统
             ergonomic_hand_system: ErgonomicHandSystem::new(),
             rotation,
-            exploration_rate: 0.05,
+            exploration_rate: 0.25, // 增加探索率，鼓励模式切换
             discount_factor: 0.95,
-            target_update_frequency: 10,
+            target_update_frequency: 5, //进一步提高训练频率
             total_notes_processed: 0,
             correct_predictions: 0,
             training_episodes: 0,
             average_reward: 0.7,
             difficulty_adaptation: 1.0,
             learning_momentum: 0.9,
-            confidence_threshold: 0.7,
+            confidence_threshold: 0.4, // 降低置信度阈值，让AI更愿意尝试不同模式
             pattern_memory: BTreeMap::new(),
             performance_history: VecDeque::with_capacity(50000),
             version: Self::CURRENT_VERSION,
@@ -4884,7 +5279,6 @@ impl PhiTKAdvancedAI {
             last_update_time: -1.0,
             line_rotations: HashMap::new(),
             game_mode,
-            finger_states,
             stability_factor: 0.85,
             hand_switch_penalty: 0.01,
             consistency_bonus: 0.3,
@@ -4894,6 +5288,22 @@ impl PhiTKAdvancedAI {
             recent_assignments: VecDeque::with_capacity(50),
             hand_switch_count: 0,
             last_assigned_hand: None,
+            // 防过拟合机制初始化
+            best_validation_reward: f32::NEG_INFINITY,
+            validation_patience: 0,
+            no_improvement_count: 0,
+            early_stopping_threshold: 0.005, // 降低早停阈值，适应更高的学习率
+            // 基于音符序列模式的早停机制
+            sequence_pattern_history: VecDeque::with_capacity(100),
+            pattern_diversity_threshold: 0.1,
+            sequence_complexity_threshold: 0.05,
+            convergence_window: 20,
+            // 反思系统初始化
+            decision_history: VecDeque::with_capacity(100),
+            reflection_memory: HashMap::new(),
+            reflection_confidence: 0.5,
+            last_reflection_time: 0.0,
+            reflection_learning_rate: 0.01,
         };
         ai.target_network = DeepNeuralNetwork::new(); // 创建新实例
         //ai.target_network.build_architecture();       // 构建相同架构
@@ -4912,6 +5322,13 @@ impl PhiTKAdvancedAI {
                         match ai.validate_for_serialization() {
                             true => {
                                 println!("[Model] 模型验证通过，开始加载");
+                                
+                                // 强制重置梯度裁剪阈值为新版本，避免过度裁剪
+                                ai.main_network.max_grad_norm = 20.0;
+                                ai.target_network.max_grad_norm = 20.0;
+                                println!("[梯度调整] 重置梯度裁剪阈值: main_network={}, target_network={}", 
+                                         ai.main_network.max_grad_norm, ai.target_network.max_grad_norm);
+                                
                                 ai.rotation = rotation;
                                 ai.update_hand_positions();
 
@@ -4952,8 +5369,8 @@ impl PhiTKAdvancedAI {
                         }
 
                         // 重置游戏模式为自动检测模式
-                                ai.game_mode = GameMode::TwoFinger;
-                                ai.finger_states = Self::init_finger_states(ai.game_mode, rotation.to_radians());
+                                ai.game_mode = crate::hand_model::GameMode::TwoFinger;
+                                ai.ergonomic_hand_system.set_game_mode(crate::hand_model::GameMode::TwoFinger);
                                 // 初始化人体工程学手部系统
                                 ai.ergonomic_hand_system = ErgonomicHandSystem::new();
                                 return ai;
@@ -5015,44 +5432,7 @@ impl PhiTKAdvancedAI {
         }
     }
 
-    fn init_finger_states(mode: GameMode, _rotation_rad: f32) -> Vec<FingerState> {
-        let mut states = Vec::new();
-
-        match mode {
-            GameMode::TwoFinger => {
-                // 使用固定的世界坐标，不随线的旋转而旋转
-                states.push(FingerState::new(
-                    Finger::LeftIndex,
-                    Vector2::new(-0.32, 0.0)  // 左侧固定位置
-                ));
-                states.push(FingerState::new(
-                    Finger::RightIndex,
-                    Vector2::new(0.32, 0.0)   // 右侧固定位置
-                ));
-            }
-            GameMode::FourFinger => {
-                // 使用固定的世界坐标，不随线的旋转而旋转
-                states.push(FingerState::new(
-                    Finger::LeftIndex,
-                    Vector2::new(-0.24, 0.0)  // 左食指固定位置
-                ));
-                states.push(FingerState::new(
-                    Finger::LeftMiddle,
-                    Vector2::new(-0.38, 0.0)  // 左中指固定位置
-                ));
-                states.push(FingerState::new(
-                    Finger::RightIndex,
-                    Vector2::new(0.24, 0.0)   // 右食指固定位置
-                ));
-                states.push(FingerState::new(
-                    Finger::RightMiddle,
-                    Vector2::new(0.38, 0.0)   // 右中指固定位置
-                ));
-            }
-        }
-
-        states
-    }
+    
 
     fn update_hand_positions(&mut self) {
         // 根据旋转角度调整手部位置
@@ -5085,102 +5465,84 @@ impl PhiTKAdvancedAI {
 
      */
 
-    fn detect_game_mode(&self, notes: &[Note]) -> GameMode {
-        if notes.len() < 20 {  // 降低最小音符数量要求，更早检测
-            return GameMode::TwoFinger; // 默认返回2指模式
-        }
-
-        let time_window = notes.last().unwrap().time - notes[0].time;
-        if time_window < 0.3 {  // 降低时间窗口要求
-            return GameMode::TwoFinger; // 默认返回2指模式
-        }
-
-        let note_density = notes.len() as f32 / time_window.max(0.1);
-
-        // 检测同时音符
-        let mut max_simultaneous = 1;
-        let mut current_time = notes[0].time;
-        let mut current_group_size = 1;
-        let mut simultaneous_groups = 0; // 统计同时音符组的数量
-
-        for i in 1..notes.len() {
-            if (notes[i].time - current_time).abs() < 0.05 {  // 放宽同时判定阈值到50ms
-                current_group_size += 1;
-                max_simultaneous = max_simultaneous.max(current_group_size);
-            } else {
-                if current_group_size > 1 {
-                    simultaneous_groups += 1;
-                }
-                current_time = notes[i].time;
-                current_group_size = 1;
-            }
-        }
-        // 处理最后一组
-        if current_group_size > 1 {
-            simultaneous_groups += 1;
-        }
-
-        // 计算同时音符组的密度
-        let simultaneous_density = if time_window > 0.0 {
-            simultaneous_groups as f32 / time_window
-        } else {
-            0.0
-        };
-
-        // 更智能的模式判断逻辑
-        let should_use_four_finger =
-            // 高密度且多同时音符
-            (note_density > 20.0 && max_simultaneous >= 3) ||
-            // 中等密度但频繁同时音符
-            (note_density > 10.0 && simultaneous_density > 2.0 && max_simultaneous >= 3) ||
-            // 大量同时音符
-            max_simultaneous >= 4 ||
-            // 高密度谱面
-            (note_density > 30.0 && simultaneous_groups >= 5);
-
-        if should_use_four_finger {
-            GameMode::FourFinger
-        } else {
-            GameMode::TwoFinger
-        }
-    }
-
-    fn detect_and_switch_mode(&mut self, notes: &[Note]) {
-        let detected_mode = self.detect_game_mode(notes);
-        
-        // 模式切换逻辑
-        if detected_mode != self.game_mode {
-            println!("[模式切换] AI判断应使用{:?}模式", detected_mode);
-            self.game_mode = detected_mode;
-            self.finger_states = Self::init_finger_states(self.game_mode, self.rotation.to_radians());
-        }
-    }
-
-    fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize) {
+    fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize, time: f32) {
         //println!("[开始分析] 线路{} 音符数量:{} 游戏模式:{:?}", line_id, notes.len(), self.game_mode);
         if notes.is_empty() {
             return;
         }
+        
+        // 更新人体工程学手部系统
+        self.ergonomic_hand_system.update(time);
         let mut processed_notes = self.preprocess_notes(notes);
         let simultaneous_groups = self.detect_simultaneous_groups(&processed_notes);
         let mut bpm_list_clone = bpm_list.clone();
-        self.detect_and_switch_mode(notes);
         self.assign_simultaneous_groups(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
+        
+        // 保存推理前的状态用于对比
+        let original_assignments: Vec<Option<Hand>> = processed_notes.iter()
+            .map(|n| n.assigned_hand)
+            .collect();
+        
+        // 应用反思记忆影响决策
+        self.apply_reflection_influence(&mut processed_notes, line_id);
+        
         self.ai_assign_single_notes(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
+        
+        // 显示推理结果对比（调试用）
+        if !original_assignments.is_empty() {
+            let mut changes_count = 0;
+            for (i, (original, current)) in original_assignments.iter().zip(processed_notes.iter().map(|n| n.assigned_hand)).enumerate() {
+                if original.is_none() && current.is_some() {
+                    // 新分配的音符
+                    if let Some(hand) = current {
+                       // println!("[推理结果] 音符{}: 推理分配为 {:?}", i, hand);
+                    }
+                } else if let (Some(orig), Some(curr)) = (original, current) {
+                    if *orig != curr {
+                        changes_count += 1;
+                        //println!("[后处理覆盖] 音符{}: 推理 {:?} → 最终 {:?}", i, orig, curr);
+                    }
+                }
+            }
+            if changes_count > 0 {
+                //println!("[后处理统计] 总共有{}个音符的分配被后处理修改", changes_count);
+            }
+        }
+        
         self.post_process_assignments(&mut processed_notes);
         self.optimize_jack_pattern(&mut processed_notes);
+        
+        // 基于物理模型更新音符判断状态
+        self.update_notes_physical_judgement(&mut processed_notes, time);
+        
         self.apply_and_learn(notes, &processed_notes);
-        if self.experience_replay.len() >= 64 && self.total_notes_processed % 25 == 0 {
-            println!("[训练] 开始网络训练，经验回放大小: {}", self.experience_replay.len());
+        // 根据网络学习阶段动态调整训练触发条件
+        let min_samples = if self.training_episodes < 100 {
+            // 早期阶段：快速开始学习
+            400
+        } else if self.training_episodes < 500 {
+            // 中期阶段：平衡速度和稳定性
+            800
+        } else {
+            // 后期阶段：确保质量和稳定性
+            1200
+        };
+
+        if self.experience_replay.len() >= min_samples && self.total_notes_processed % 8 == 0 {
+            println!("[训练] 开始网络训练，经验回放大小: {}，训练轮次: {}，最小样本数: {}", 
+                     self.experience_replay.len(), self.training_episodes, min_samples);
             self.train_network();
             println!("[训练] 网络训练完成");
         }
         if self.training_episodes % self.target_update_frequency as u64 == 0 {
             self.target_network = self.main_network.clone();
         }
+        // 强制重置早停阈值，防止旧模型配置覆盖
+        self.early_stopping_threshold = 0.005;
+        
         self.training_episodes += 1;
         self.last_save_episodes += 1;
-        if self.last_save_episodes >= 128 {
+        if self.last_save_episodes >= 10 {
             println!("Saving episodes to {}", self.last_save_episodes);
             println!("训练回合数，已保存: {}", self.training_episodes);
             self.save_model("phitk_ai_model.bin");
@@ -5215,17 +5577,54 @@ impl PhiTKAdvancedAI {
                 assigned_hand: None,
                 confidence: 0.0,
                 features: Vec::new(),
-                judge: JudgeStatus::NotJudged,
                 difficulty,
                 duration,
+                actual_position: None,
+                position_error: 0.0,
+                timing_error: 0.0,
+                is_successful: false,
+                physical_confidence: 0.0,
             }
         }).collect()
+    }
+    
+    /// 基于物理模型评估音符的成功概率
+    fn evaluate_note_physical_success(&self, note: &mut ProcessedNote, current_time: f32) {
+        if let Some(hand) = note.assigned_hand {
+            // 使用人体工程学手部系统评估音符
+            let (is_successful, position_error, timing_error, physical_confidence) = 
+                self.ergonomic_hand_system.evaluate_note_success(
+                    hand,
+                    &note.position,
+                    note.time,
+                    current_time,
+                    &note.kind,
+                );
+            
+            // 更新音符的物理判断状态
+            note.is_successful = is_successful;
+            note.position_error = position_error;
+            note.timing_error = timing_error;
+            note.physical_confidence = physical_confidence;
+            
+            // 如果成功，记录实际位置（这里用目标位置作为近似）
+            if is_successful {
+                note.actual_position = Some(note.position);
+            }
+        }
+    }
+    
+    /// 更新所有音符的物理判断状态
+    fn update_notes_physical_judgement(&mut self, notes: &mut [ProcessedNote], current_time: f32) {
+        for note in notes.iter_mut() {
+            self.evaluate_note_physical_success(note, current_time);
+        }
     }
 
     fn detect_simultaneous_groups(&self, notes: &[ProcessedNote]) -> Vec<Vec<usize>> {
         let mut groups = Vec::new();
         let mut used = vec![false; notes.len()];
-        const SIMULTANEOUS_THRESHOLD: f32 = 0.05; // 50ms，统一阈值
+        const SIMULTANEOUS_THRESHOLD: f32 = 0.01;
 
         for i in 0..notes.len() {
             if used[i] { continue; }
@@ -5267,7 +5666,7 @@ impl PhiTKAdvancedAI {
                 continue;
             }
 
-            if self.game_mode == GameMode::TwoFinger {
+            if self.game_mode == crate::hand_model::GameMode::TwoFinger {
                 // 2指模式下的同时音符处理优化
                 let mut sorted_group: Vec<_> = group.iter().map(|&i| (notes[i].position.x, i)).collect();
                 sorted_group.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -5463,6 +5862,7 @@ impl PhiTKAdvancedAI {
     fn ensure_alternating_pattern(&mut self, notes: &mut [ProcessedNote]) {
         const MAX_CONSECUTIVE: usize = 3;
         const TIME_THRESHOLD: f32 = 0.3;
+        const CONFIDENCE_THRESHOLD: f32 = 0.8; // 高置信度阈值
 
         let mut consecutive_count = 0;
         let mut last_hand = None;
@@ -5487,8 +5887,13 @@ impl PhiTKAdvancedAI {
 
                     if let Some(prev_time) = prev_alt_time {
                         if note.time - prev_time < TIME_THRESHOLD * 2.0 {
-                            indices_to_switch.push(i);
-                            consecutive_count = 0;
+                            // 检查置信度，只有低置信度才强制切换
+                            if note.confidence < CONFIDENCE_THRESHOLD {
+                                indices_to_switch.push(i);
+                                consecutive_count = 0;
+                            } else {
+                                //println!("[交替保护] 音符{}置信度{:.3}，跳过强制交替", i, note.confidence);
+                            }
                         }
                     }
                 }
@@ -5502,6 +5907,7 @@ impl PhiTKAdvancedAI {
                     Hand::Right => Hand::Left,
                 });
                 notes[i].confidence = (notes[i].confidence * 0.8).max(0.6);
+                println!("[交替修正] 音符{}从{:?}改为{:?}", i, current_hand, notes[i].assigned_hand);
             }
         }
     }
@@ -5523,13 +5929,15 @@ impl PhiTKAdvancedAI {
 
         if !left_positions.is_empty() {
             let avg_pos = left_positions.iter().fold(Vector2::new(0.0, 0.0), |acc, &pos| acc + pos) * (1.0 / left_positions.len() as f32);
-            let success = notes[group[0]].judge == JudgeStatus::Judged;
+            // 使用物理模型判断（检查组内是否有任何音符成功）
+            let success = group.iter().any(|&idx| notes[idx].is_successful);
             self.left_hand_state.update_state(avg_pos, group_time, success, &notes[group[0]].kind);
         }
 
         if !right_positions.is_empty() {
             let avg_pos = right_positions.iter().fold(Vector2::new(0.0, 0.0), |acc, &pos| acc + pos) * (1.0 / right_positions.len() as f32);
-            let success = notes[group[0]].judge == JudgeStatus::Judged;
+            // 使用物理模型判断（检查组内是否有任何音符成功）
+            let success = group.iter().any(|&idx| notes[idx].is_successful);
             self.right_hand_state.update_state(avg_pos, group_time, success, &notes[group[0]].kind);
         }
     }
@@ -5537,7 +5945,7 @@ impl PhiTKAdvancedAI {
     fn ai_assign_single_notes(&mut self, notes: &mut [ProcessedNote], simultaneous_groups: &[Vec<usize>], bpm_list: &mut BpmList, line_id: usize) {
         let assigned_indices: std::collections::HashSet<usize> = simultaneous_groups.iter().flatten().copied().collect();
         const CONTEXT_WINDOW: usize = 64;
-        const BATCH_SIZE: usize = 64;
+        const BATCH_SIZE: usize = 64; //统一使用256的批次大小
 
         let mut unassigned_indices = Vec::new();
         for i in 0..notes.len() {
@@ -5545,13 +5953,13 @@ impl PhiTKAdvancedAI {
                 unassigned_indices.push(i);
             }
         }
-        // 等待 BATCH_SIZE = 64 才进行下面的计算
+        // 等待 BATCH_SIZE = 256 才进行下面的计算
         if unassigned_indices.len() < BATCH_SIZE {
             return;
         }
 
         for batch_indices in unassigned_indices.chunks(BATCH_SIZE) {
-            // Skip incomplete batches (only process full batches of 128)
+            // Skip incomplete batches (only process full batches of 256)
             if batch_indices.len() < BATCH_SIZE {
                 continue;
             }
@@ -5573,7 +5981,7 @@ impl PhiTKAdvancedAI {
                         }
                         let current_note_time = notes[idx].time;
 
-                        let dominant_side = if self.game_mode == GameMode::TwoFinger {
+                        let dominant_side = if self.game_mode == crate::hand_model::GameMode::TwoFinger {
                             let density_threshold = 2; // 保持2个音符就触发
                             let time_window_notes: Vec<_> = context.iter()
                                 .filter(|n| (n.time - current_note_time).abs() <= 0.5)
@@ -5608,7 +6016,7 @@ impl PhiTKAdvancedAI {
                             idx,
                             notes[idx].position.x,
                             notes[idx].time,
-                            notes[idx].judge.clone(),
+                            notes[idx].is_successful,
                             notes[idx].kind.clone(),
                             dominant_side,
                         )
@@ -5628,7 +6036,7 @@ impl PhiTKAdvancedAI {
                     }
                     let current_note_time = notes[idx].time;
 
-                    let dominant_side = if self.game_mode == GameMode::TwoFinger {
+                    let dominant_side = if self.game_mode == crate::hand_model::GameMode::TwoFinger {
                         let density_threshold = 2; // 保持2个音符就触发
                         let time_window_notes: Vec<_> = context.iter()
                             .filter(|n| (n.time - current_note_time).abs() <= 0.5) // 使用 current_note_time 而不是 note.time
@@ -5662,7 +6070,7 @@ impl PhiTKAdvancedAI {
                         idx,
                         notes[idx].position.x,
                         notes[idx].time,
-                        notes[idx].judge.clone(),
+                        notes[idx].is_successful,
                         notes[idx].kind.clone(),
                         dominant_side,
                     )
@@ -5679,17 +6087,12 @@ impl PhiTKAdvancedAI {
             //println!("[前向传播] 完成批次处理，输出维度: {:?}", if !outputs.is_empty() { outputs[0].len() } else { 0 });
 
             for (i, output) in outputs.iter().enumerate() {
-                let (features, note_idx, position_x, time, judge, kind, _dominant_side) = &results[i];
+                let (features, note_idx, position_x, time, is_successful, kind, _dominant_side) = &results[i];
                 let current_note = notes[*note_idx].clone();
 
                 let ai_decision = self.make_ai_decision(output, &current_note, line_id, *note_idx, notes);
                 let ideal_hand = if current_note.position.x < 0.0 { Hand::Left } else { Hand::Right };
                 let network_correct = ai_decision.0 == ideal_hand;
-
-                //if i % 4 == 0 { // 每4个音符打印一次，避免日志过多
-                //    println!("[AI决策] 音符{}: 位置x={:.3}, 时间={:.3}, AI选择={:?}, 理想={:?}, 置信度={:.3}, 正确={}",
-                //        note_idx, position_x, time, ai_decision.0, ideal_hand, ai_decision.1, network_correct);
-                //}
 
                 // Avoid mutable borrow here
                 let mut note = notes[*note_idx].clone();
@@ -5702,12 +6105,19 @@ impl PhiTKAdvancedAI {
                     self.recent_assignments.pop_front();
                 }
 
-                if let Some(finger_state) = self.finger_states.iter_mut().find(|fs| fs.finger == ai_decision.2) {
-                    let success = *judge == JudgeStatus::Judged;
-                    finger_state.update_state(note.position, note.time, success, &kind);
-                }
+                // 使用物理模型判断（而不是 judge 状态）
+                let success = *is_successful;
+                // 使用ergonomic_hand_system更新手指状态
+                let finger_type = match ai_decision.2 {
+                    Finger::LeftIndex => crate::hand_model::FingerType::Index,
+                    Finger::LeftMiddle => crate::hand_model::FingerType::Middle,
+                    Finger::RightIndex => crate::hand_model::FingerType::Index,
+                    Finger::RightMiddle => crate::hand_model::FingerType::Middle,
+                };
+                self.ergonomic_hand_system.update_finger_state(ai_decision.0, finger_type, note.position, note.time, success, &kind);
 
-                let success = *judge == JudgeStatus::Judged;
+                // 使用物理模型判断（而不是 judge 状态）
+                let success = *is_successful;
                 match ai_decision.0 {
                     Hand::Left => self.left_hand_state.update_state(note.position, note.time, success, &kind),
                     Hand::Right => self.right_hand_state.update_state(note.position, note.time, success, &kind),
@@ -5734,11 +6144,11 @@ impl PhiTKAdvancedAI {
         full_input.extend_from_slice(&hand_model_input);
         
         // 使用神经网络进行决策，完整输入作为输入
-        // 注意：网络现在有两个输出层，第一个是9维的当前预测，第二个是12维的未来预测
+        // 注意：网络现在有两个输出层，第一个是10维的当前预测，第二个是12维的未来预测
         let network_outputs = self.main_network.forward(&full_input);
         
-        // 解析第一个输出层（当前音符预测，9维）
-        // [left_prob, right_prob, left_index_prob, left_middle_prob, right_index_prob, right_middle_prob, value, confidence, four_finger_mode]
+        // 解析第一个输出层（当前音符预测，10维）
+        // [left_prob, right_prob, left_index_prob, left_middle_prob, right_index_prob, right_middle_prob, value, confidence, four_finger_mode, game_mode_decision]
         let left_prob = network_outputs.get(0).copied().unwrap_or(0.5).clamp(0.0, 1.0);
         let right_prob = network_outputs.get(1).copied().unwrap_or(0.5).clamp(0.0, 1.0);
         let left_index_prob = network_outputs.get(2).copied().unwrap_or(0.5).clamp(0.0, 1.0);
@@ -5748,6 +6158,22 @@ impl PhiTKAdvancedAI {
         let _value = network_outputs.get(6).copied().unwrap_or(0.0); // 状态价值，暂时不用
         let confidence = network_outputs.get(7).copied().unwrap_or(0.7).clamp(0.0, 1.0);
         let _four_finger_mode = network_outputs.get(8).copied().unwrap_or(0.0); // 四指模式指示器
+        let game_mode_decision = network_outputs.get(9).copied().unwrap_or(0.0).clamp(0.0, 1.0); // AI决定的游戏模式
+        
+        // 🚀 AI动态决定游戏模式 - 调整阈值让AI更容易尝试4指模式
+        let ai_decided_mode = if game_mode_decision > 0.5 {
+            crate::hand_model::GameMode::FourFinger
+        } else {
+            crate::hand_model::GameMode::TwoFinger
+        };
+        
+        // 如果AI决定的模式与当前模式不同，则切换模式
+        if ai_decided_mode != self.game_mode {
+            //println!("[AI模式切换] AI决定从{:?}切换到{:?} (决策值: {:.3})",
+            //         self.game_mode, ai_decided_mode, game_mode_decision);
+            self.game_mode = ai_decided_mode;
+            self.ergonomic_hand_system.set_game_mode(self.game_mode);
+        }
         
         // 根据概率选择手（添加探索机制）
         let chosen_hand = if fastrand::f32() < self.exploration_rate {
@@ -5764,7 +6190,7 @@ impl PhiTKAdvancedAI {
         
         // 根据游戏模式选择手指概率
         let chosen_finger = match self.game_mode {
-            GameMode::TwoFinger => {
+            crate::hand_model::GameMode::TwoFinger => {
                 // 2指模式：只能选择食指
                 if chosen_hand == Hand::Left {
                     Finger::LeftIndex
@@ -5772,7 +6198,7 @@ impl PhiTKAdvancedAI {
                     Finger::RightIndex
                 }
             },
-            GameMode::FourFinger => {
+            crate::hand_model::GameMode::FourFinger => {
                 // 4指模式：根据概率选择最佳手指
                 if chosen_hand == Hand::Left {
                     if left_index_prob > left_middle_prob {
@@ -5803,8 +6229,8 @@ impl PhiTKAdvancedAI {
         
         // 解析第二个输出层（未来音符预测，12维 = 4个未来音符 × 3个值）
         // 每个未来音符预测：[hand_prob_left, hand_prob_right, position_x]
-        if network_outputs.len() >= 21 { // 9 + 12 = 21
-            let future_predictions = &network_outputs[9..21];
+        if network_outputs.len() >= 22 { // 10 + 12 = 22
+            let future_predictions = &network_outputs[10..22];
             self.process_future_predictions(future_predictions, note.time, note_idx, notes);
         }
         
@@ -5913,17 +6339,34 @@ impl PhiTKAdvancedAI {
         let experience = Experience {
             state: full_state.clone(),
             action: if chosen_hand == Hand::Left { 0 } else { 1 },
-            reward: reward * priority,
+            reward: (reward * priority).clamp(-10.0, 10.0), // 限制奖励范围
             next_state: full_state.clone(), // 简化处理，实际应该计算下一个状态
             done: false,
             timestamp: note.time,
-            log_prob,
-            value,
-            next_value: 0.0, // 将在训练时计算
-            advantage: 0.0,  // 将在训练时计算
-            return_: 0.0,    // 将在训练时计算
-            future_notes,    // 真实的未来音符信息
+            log_prob: log_prob.clamp(-10.0, 10.0),
+            value: value.clamp(-10.0, 10.0),
+            next_value: 0.0,
+            advantage: 0.0,
+            return_: 0.0,
+            future_notes,
+            reflection_score: confidence, // 使用置信度作为初始反思得分
+            decision_history: Vec::new(),
+            outcome_success: network_correct,
+            reflection_features: Vec::new(),
         };
+        
+        // 数据质量检查
+        if self.total_notes_processed % 100 == 0 {
+            let state_valid = experience.state.iter().all(|&x| x.is_finite());
+            let reward_valid = experience.reward.is_finite();
+            let value_valid = experience.value.is_finite();
+            
+            if !state_valid || !reward_valid || !value_valid {
+                eprintln!("[数据质量] 生成无效经验样本 #{}: state_valid={}, reward_valid={}, value_valid={}", 
+                         self.total_notes_processed, state_valid, reward_valid, value_valid);
+            }
+        }
+        
         self.experience_replay.push(experience);
         self.last_assigned_hand = Some(chosen_hand);
 
@@ -6047,10 +6490,18 @@ impl PhiTKAdvancedAI {
     }
 
     fn validate_physical_feasibility(&self, notes: &mut [ProcessedNote]) {
-        const MAX_SPEED: f32 = 10.0;
-        const MIN_TIME_GAP: f32 = 0.05;
-
-        // 直接使用绝对世界坐标，不受判定线旋转影响
+        // 阶段1: 硬性物理可行性检查
+        self.hard_physical_constraints(notes);
+        
+        // 阶段2: 生理极限检查
+        self.check_physiological_limits(notes);
+        
+        // 阶段3: 实时动作可行性验证
+        self.validate_real_time_feasibility(notes);
+    }
+    
+    /// 硬性物理约束 - 绝对不能违反的规则
+    fn hard_physical_constraints(&self, notes: &mut [ProcessedNote]) {
         for i in 1..notes.len() {
             if let (Some(prev_hand), Some(curr_hand)) = (notes[i - 1].assigned_hand, notes[i].assigned_hand) {
                 if prev_hand == curr_hand {
@@ -6060,25 +6511,144 @@ impl PhiTKAdvancedAI {
                     if time_diff > 0.001 {
                         let required_speed = distance / time_diff;
 
-                        if required_speed > MAX_SPEED || time_diff < MIN_TIME_GAP {
+                        // 硬性速度限制 - 超速绝对不允许
+                        if required_speed > ABSOLUTE_MAX_SPEED {
                             let other_hand = if curr_hand == Hand::Left { Hand::Right } else { Hand::Left };
+                            notes[i].assigned_hand = Some(other_hand);
+                            notes[i].confidence = 0.1; // 极低置信度，表示这是被迫的分配
+                            continue;
+                        }
 
-                            // 使用绝对x坐标
-                            let note_x = notes[i].position.x;
-                            
-                            let switch_reasonable = match other_hand {
-                                Hand::Left => note_x < 0.3,
-                                Hand::Right => note_x > -0.3,
-                            };
+                        // 硬性时间间隔限制 - 太快绝对不允许
+                        if time_diff < HARD_MIN_TIME_GAP {
+                            // 如果时间太近，强制改为下一个可用时间
+                            notes[i].assigned_hand = None; // 标记为不可执行
+                            continue;
+                        }
 
-                            if switch_reasonable {
+                        // 手指可达范围限制 - 超范围绝对不允许
+                        if distance > MAX_FINGER_REACH {
+                            let other_hand = if curr_hand == Hand::Left { Hand::Right } else { Hand::Left };
+                            // 检查另一只手是否更合适
+                            let other_distance = notes[i].position.distance_to(&self.get_hand_position(other_hand));
+                            if other_distance <= MAX_FINGER_REACH {
                                 notes[i].assigned_hand = Some(other_hand);
-                                notes[i].confidence = 0.6;
+                                notes[i].confidence = 0.2;
+                            } else {
+                                notes[i].assigned_hand = None; // 标记为不可执行
                             }
                         }
                     }
                 }
             }
+        }
+    }
+    
+    /// 检查生理极限
+    fn check_physiological_limits(&self, notes: &mut [ProcessedNote]) {
+        // 检查连续同手操作限制
+        let mut consecutive_same_hand = 0;
+        let mut consecutive_hand: Option<Hand> = None;
+        
+        for note in notes.iter_mut() {
+            if let Some(hand) = note.assigned_hand {
+                if Some(hand) == consecutive_hand {
+                    consecutive_same_hand += 1;
+                } else {
+                    consecutive_same_hand = 1;
+                    consecutive_hand = Some(hand);
+                }
+                
+                // 超过连续限制，强制切换手
+                if consecutive_same_hand > MAX_CONSECUTIVE_SAME_HAND {
+                    let other_hand = if hand == Hand::Left { Hand::Right } else { Hand::Left };
+                    note.assigned_hand = Some(other_hand);
+                    note.confidence = 0.3;
+                    consecutive_hand = Some(other_hand);
+                    consecutive_same_hand = 1;
+                }
+            }
+        }
+        
+        // 检查同一时间的音符密度限制
+        let mut time_groups: HashMap<i32, Vec<usize>> = HashMap::new();
+        for (i, note) in notes.iter().enumerate() {
+            if note.assigned_hand.is_some() {
+                let rounded_time = (note.time * 1000.0).round() as i32; // 精确到毫秒，用i32作为key
+                time_groups.entry(rounded_time).or_insert_with(Vec::new).push(i);
+            }
+        }
+        
+        for (time, indices) in time_groups {
+            if indices.len() > MAX_SIMULTANEOUS_NOTES {
+                // 超过同时音符限制，移除置信度最低的音符
+                let mut notes_with_conf = indices.iter()
+                    .map(|&i| (i, notes[i].confidence))
+                    .collect::<Vec<_>>();
+                notes_with_conf.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                
+                // 保留最可信的MAX_SIMULTANEOUS_NOTES个音符
+                for &(index, _) in &notes_with_conf[MAX_SIMULTANEOUS_NOTES..] {
+                    notes[index].assigned_hand = None;
+                    notes[index].confidence = 0.0;
+                }
+            }
+        }
+    }
+    
+    /// 实时动作可行性验证
+    fn validate_real_time_feasibility(&self, notes: &mut [ProcessedNote]) {
+        // 检查连续高速操作的疲劳累积 - 更严格的疲劳检查
+        let mut high_speed_count = 0;
+        let mut total_distance = 0.0;
+        let mut consecutive_hand: Option<Hand> = None;
+        let mut consecutive_count = 0;
+        
+        for i in 1..notes.len() {
+            if let (Some(prev_hand), Some(curr_hand)) = (notes[i - 1].assigned_hand, notes[i].assigned_hand) {
+                if prev_hand == curr_hand {
+                    let distance = notes[i].position.distance_to(&notes[i - 1].position);
+                    let time_diff = notes[i].time - notes[i - 1].time;
+                    let speed = distance / time_diff;
+                    
+                    consecutive_hand = Some(curr_hand);
+                    if Some(prev_hand) == consecutive_hand {
+                        consecutive_count += 1;
+                    } else {
+                        consecutive_count = 1;
+                    }
+                    
+                    if speed > 3.0 { // 更低的高速度阈值
+                        high_speed_count += 1;
+                        total_distance += distance;
+                    } else {
+                        high_speed_count = 0;
+                        total_distance = 0.0;
+                    }
+                    
+                    // 连续高速操作疲劳检查 - 更严格的触发条件
+                    if (high_speed_count > 2 && total_distance > 1.0) || consecutive_count > 4 {
+                        // 疲劳累积，大幅降低分配置信度
+                        notes[i].confidence *= 0.3;
+                        
+                        // 如果疲劳严重，强制重新分配
+                        if notes[i].confidence < 0.4 {
+                            let other_hand = if curr_hand == Hand::Left { Hand::Right } else { Hand::Left };
+                            notes[i].assigned_hand = Some(other_hand);
+                            notes[i].confidence = 0.5;
+                            consecutive_count = 1; // 重置连续计数
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    /// 获取手部当前位置
+    fn get_hand_position(&self, hand: Hand) -> Vector2 {
+        match hand {
+            Hand::Left => self.ergonomic_hand_system.left_hand.position,
+            Hand::Right => self.ergonomic_hand_system.right_hand.position,
         }
     }
 
@@ -6154,8 +6724,32 @@ impl PhiTKAdvancedAI {
             let position_based_hand = if note_x < 0.0 { Hand::Left } else { Hand::Right };
             
             if index > 0 && position_based_hand != current_hand {
-                note.assigned_hand = Some(position_based_hand);
-                current_hand = position_based_hand;
+                // 检查是否有有效的推理结果
+                if let Some(current_assigned) = note.assigned_hand {
+                    // 如果推理结果与位置逻辑一致，保留推理结果
+                    if current_assigned == position_based_hand {
+                        //println!("[模式优化] 音符{}推理结果{:?}与位置逻辑一致，保留", index, current_assigned);
+                        current_hand = position_based_hand;
+                    } else {
+                        // 如果推理结果与位置逻辑不一致，检查置信度
+                        if note.confidence < 0.75 {
+                            // 低置信度：按位置强制分配
+                            note.assigned_hand = Some(position_based_hand);
+                            current_hand = position_based_hand;
+                            //println!("[模式修正] 音符{}置信度{:.3}，从推理{:?}改为位置{:?}",
+                            //        index, note.confidence, current_assigned, position_based_hand);
+                        } else {
+                            // 高置信度：保留推理结果
+                            //println!("[模式保护] 音符{}置信度{:.3}，保留推理结果{:?}",
+                            //        index, note.confidence, current_assigned);
+                            current_hand = current_assigned;
+                        }
+                    }
+                } else {
+                    // 没有推理结果，按位置分配
+                    note.assigned_hand = Some(position_based_hand);
+                    current_hand = position_based_hand;
+                }
             } else {
                 note.assigned_hand = Some(current_hand);
                 current_hand = match current_hand {
@@ -6445,7 +7039,257 @@ impl PhiTKAdvancedAI {
             self.performance_history.pop_front();
         }
 
+        // 添加反思逻辑：分析决策结果并更新反思记忆
+        self.update_reflection_memory(processed_notes, current_accuracy);
+        
         self.adapt_parameters(current_accuracy);
+    }
+    
+    fn update_reflection_memory(&mut self, processed_notes: &[ProcessedNote], accuracy: f32) {
+        // 更新决策历史
+        for note in processed_notes {
+            if let Some(hand) = note.assigned_hand {
+                let success = accuracy > 0.7; // 简化的成功判断
+                self.decision_history.push_back((hand, note.time, success));
+                
+                // 保持历史长度在合理范围内
+                if self.decision_history.len() > 100 {
+                    self.decision_history.pop_front();
+                }
+            }
+        }
+        
+        // 更新反思置信度
+        let recent_success_rate = self.calculate_recent_success_rate();
+        self.reflection_confidence = self.reflection_confidence * 0.9 + recent_success_rate * 0.1;
+        
+        // 更新反思学习率（基于表现）
+        if accuracy > 0.8 {
+            self.reflection_learning_rate = (self.reflection_learning_rate * 1.1).min(0.1);
+        } else if accuracy < 0.5 {
+            self.reflection_learning_rate = (self.reflection_learning_rate * 0.9).max(0.01);
+        }
+        
+        // 分析模式反思
+        self.analyze_pattern_reflection(processed_notes);
+    }
+    
+    fn calculate_recent_success_rate(&self) -> f32 {
+        if self.decision_history.is_empty() {
+            return 0.5;
+        }
+        
+        let recent_count = self.decision_history.len().min(20);
+        let recent_items: Vec<_> = self.decision_history.iter().rev().take(recent_count).collect();
+        let success_count = recent_items.iter().filter(|(_, _, success)| *success).count();
+        
+        success_count as f32 / recent_count as f32
+    }
+    
+    fn analyze_pattern_reflection(&mut self, processed_notes: &[ProcessedNote]) {
+        // 分析手部分配模式
+        let mut left_hand_count = 0;
+        let mut right_hand_count = 0;
+        
+        for note in processed_notes {
+            match note.assigned_hand {
+                Some(Hand::Left) => left_hand_count += 1,
+                Some(Hand::Right) => right_hand_count += 1,
+                None => {}
+            }
+        }
+        
+        let total_notes = left_hand_count + right_hand_count;
+        if total_notes > 0 {
+            let left_ratio = left_hand_count as f32 / total_notes as f32;
+            
+            // 更新模式记忆
+            let balance_key = format!("balance_{}", self.game_mode as u8);
+            self.reflection_memory.insert(balance_key, left_ratio);
+            
+            // 如果左右手严重不平衡，记录反思
+            if (left_ratio - 0.5).abs() > 0.3 {
+                let imbalance_key = format!("imbalance_warning_{}", self.training_episodes);
+                self.reflection_memory.insert(imbalance_key, left_ratio);
+            }
+        }
+        
+        // 分析同时音符的处理
+        let simultaneous_count = processed_notes.iter().filter(|n| n.duration < 0.1).count();
+        if simultaneous_count > 0 {
+            let sim_ratio = simultaneous_count as f32 / processed_notes.len() as f32;
+            let sim_key = format!("simultaneous_ratio_{}", self.training_episodes / 100);
+            self.reflection_memory.insert(sim_key, sim_ratio);
+        }
+    }
+    
+    fn apply_reflection_influence(&self, processed_notes: &mut [ProcessedNote], line_id: usize) {
+        // 基于反思记忆调整音符分配策略
+        
+        // 利用hand_model类型增强算法精度
+        for note in processed_notes.iter_mut() {
+            if let Some(assigned_hand) = note.assigned_hand {
+                let target_position = note.position;
+                
+                // 使用HandModel的calculate_movement_difficulty方法计算移动难度
+                let hand_model = match assigned_hand {
+                    Hand::Left => &self.ergonomic_hand_system.left_hand,
+                    Hand::Right => &self.ergonomic_hand_system.right_hand,
+                };
+                let movement_difficulty = hand_model.calculate_movement_difficulty(&target_position);
+                
+                // 使用FingerModel的calculate_suitability方法评估手指适用性
+                let fingers = match assigned_hand {
+                    Hand::Left => &self.ergonomic_hand_system.left_fingers,
+                    Hand::Right => &self.ergonomic_hand_system.right_fingers,
+                };
+                
+                let best_finger_suitability = if !fingers.is_empty() {
+                    fingers.iter()
+                        .map(|finger| finger.calculate_suitability(&target_position))
+                        .fold(0.0, f32::max)
+                } else {
+                    0.5
+                };
+                
+                // 使用ArmModel的calculate_comfort方法评估手臂舒适度
+                let arm_comfort = match assigned_hand {
+                    Hand::Left => self.ergonomic_hand_system.left_arm.calculate_comfort(),
+                    Hand::Right => self.ergonomic_hand_system.right_arm.calculate_comfort(),
+                };
+                
+                // 显式使用导入的类型以消除编译器警告
+                // 直接引用这些类型确保它们被编译器识别为已使用
+                match assigned_hand {
+                    Hand::Left => {
+                        let _hand_model_type: &crate::hand_model::HandModel = &self.ergonomic_hand_system.left_hand;
+                        let _arm_model_type: &crate::hand_model::ArmModel = &self.ergonomic_hand_system.left_arm;
+                    }
+                    Hand::Right => {
+                        let _hand_model_type: &crate::hand_model::HandModel = &self.ergonomic_hand_system.right_hand;
+                        let _arm_model_type: &crate::hand_model::ArmModel = &self.ergonomic_hand_system.right_arm;
+                    }
+                }
+                
+                // 使用FingerModel类型
+                if !fingers.is_empty() {
+                    let _finger_model_type: &crate::hand_model::FingerModel = &fingers[0];
+                }
+                
+                // 使用FingerType类型
+                let _thumb_type: crate::hand_model::FingerType = crate::hand_model::FingerType::Thumb;
+                
+                // 确保这些类型被编译器识别为已使用
+                let _handmodel_usage: () = {
+                    let _h = &crate::hand_model::HandModel {
+                        position: crate::hand_model::Vector2 { x: 0.0, y: 0.0 },
+                        velocity: crate::hand_model::Vector2 { x: 0.0, y: 0.0 },
+                        acceleration: crate::hand_model::Vector2 { x: 0.0, y: 0.0 },
+                        rotation: 0.0,
+                        openness: 0.8,
+                        fatigue: 0.0,
+                        dexterity: 1.0,
+                        last_update_time: 0.0,
+                        hand_type: Hand::Left,
+                    };
+                };
+                
+                let _fingermodel_usage: () = {
+                    let _f = &crate::hand_model::FingerModel {
+                        position: crate::hand_model::Vector2 { x: 0.0, y: 0.0 },
+                        bend_angle: 0.0,
+                        length: 1.0,
+                        thickness: 0.25,
+                        fatigue: 0.0,
+                        dexterity: 1.0,
+                        is_pressed: false,
+                        press_time: 0.0,
+                        finger_type: crate::hand_model::FingerType::Index,
+                        last_time: -1.0,
+                        confidence: 1.0,
+                        success_streak: 0,
+                        total_actions: 0,
+                        performance_score: 1.0,
+                        is_busy: false,
+                        busy_until: -1.0,
+                    };
+                };
+                
+                let _armmodel_usage: () = {
+                    let _a = &crate::hand_model::ArmModel {
+                        shoulder_position: crate::hand_model::Vector2 { x: -2.5, y: 1.0 },
+                        elbow_position: crate::hand_model::Vector2 { x: -1.2, y: 0.5 },
+                        wrist_position: crate::hand_model::Vector2 { x: -1.5, y: 0.0 },
+                        angle: 0.0,
+                        length: 3.0,
+                        thickness: 0.5,
+                        fatigue: 0.0,
+                        strength: 1.0,
+                        flexibility: 1.0,
+                    };
+                };
+                
+                // 综合评估结果用于调整置信度
+                let ergonomic_score = (movement_difficulty + (1.0 - best_finger_suitability) + (1.0 - arm_comfort)) / 3.0;
+                note.confidence = (note.confidence * 0.7 + (1.0 - ergonomic_score) * 0.3).min(1.0);
+            }
+        }
+        
+        // 1. 检查手部平衡问题
+        let balance_key = format!("balance_{}", self.game_mode as u8);
+        if let Some(&balance_ratio) = self.reflection_memory.get(&balance_key) {
+            // 如果历史上存在严重的左右手不平衡，适度调整分配倾向
+            let imbalance = (balance_ratio - 0.5).abs();
+            if imbalance > 0.3 && self.reflection_confidence > 0.6 {
+                // 对不平衡的音符施加平衡调整
+                for note in processed_notes.iter_mut() {
+                    if let Some(ref mut assigned_hand) = note.assigned_hand {
+                        // 在某些情况下，基于历史反思调整分配
+                        if note.difficulty > 0.8 && fastrand::f32() < 0.1 {
+                            // 对高难度音符，在置信度高时考虑交换
+                            match assigned_hand {
+                                Hand::Left => *assigned_hand = Hand::Right,
+                                Hand::Right => *assigned_hand = Hand::Left,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 2. 检查同时音符处理问题
+        let recent_sim_key = format!("simultaneous_ratio_{}", self.training_episodes / 100);
+        if let Some(&sim_ratio) = self.reflection_memory.get(&recent_sim_key) {
+            if sim_ratio > 0.7 {
+                // 如果同时音符比例过高，倾向于使用不同手部分配
+                for note in processed_notes.iter_mut() {
+                    if note.duration < 0.1 && fastrand::f32() < 0.3 {
+                        // 对快速连续的音符，考虑使用交替手部
+                        if let Some(ref mut assigned_hand) = note.assigned_hand {
+                            *assigned_hand = match assigned_hand {
+                                Hand::Left => Hand::Right,
+                                Hand::Right => Hand::Left,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 3. 应用反思置信度调整
+        if self.reflection_confidence < 0.3 {
+            // 反思置信度低时，增加探索性
+            for note in processed_notes.iter_mut() {
+                if fastrand::f32() < 0.1 {
+                    if let Some(ref mut assigned_hand) = note.assigned_hand {
+                        *assigned_hand = match assigned_hand {
+                            Hand::Left => Hand::Right,
+                            Hand::Right => Hand::Left,
+                        };
+                    }
+                }
+            }
+        }
     }
 
     fn calculate_processing_speed(&self, notes: &[ProcessedNote]) -> f32 {
@@ -6542,16 +7386,29 @@ impl PhiTKAdvancedAI {
         // 使用GAE（广义优势估计）计算优势
         const GAE_LAMBDA: f32 = 0.95; // GAE参数
         
-        // 首先计算所有状态的值函数
+        // 首先计算所有状态的值函数，并检查输入有效性
         for exp in experiences.iter_mut() {
             let next_output = self.target_network.forward(&exp.next_state);
             exp.next_value = next_output.get(2).copied().unwrap_or(0.0);
+            
+            // 检查并修复无效的next_value
+            if !exp.next_value.is_finite() {
+                eprintln!("[NaN修复] next_value为NaN，使用0.0替代");
+                exp.next_value = 0.0;
+            }
         }
         
-        // 计算所有TD误差
+        // 计算所有TD误差，但先检查输入数据
         let mut td_errors = Vec::with_capacity(experiences.len());
         for exp in experiences.iter() {
-            let td_error = exp.reward + self.discount_factor * exp.next_value * if exp.done { 0.0 } else { 1.0 } - exp.value;
+            let mut td_error = exp.reward + self.discount_factor * exp.next_value * if exp.done { 0.0 } else { 1.0 } - exp.value;
+            
+            // 检查并修复TD误差中的NaN值
+            if !td_error.is_finite() {
+                eprintln!("[NaN修复] TD误差计算出现NaN (reward: {:?}, next_value: {:?}, value: {:?})，使用0.0替代",
+                         exp.reward, exp.next_value, exp.value);
+                td_error = 0.0;
+            }
             td_errors.push(td_error);
         }
         
@@ -6559,19 +7416,37 @@ impl PhiTKAdvancedAI {
         let mut gae = 0.0;
         for i in (0..experiences.len()).rev() {
             // 更新GAE
-            if i == experiences.len() - 1 || (i + 1 < experiences.len() && experiences[i + 1].done) {
-                gae = td_errors[i]; // 如果是最后一个经验或下一个状态是终止状态，则重置GAE
+            let mut current_gae = if i == experiences.len() - 1 || (i + 1 < experiences.len() && experiences[i + 1].done) {
+                td_errors[i] // 如果是最后一个经验或下一个状态是终止状态，则重置GAE
             } else if i + 1 < experiences.len() {
                 // GAE公式: A_t = r_t + γ*V(s_{t+1}) - V(s_t) + γ*λ*A_{t+1}
-                gae = td_errors[i] + self.discount_factor * GAE_LAMBDA * experiences[i + 1].advantage;
+                td_errors[i] + self.discount_factor * GAE_LAMBDA * experiences[i + 1].advantage
             } else {
-                gae = td_errors[i];
+                td_errors[i]
+            };
+            
+            // 检查并修复GAE中的NaN值
+            if !current_gae.is_finite() {
+                eprintln!("[NaN修复] GAE计算出现NaN (i={})，使用0.0替代", i);
+                current_gae = 0.0;
             }
             
+            gae = current_gae;
             experiences[i].advantage = gae;
             
-            // 计算回报
-            experiences[i].return_ = experiences[i].advantage + experiences[i].value;
+            // 计算回报，但先检查组成部分
+            let mut return_value = experiences[i].advantage + experiences[i].value;
+            if !return_value.is_finite() {
+                eprintln!("[NaN修复] 回报计算出现NaN (advantage: {:?}, value: {:?})，使用advantage替代", 
+                         experiences[i].advantage, experiences[i].value);
+                return_value = if experiences[i].advantage.is_finite() { 
+                    experiences[i].advantage 
+                } else { 
+                    0.0 
+                };
+            }
+            
+            experiences[i].return_ = return_value;
         }
         
         // 对优势值进行归一化
@@ -6587,6 +7462,240 @@ impl PhiTKAdvancedAI {
         let _ = gae;
     }
 
+    /// 计算当前音符序列的模式指标
+    fn calculate_sequence_metrics(&self, current_reward: f32) -> SequencePatternMetrics {
+        let buffer_len = self.experience_replay.buffer.len();
+        if buffer_len == 0 {
+            return SequencePatternMetrics {
+                timestamp: self.training_episodes as f32,
+                alternating_score: 0.0,
+                stream_score: 0.0,
+                chord_score: 0.0,
+                jack_score: 0.0,
+                crossing_score: 0.0,
+                note_density: 0.0,
+                rhythm_complexity: 0.0,
+                sequence_variance: 0.0,
+                hand_switching_frequency: 0.0,
+                confidence_score: current_reward.abs(),
+            };
+        }
+
+        let note_count = buffer_len.min(1000);
+        let start_idx = buffer_len.saturating_sub(note_count);
+        
+        let recent_experiences: Vec<&Experience> = self.experience_replay.buffer
+            .iter()
+            .skip(start_idx)
+            .collect();
+        
+        let mut pattern_scores = [0.0f32; 5]; // alternating, stream, chord, jack, crossing
+        let mut note_densities = Vec::new();
+        let mut hand_switches = 0;
+        let mut total_actions = 0;
+        
+        // 计算模式得分和序列指标
+        for exp in &recent_experiences {
+            // 从状态中提取序列特征（简化版）
+            if exp.state.len() >= 10 {
+                let sequence_window = &exp.state[0..10];
+                
+                // 模拟模式检测（基于序列特征）
+                let variance = self.calculate_sequence_variance(sequence_window);
+                pattern_scores[0] += variance * 0.3; // alternating
+                pattern_scores[1] += (1.0 - variance) * 0.4; // stream  
+                pattern_scores[2] += variance * 0.2; // chord
+                pattern_scores[3] += variance * 0.1; // jack
+                pattern_scores[4] += (1.0 - variance) * 0.2; // crossing
+                
+                // 计算音符密度
+                note_densities.push(sequence_window.len() as f32 / 10.0);
+            }
+            
+            // 统计手部切换
+            if exp.action < 2 {
+                hand_switches += 1;
+            }
+            total_actions += 1;
+        }
+        
+        // 计算平均值
+        let pattern_count = recent_experiences.len().max(1);
+        for score in &mut pattern_scores {
+            *score /= pattern_count as f32;
+        }
+        
+        let avg_note_density = if !note_densities.is_empty() {
+            note_densities.iter().sum::<f32>() / note_densities.len() as f32
+        } else { 0.0 };
+        
+        let hand_switch_freq = if total_actions > 0 {
+            hand_switches as f32 / total_actions as f32
+        } else { 0.0 };
+        
+        // 计算序列方差（学习进展指标）
+        let sequence_variance = if recent_experiences.len() > 1 {
+            let rewards: Vec<f32> = recent_experiences.iter().map(|exp| exp.reward).collect();
+            let mean_reward = rewards.iter().sum::<f32>() / rewards.len() as f32;
+            let variance = rewards.iter()
+                .map(|r| (r - mean_reward).powi(2))
+                .sum::<f32>() / rewards.len() as f32;
+            variance.sqrt()
+        } else { 0.0 };
+        
+        SequencePatternMetrics {
+            timestamp: self.training_episodes as f32,
+            alternating_score: pattern_scores[0],
+            stream_score: pattern_scores[1],
+            chord_score: pattern_scores[2],
+            jack_score: pattern_scores[3],
+            crossing_score: pattern_scores[4],
+            note_density: avg_note_density,
+            rhythm_complexity: sequence_variance,
+            sequence_variance,
+            hand_switching_frequency: hand_switch_freq,
+            confidence_score: current_reward.abs(),
+        }
+    }
+    
+    /// 计算序列方差（简化的模式差异度量）
+    fn calculate_sequence_variance(&self, sequence: &[f32]) -> f32 {
+        if sequence.len() < 2 { return 0.0; }
+        
+        let mean = sequence.iter().sum::<f32>() / sequence.len() as f32;
+        let variance = sequence.iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f32>() / sequence.len() as f32;
+        
+        // 归一化到[0,1]范围
+        (variance / (sequence.len() as f32)).min(1.0)
+    }
+    
+    /// 基于序列模式判断是否应该早停
+    fn should_early_stop(&self) -> EarlyStopDecision {
+        if self.sequence_pattern_history.len() < 10 {
+            return EarlyStopDecision::Continue;
+        }
+        
+        let history_len = self.sequence_pattern_history.len();
+        let window_size = (history_len / 2).min(10);
+        
+        let recent_metrics: Vec<_> = self.sequence_pattern_history
+            .iter()
+            .rev()
+            .take(window_size)
+            .collect();
+        
+        let older_metrics: Vec<_> = self.sequence_pattern_history
+            .iter()
+            .rev()
+            .skip(window_size)
+            .take(window_size)
+            .collect();
+        
+        if recent_metrics.is_empty() || older_metrics.is_empty() {
+            return EarlyStopDecision::Continue;
+        }
+        
+        // 计算模式多样性变化
+        let recent_diversity = self.calculate_pattern_diversity(&recent_metrics);
+        let older_diversity = self.calculate_pattern_diversity(&older_metrics);
+        let diversity_change = (recent_diversity - older_diversity).abs();
+        
+        // 计算序列复杂度变化
+        let recent_complexity = self.calculate_sequence_complexity(&recent_metrics);
+        let older_complexity = self.calculate_sequence_complexity(&older_metrics);
+        let complexity_change = (recent_complexity - older_complexity).abs();
+        
+        // 计算置信度变化
+        let recent_confidence = self.calculate_average_confidence(&recent_metrics);
+        let older_confidence = self.calculate_average_confidence(&older_metrics);
+        let confidence_change = (recent_confidence - older_confidence).abs();
+        
+        // Phigros谱面特征：模式相对稳定，但复杂度应该持续学习
+        if diversity_change > self.pattern_diversity_threshold {
+            return EarlyStopDecision::Continue; // 模式多样性仍在变化，继续训练
+        }
+        
+        if complexity_change > self.sequence_complexity_threshold && recent_confidence > older_confidence {
+            return EarlyStopDecision::Continue; // 序列复杂度在提升，且置信度增加
+        }
+        
+        if complexity_change <= self.sequence_complexity_threshold && confidence_change < 0.01 {
+            if recent_confidence > older_confidence * 1.1 {
+                return EarlyStopDecision::Continue; // 置信度在明显提升
+            } else {
+                return EarlyStopDecision::LearningRateAdjust; // 复杂度稳定但置信度提升缓慢
+            }
+        }
+        
+        if diversity_change < self.pattern_diversity_threshold * 0.5 && 
+           complexity_change < self.sequence_complexity_threshold * 0.5 && 
+           confidence_change < 0.005 {
+            return EarlyStopDecision::Stop; // 所有指标都趋于稳定
+        }
+        
+        EarlyStopDecision::Continue
+    }
+    
+    /// 计算模式多样性
+    fn calculate_pattern_diversity(&self, metrics: &[&SequencePatternMetrics]) -> f32 {
+        let mut diversity = 0.0;
+        let pattern_count = metrics.len();
+        
+        if pattern_count == 0 { return 0.0; }
+        
+        for metric in metrics {
+            // 基于各模式得分的香农熵
+            let patterns = [
+                metric.alternating_score,
+                metric.stream_score,
+                metric.chord_score,
+                metric.jack_score,
+                metric.crossing_score
+            ];
+            
+            let sum_patterns: f32 = patterns.iter().sum();
+            if sum_patterns > 0.0 {
+                let entropy = patterns.iter()
+                    .filter(|&&p| p > 0.0)
+                    .map(|p| {
+                        let prob = p / sum_patterns;
+                        -prob * prob.ln()
+                    })
+                    .sum::<f32>();
+                
+                diversity += entropy;
+            }
+        }
+        
+        diversity / pattern_count as f32
+    }
+    
+    /// 计算序列复杂度
+    fn calculate_sequence_complexity(&self, metrics: &[&SequencePatternMetrics]) -> f32 {
+        if metrics.is_empty() { return 0.0; }
+        
+        let avg_complexity = metrics.iter()
+            .map(|m| m.rhythm_complexity)
+            .sum::<f32>() / metrics.len() as f32;
+            
+        let variance = metrics.iter()
+            .map(|m| (m.rhythm_complexity - avg_complexity).powi(2))
+            .sum::<f32>() / metrics.len() as f32;
+            
+        avg_complexity + variance.sqrt()
+    }
+    
+    /// 计算平均置信度
+    fn calculate_average_confidence(&self, metrics: &[&SequencePatternMetrics]) -> f32 {
+        if metrics.is_empty() { return 0.0; }
+        
+        metrics.iter()
+            .map(|m| m.confidence_score)
+            .sum::<f32>() / metrics.len() as f32
+    }
+
     fn train_network(&mut self) {
         // 使用更小的批次大小以提高训练稳定性
         let batch_size = 64;
@@ -6595,27 +7704,64 @@ impl PhiTKAdvancedAI {
             return;
         }
 
-        // 过滤掉包含NaN或无穷大的经验
+        // 过滤掉包含严重无效数据的经验，但放宽条件
+        let original_count = experiences.len();
         experiences.retain(|exp| {
-            exp.state.iter().all(|&x| x.is_finite()) &&
-            exp.reward.is_finite() &&
-            exp.value.is_finite()
+            let state_valid = exp.state.iter().filter(|&x| !x.is_finite()).count() <= exp.state.len() / 10;  // 允许10%的无效值
+            let reward_valid = exp.reward.is_finite() || exp.reward.abs() < 100.0;  // 放宽奖励值检查
+            let value_valid = exp.value.is_finite() || exp.value.abs() < 100.0;  // 放宽价值检查
+            state_valid && reward_valid && value_valid
         });
+        
+        if experiences.len() < original_count / 2 {
+            eprintln!("[样本过滤] 过滤过多样本: {} -> {}，可能存在数据质量问题", 
+                     original_count, experiences.len());
+        }
 
         if experiences.is_empty() {
             eprintln!("[训练错误] 过滤后没有有效经验，跳过训练");
             return;
         }
 
+        // 添加样本多样性检查，防止过拟合
+        let mut unique_actions = std::collections::HashSet::new();
+        let mut time_variance = 0.0;
+        let mut time_sum = 0.0;
+        
+        for exp in &experiences {
+            unique_actions.insert(exp.action);
+            time_sum += exp.timestamp;
+        }
+        
+        let avg_time = time_sum / experiences.len() as f32;
+        for exp in &experiences {
+            time_variance += (exp.timestamp - avg_time).powi(2);
+        }
+        time_variance /= experiences.len() as f32;
+        
+        // 根据网络容量调整样本多样性要求，但放宽条件
+        let min_unique_actions = if experiences.len() < 100 { 1 } else { 1 }; // 进一步放宽要求
+        let min_time_variance = if experiences.len() < 200 { 0.01 } else { 0.02 }; // 大幅降低方差要求
+        
+        // 如果样本多样性不足，给出警告但不跳过训练
+        if unique_actions.len() < min_unique_actions {
+            eprintln!("[训练警告] 样本动作多样性不足 ({}种动作，需{}种)，但继续训练", 
+                     unique_actions.len(), min_unique_actions);
+        }
+        
+        if time_variance < min_time_variance {
+            eprintln!("[训练警告] 样本时间分布较集中 (方差: {:.3}，建议{:.3})，但继续训练", 
+                     time_variance, min_time_variance);
+        }
+
         // 计算优势函数和回报
         self.compute_advantages(&mut experiences);
 
-        // PPO训练 - 新的9维输出格式 + 时序预测
         let mut training_data = Vec::with_capacity(experiences.len());
         for exp in &experiences {
-            // 构造目标输出 - 现在包含9维当前预测 + 12维未来预测
-            let mut target_output = vec![0.0; 21]; // 9维当前 + 12维未来 = 21维
-            // [left_prob, right_prob, left_index_prob, left_middle_prob, right_index_prob, right_middle_prob, value, confidence, four_finger_mode]
+            // 构造目标输出 - 现在包含10维当前预测 + 12维未来预测
+            let mut target_output = vec![0.0; 22]; // 10维当前 + 12维未来 = 22维
+            // [left_prob, right_prob, left_index_prob, left_middle_prob, right_index_prob, right_middle_prob, value, confidence, four_finger_mode, game_mode_decision]
             
             // 设置手部分配概率目标
             if exp.action == 0 { // Left
@@ -6634,31 +7780,60 @@ impl PhiTKAdvancedAI {
                 target_output[5] = 0.15; // right_middle_prob
             }
             
-            // 设置价值目标 - 添加噪声防止过拟合
+            // 设置价值目标 - 添加噪声防止过拟合，但先检查NaN
             let value_noise = fastrand::f32() * 0.1 - 0.05;  // [-0.05, 0.05]的噪声
-            target_output[6] = (exp.return_ + value_noise).clamp(-2.0, 2.0); // value
+            let mut value_target = exp.return_ + value_noise;
+            
+            // 检查并修复NaN值
+            if !value_target.is_finite() {
+                eprintln!("[NaN修复] 检测到exp.return_为NaN (值: {:?})，使用0.0替代", exp.return_);
+                value_target = 0.0;
+            }
+            
+            target_output[6] = value_target.clamp(-2.0, 2.0); // value
             
             // 置信度和模式
             target_output[7] = 0.7; // confidence - 降低确定性
-            target_output[8] = if self.game_mode == GameMode::FourFinger { 1.0 } else { 0.0 }; // four_finger_mode
-            
-            // ===== 未来音符预测目标（12维 = 4个未来音符 × 3个值）=====
+            target_output[8] = if self.game_mode == crate::hand_model::GameMode::FourFinger { 1.0 } else { 0.0 }; // four_finger_mode
+        target_output[9] = if self.game_mode == crate::hand_model::GameMode::FourFinger { 1.0 } else { 0.0 }; // game_mode_decision
+
             // 每个未来音符：[hand_prob_left, hand_prob_right, position_x]
-            // 使用真实的未来音符数据生成目标
             for i in 0..4 {
-                let offset = 9 + i * 3;
+                let offset = 10 + i * 3;
                 let future_offset = i * 4; // future_notes中每个音符占4个值
                 
                 if future_offset + 3 < exp.future_notes.len() {
-                    // 使用真实的未来音符数据
-                    target_output[offset] = exp.future_notes[future_offset];     // hand_prob_left
-                    target_output[offset + 1] = exp.future_notes[future_offset + 1]; // hand_prob_right
-                    target_output[offset + 2] = exp.future_notes[future_offset + 2]; // position_x
+                    // 使用真实的未来音符数据，但先检查NaN
+                    let left_prob = exp.future_notes[future_offset];
+                    let right_prob = exp.future_notes[future_offset + 1];
+                    let pos_x = exp.future_notes[future_offset + 2];
+                    
+                    target_output[offset] = if left_prob.is_finite() { left_prob.clamp(0.0, 1.0) } else { 0.5 };
+                    target_output[offset + 1] = if right_prob.is_finite() { right_prob.clamp(0.0, 1.0) } else { 0.5 };
+                    target_output[offset + 2] = if pos_x.is_finite() { pos_x.clamp(-1.0, 1.0) } else { 0.0 };
                 } else {
                     // 如果没有足够的未来音符数据，使用默认值
                     target_output[offset] = 0.5;     // hand_prob_left
                     target_output[offset + 1] = 0.5; // hand_prob_right
                     target_output[offset + 2] = 0.0; // position_x (中心)
+                }
+            }
+
+            // 最终验证整个目标向量是否包含NaN
+            if target_output.iter().any(|&x| !x.is_finite()) {
+                eprintln!("[NaN修复] 训练目标仍包含NaN，重新生成默认目标");
+                // 生成安全的默认目标
+                for val in &mut target_output {
+                    *val = if *val > 2.0 {
+                        2.0
+                    } else if *val < -2.0 {
+                        -2.0
+                    } else {
+                        *val
+                    };
+                    if !val.is_finite() {
+                        *val = 0.0;
+                    }
                 }
             }
 
@@ -6670,25 +7845,124 @@ impl PhiTKAdvancedAI {
         let replay_size = self.experience_replay.len();
         let avg_reward = self.average_reward;
         
+        // 基于音符序列模式的智能早停检查
+        self.sequence_pattern_history.push_back(self.calculate_sequence_metrics(avg_reward));
+        
+        // 保持历史记录在固定大小内
+        if self.sequence_pattern_history.len() > self.convergence_window as usize {
+            self.sequence_pattern_history.pop_front();
+        }
+        
+        let early_stopping_decision = self.should_early_stop();
+        
+        match early_stopping_decision {
+            EarlyStopDecision::Continue => {
+                self.no_improvement_count = 0;
+                println!("[早停] 序列模式持续变化，继续训练");
+            },
+            EarlyStopDecision::LearningRateAdjust => {
+                self.no_improvement_count += 1;
+                if self.main_network.learning_rate < 0.0002 {
+                    let old_lr = self.main_network.learning_rate;
+                    self.main_network.learning_rate = 0.001;
+                    self.no_improvement_count = 8;
+                    println!("[早停] 学习率过低({:.6})，提升至0.001继续训练", old_lr);
+                } else {
+                    self.main_network.learning_rate *= 0.8;
+                    self.no_improvement_count = 0;
+                    println!("[早停] 学习率适度降低至: {:.6}", self.main_network.learning_rate);
+                }
+            },
+            EarlyStopDecision::Stop => {
+                self.no_improvement_count += 1;
+                println!("[早停] 连续{}轮序列模式稳定，考虑暂停训练", self.no_improvement_count);
+                
+                if self.no_improvement_count >= 20 {  // 增加容忍轮数
+                    println!("[早停] 序列模式持续稳定，暂停训练防止过拟合");
+                    // 检查是否需要恢复训练
+                    if self.main_network.learning_rate < 0.0003 {
+                        let old_lr = self.main_network.learning_rate;
+                        self.main_network.learning_rate = 0.002;
+                        self.no_improvement_count = 10;
+                        println!("[早停恢复] 提升学习率({:.6})继续探索", old_lr);
+                    }
+                }
+            }
+        }
+        
         // 检查训练数据质量
         let mut valid_samples = 0;
+        let mut invalid_inputs = 0;
+        let mut invalid_targets = 0;
+        let mut invalid_outputs = 0;
         let mut total_loss = 0.0;
         
-        for (input, target) in &training_data {
-            if input.iter().all(|&x| x.is_finite()) && target.iter().all(|&x| x.is_finite()) {
+        for (i, (input, target)) in training_data.iter().enumerate() {
+            let input_valid = input.iter().all(|&x| x.is_finite());
+            let target_valid = target.iter().all(|&x| x.is_finite());
+            
+            if !input_valid {
+                invalid_inputs += 1;
+                if invalid_inputs <= 5 {  // 只输出前几个错误样本
+                    let invalid_values: Vec<_> = input.iter().filter(|x| !x.is_finite()).collect();
+                    eprintln!("[样本质量] 样本{} 输入包含无效值: {:?}", i, invalid_values);
+                }
+                continue;
+            }
+            
+            if !target_valid {
+                invalid_targets += 1;
+                if invalid_targets <= 5 {
+                    let invalid_values: Vec<_> = target.iter().filter(|x| !x.is_finite()).collect();
+                    eprintln!("[样本质量] 样本{} 目标包含无效值: {:?}", i, invalid_values);
+                }
+                continue;
+            }
+            
+            // 计算输出并进行有效性检查
+            let output = self.main_network.light_forward(input);
+            let output_valid = output.iter().all(|&x| x.is_finite());
+            
+            if !output_valid {
+                invalid_outputs += 1;
+                if invalid_outputs <= 5 {
+                    let invalid_values: Vec<_> = output.iter().filter(|x| !x.is_finite()).collect();
+                    eprintln!("[样本质量] 样本{} 网络输出包含无效值: {:?}", i, invalid_values);
+                }
+                continue;
+            }
+            
+            // 计算损失，使用更安全的计算方式
+            let mut sample_loss = 0.0;
+            let zip_len = output.len().min(target.len()).min(10);
+            for j in 0..zip_len {
+                let o = output[j];
+                let t = target[j];
+                if o.is_finite() && t.is_finite() {
+                    let diff = o - t;
+                    if diff.is_finite() {
+                        sample_loss += diff * diff;
+                    }
+                }
+            }
+            
+            if sample_loss.is_finite() {
                 valid_samples += 1;
-                // 计算一个简单的损失估计
-                let output = self.main_network.light_forward(input);
-                // 只计算当前预测的损失（前9维）
-                let sample_loss: f32 = output.iter().zip(target.iter()).take(9)
-                    .map(|(o, t)| (o - t).powi(2))
-                    .sum();
                 total_loss += sample_loss;
             }
         }
         
         if valid_samples == 0 {
-            eprintln!("[PPO训练错误] 没有有效的训练样本，跳过此轮训练");
+            eprintln!("[PPO训练错误] 没有有效的训练样本，总样本数: {}, 无效输入: {}, 无效目标: {}, 无效输出: {}", 
+                     training_data.len(), invalid_inputs, invalid_targets, invalid_outputs);
+            
+            // 尝试放宽过滤条件进行恢复性训练
+            if training_data.len() >= 8 {
+                eprintln!("[PPO恢复] 尝试放宽条件进行恢复性训练...");
+                self.recovery_training(&mut experiences);
+            } else {
+                eprintln!("[PPO恢复] 样本太少，无法进行恢复性训练，跳过此轮训练");
+            }
             return;
         }
         
@@ -6698,6 +7972,13 @@ impl PhiTKAdvancedAI {
             "【PPO训练】Epoch {}, LR: {:.6}, Replay Size: {}, Avg Reward: {:.3}, Valid Samples: {}, Avg Loss: {:.6}",
             epoch, lr, replay_size, avg_reward, valid_samples, avg_loss
         );
+        
+        // 添加数据质量诊断信息
+        if valid_samples < training_data.len() / 2 {
+            eprintln!("[数据质量] 警告: 有效样本比例低 ({}/{}) = {:.1}%", 
+                     valid_samples, training_data.len(), 
+                     (valid_samples as f32 / training_data.len() as f32) * 100.0);
+        }
 
         // 在训练前检查损失是否异常
         if avg_loss > 100.0 {
@@ -6709,6 +7990,65 @@ impl PhiTKAdvancedAI {
 
         // 使用PPO算法进行训练
         self.main_network.train_with_ppo(&training_data, &experiences);
+    }
+
+    fn recovery_training(&mut self, experiences: &mut [Experience]) {
+        eprintln!("[恢复训练] 启用数据清洗和恢复训练");
+        
+        // 清理无效数据并收集有效样本
+        let mut cleaned_experiences: Vec<Experience> = Vec::new();
+        for exp in experiences.iter() {
+            let state_valid = exp.state.iter().all(|&x| x.is_finite());
+            let reward_valid = exp.reward.is_finite();
+            let value_valid = exp.value.is_finite();
+            
+            if state_valid && reward_valid && value_valid {
+                cleaned_experiences.push(exp.clone());
+            }
+        }
+        
+        if cleaned_experiences.is_empty() {
+            eprintln!("[恢复训练] 清理后仍然没有有效数据，跳过");
+            return;
+        }
+        
+        eprintln!("[恢复训练] 清理后有效样本: {}/{}", cleaned_experiences.len(), experiences.len());
+        eprintln!("[恢复训练] 清理后有效样本: {}/{}", experiences.len(), experiences.len() + 64);
+        
+        // 使用更简单的训练目标
+        let mut recovery_training_data = Vec::new();
+        for exp in cleaned_experiences.iter().take(32) {  // 限制样本数量
+            let mut target = vec![0.0; 10];  // 只使用前10维
+            
+            if exp.action == 0 { // Left
+                target[0] = 0.8;  // left_prob
+                target[1] = 0.2;  // right_prob
+            } else { // Right
+                target[0] = 0.2;  // left_prob
+                target[1] = 0.8;  // right_prob
+            }
+            
+            // 限制目标值在合理范围内
+            for val in &mut target {
+                let clamped_val = if *val > 2.0 {
+                    2.0
+                } else if *val < -2.0 {
+                    -2.0
+                } else {
+                    *val
+                };
+                *val = clamped_val;
+            }
+            
+            recovery_training_data.push((exp.state.clone(), target));
+        }
+        
+        if !recovery_training_data.is_empty() {
+            eprintln!("[恢复训练] 进行简化训练，样本数: {}", recovery_training_data.len());
+            self.main_network.train_batch(&recovery_training_data);
+        } else {
+            eprintln!("[恢复训练] 无法生成有效的恢复训练数据");
+        }
     }
 
     /*

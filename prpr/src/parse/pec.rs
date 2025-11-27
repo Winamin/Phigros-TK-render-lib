@@ -17,6 +17,51 @@ use crate::config::Config;
 use std::sync::{Mutex, Arc};
 use crate::core::CtrlObject;
 
+// 智能手部分配函数
+fn smart_assign_hand(
+    position_x: f32,
+    time: f32,
+    previous_notes: &[(f32, f32, Hand)],
+    switch_threshold: f32,
+) -> Hand {
+    // 时间窗口（秒）内，认为是连续音符
+    const TEMPORAL_WINDOW: f32 = 2.0;
+    // 位置切换阈值
+    const POSITION_THRESHOLD: f32 = 0.2;
+    
+    // 查找时间窗口内最近的音符
+    let mut best_match = None;
+    let mut min_time_diff = f32::INFINITY;
+    
+    for &(note_time, note_pos, note_hand) in previous_notes {
+        let time_diff = (time - note_time).abs();
+        if time_diff < TEMPORAL_WINDOW && time_diff < min_time_diff {
+            min_time_diff = time_diff;
+            best_match = Some((note_hand, note_pos, time_diff));
+        }
+    }
+    
+    if let Some((best_hand, best_pos, time_diff)) = best_match {
+        // 如果位置变化不大，保持同一只手
+        let pos_diff = (position_x - best_pos).abs();
+        if pos_diff < POSITION_THRESHOLD {
+            return best_hand;
+        }
+        
+        // 位置变化大但时间很近，避免频繁切换
+        if time_diff < TEMPORAL_WINDOW * 0.3 {
+            return best_hand;
+        }
+    }
+    
+    // 基于位置的智能分配
+    if position_x < 0.5 {
+        Hand::Left
+    } else {
+        Hand::Right
+    }
+}
+
 trait Take {
     fn take_f32(&mut self) -> Result<f32>;
     fn take_usize(&mut self) -> Result<usize>;
@@ -83,6 +128,8 @@ struct PECJudgeLine {
     move_events: (Vec<PECEvent>, Vec<PECEvent>),
     rotate_events: Vec<PECEvent>,
     notes: Vec<Note>,
+    // 用于智能手部分配的追踪
+    previous_notes: Vec<(f32, f32, Hand)>,
 }
 
 fn sanitize_events(events: &mut [PECEvent], id: usize, desc: &str) {
@@ -257,6 +304,13 @@ pub fn parse_pec_with_list(source: &str, extra: ChartExtra, _r: &mut BpmList) ->
                     let position_x = it.take_f32()? / 1024.;
                     // TODO we don't understand..
                     let above = it.take_usize()? == 1;
+                    
+                    // 获取智能手部分配
+                    let smart_hand = smart_assign_hand(position_x, time, &line.previous_notes, 0.3);
+                    
+                    // 更新追踪列表
+                    let initial_hand = if position_x < 0.5 { Hand::Left } else { Hand::Right };
+                    line.previous_notes.push((time, position_x, initial_hand));
                     let fake = match it.take_usize()? {
                         0 => false,
                         1 => true,
@@ -276,7 +330,7 @@ pub fn parse_pec_with_list(source: &str, extra: ChartExtra, _r: &mut BpmList) ->
 
                         above,
                         multiple_hint: false,
-                        hand: if position_x < 0.5 { Hand::Left } else { Hand::Right },
+                        hand: smart_hand,
                         fake,
                         judge: JudgeStatus::NotJudged,
 			format: false,

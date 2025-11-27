@@ -27,7 +27,7 @@ fn activate(val: f32) -> f32 {
     return 0.5 * val * (1.0 + tanh_a);
 }
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let global_id = id.x;
     let total_output_size = params.output_size * params.batch_size;

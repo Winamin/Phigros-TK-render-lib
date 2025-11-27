@@ -1,13 +1,42 @@
 use super::{StaticTween, TweenFunction, TweenId, Tweenable, Vector};
 //use std::rc::Rc;
+use std::fmt::Debug;
 use std::sync::Arc;
 
-#[derive(Clone)]
 pub struct Keyframe<T> {
     pub time: f32,
     pub value: T,
     pub tween: Arc<dyn TweenFunction>,
 }
+
+impl<T: Clone> Clone for Keyframe<T> {
+    fn clone(&self) -> Self {
+        Keyframe {
+            time: self.time,
+            value: self.value.clone(),
+            tween: Arc::clone(&self.tween),
+        }
+    }
+}
+
+impl<T: Debug> Debug for Keyframe<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keyframe")
+            .field("time", &self.time)
+            .field("value", &self.value)
+            .field("tween", &"<TweenFunction>")
+            .finish()
+    }
+}
+
+impl<T: PartialEq> PartialEq for Keyframe<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time && self.value == other.value
+        // tween字段不参与比较，因为Arc<dyn TweenFunction>无法比较
+    }
+}
+
+
 
 impl<T> Keyframe<T> {
     pub fn new(time: f32, value: T, tween: TweenId) -> Self {
@@ -19,23 +48,12 @@ impl<T> Keyframe<T> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Anim<T: Tweenable> {
     pub time: f32,
     pub keyframes: Box<[Keyframe<T>]>,
     pub cursor: usize,
     pub next: Option<Box<Anim<T>>>,
-}
-
-impl<T: Tweenable> Default for Anim<T> {
-    fn default() -> Self {
-        Self {
-            time: 0.0,
-            keyframes: [].into(),
-            cursor: 0,
-            next: None,
-        }
-    }
 }
 
 impl<T: Tweenable> Anim<T> {
@@ -50,7 +68,20 @@ impl<T: Tweenable> Anim<T> {
             next: None,
         }
     }
+}
 
+impl<T: Tweenable> Default for Anim<T> {
+    fn default() -> Self {
+        Self {
+            time: 0.0,
+            keyframes: [].into(),
+            cursor: 0,
+            next: None,
+        }
+    }
+}
+
+impl<T: Tweenable> Anim<T> {
     pub fn fixed(value: T) -> Self {
         Self {
             keyframes: Box::new([Keyframe::new(0.0, value, 2)]),
@@ -141,7 +172,7 @@ impl<T: Tweenable + Default> Anim<T> {
 }
 
 pub type AnimFloat = Anim<f32>;
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq, Debug)]
 pub struct AnimVector(pub AnimFloat, pub AnimFloat);
 
 impl AnimVector {

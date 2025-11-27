@@ -22,6 +22,51 @@ use crate::hand::assign_hands;
 use crate::config::Config;
 use std::sync::{Arc, Mutex};
 
+// 智能手部分配函数
+fn smart_assign_hand(
+    position_x: f32,
+    time: f32,
+    previous_notes: &[(f32, f32, Hand)],
+    switch_threshold: f32,
+) -> Hand {
+    // 时间窗口（秒）内，认为是连续音符
+    const TEMPORAL_WINDOW: f32 = 2.0;
+    // 位置切换阈值
+    const POSITION_THRESHOLD: f32 = 0.2;
+    
+    // 查找时间窗口内最近的音符
+    let mut best_match = None;
+    let mut min_time_diff = f32::INFINITY;
+    
+    for &(note_time, note_pos, note_hand) in previous_notes {
+        let time_diff = (time - note_time).abs();
+        if time_diff < TEMPORAL_WINDOW && time_diff < min_time_diff {
+            min_time_diff = time_diff;
+            best_match = Some((note_hand, note_pos, time_diff));
+        }
+    }
+    
+    if let Some((best_hand, best_pos, time_diff)) = best_match {
+        // 如果位置变化不大，保持同一只手
+        let pos_diff = (position_x - best_pos).abs();
+        if pos_diff < POSITION_THRESHOLD {
+            return best_hand;
+        }
+        
+        // 位置变化大但时间很近，避免频繁切换
+        if time_diff < TEMPORAL_WINDOW * 0.3 {
+            return best_hand;
+        }
+    }
+    
+    // 基于位置的智能分配
+    if position_x < 0.0 {
+        Hand::Left
+    } else {
+        Hand::Right
+    }
+}
+
 pub const RPE_WIDTH: f32 = 1350.;
 pub const RPE_HEIGHT: f32 = 900.;
 const SPEED_RATIO: f32 = 10. / 45. / HEIGHT_RATIO;
@@ -314,7 +359,10 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
 }
 
 fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Result<Vec<Note>> {
-    rpe.into_iter()
+    // 用于智能手部分配的追踪
+    let mut previous_notes: Vec<(f32, f32, Hand)> = Vec::new();
+    
+    let notes = rpe.into_iter()
         .map(|note| {
             let time = r.time(&note.start_time);
             let y_offset = note.y_offset * 2. / RPE_HEIGHT * note.speed;
@@ -369,11 +417,7 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
                     height.set_time(r.time(&note.start_time));
                     height.now() + y_offset
                 },
-                hand: if normalized_x < 0.0 {
-                    Hand::Left
-                } else {
-                    Hand::Right
-                },
+                hand: smart_assign_hand(normalized_x, time, &previous_notes, 0.3),
                 above: note.above == 1,
                 multiple_hint: false,
                 fake: note.is_fake != 0,
@@ -381,7 +425,15 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
                 format: false,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    
+    // 更新追踪列表
+    for note in &notes {
+        let pos = note.object.translation.0.now();
+        previous_notes.push((note.time, pos, note.hand));
+    }
+    
+    Ok(notes)
 }
 
 fn parse_ctrl_events(rpe: &[RPECtrlEvent], key: &str) -> AnimFloat {

@@ -20,6 +20,51 @@ use crate::config::Config;
 use std::sync::{Mutex, Arc};
 use crate::core::CtrlObject;
 
+// 智能手部分配函数
+fn smart_assign_hand(
+    position_x: f32,
+    time: f32,
+    previous_notes: &[(f32, f32, Hand)],
+    switch_threshold: f32,
+) -> Hand {
+    // 时间窗口（秒）内，认为是连续音符
+    const TEMPORAL_WINDOW: f32 = 2.0;
+    // 位置切换阈值
+    const POSITION_THRESHOLD: f32 = 0.2;
+    
+    // 查找时间窗口内最近的音符
+    let mut best_match = None;
+    let mut min_time_diff = f32::INFINITY;
+    
+    for &(note_time, note_pos, note_hand) in previous_notes {
+        let time_diff = (time - note_time).abs();
+        if time_diff < TEMPORAL_WINDOW && time_diff < min_time_diff {
+            min_time_diff = time_diff;
+            best_match = Some((note_hand, note_pos, time_diff));
+        }
+    }
+    
+    if let Some((best_hand, best_pos, time_diff)) = best_match {
+        // 如果位置变化不大，保持同一只手
+        let pos_diff = (position_x - best_pos).abs();
+        if pos_diff < POSITION_THRESHOLD {
+            return best_hand;
+        }
+        
+        // 位置变化大但时间很近，避免频繁切换
+        if time_diff < TEMPORAL_WINDOW * 0.3 {
+            return best_hand;
+        }
+    }
+    
+    // 基于位置的智能分配
+    if position_x < 0.5 {
+        Hand::Left
+    } else {
+        Hand::Right
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PgrEvent {
@@ -173,6 +218,10 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
         return Ok(Vec::new());
     }
     pgr.sort_by(|a, b| a.time.partial_cmp(&b.time).expect("Invalid note time"));
+    
+    // 用于智能手部分配的追踪
+    let mut previous_notes: Vec<(f32, f32, Hand)> = Vec::new();
+    
     pgr.into_iter()
         .map(|pgr| {
             let time = pgr.time * r;
@@ -207,11 +256,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                     height.set_time(time);
                     height.now()
                 },
-                hand: if pgr.position_x < 0.5 {
-                    Hand::Left
-                } else {
-                    Hand::Right
-                },
+                hand: smart_assign_hand(pgr.position_x, time, &previous_notes, 0.3),
                 above,
                 multiple_hint: false,
                 fake: false,
@@ -219,7 +264,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
                 format: true
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()
 }
 
 fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32, bpm_list: &BpmList, id: usize) -> Result<JudgeLine> {

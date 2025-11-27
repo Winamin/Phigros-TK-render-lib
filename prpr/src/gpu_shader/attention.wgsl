@@ -130,7 +130,7 @@ fn softmax_shared(local_id: u32, values: ptr<function, array<f32, 64>>) -> array
     return result;
 }
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(
     @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,

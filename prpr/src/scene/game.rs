@@ -795,7 +795,9 @@ impl GameScene {
                     .draw();
             }
         };
-
+        /*
+        if res.config
+        */
         let scale_factor = if res.aspect_ratio > BASE_ASPECT_RATIO {
             1.0
         } else {

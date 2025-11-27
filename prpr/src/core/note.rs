@@ -14,7 +14,7 @@ const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
 const RPE_HEIGHT_SCALE: f32 = RPE_HEIGHT * (1.0 / 720.0);
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum NoteKind {
     Click,
     Hold { end_time: f32, end_height: f32 },
@@ -67,7 +67,7 @@ pub struct NoteInstance {
     pub vertices: [Vertex; 4],
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Note {
     pub time: f32,
     pub kind: NoteKind,

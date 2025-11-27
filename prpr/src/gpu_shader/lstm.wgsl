@@ -110,7 +110,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // 3. 计算门控，使用改进的数值稳定性
+    // 计算门控
     let weight_dir_offset = dir * 4u * params.hidden_size * (params.input_size + params.hidden_size);
     let bias_dir_offset = dir * 4u * params.hidden_size;
 
