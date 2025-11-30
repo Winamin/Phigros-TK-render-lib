@@ -49,7 +49,7 @@ fn activate(val: f32, activation_type: u32) -> f32 {
     }
 }
 
-// 向量点积优化函数（内联）- 增强版
+// 向量点积优化函
 fn dot_product_optimized_inline(
     input_offset: u32,
     weight_offset: u32,
@@ -81,7 +81,7 @@ fn dot_product_optimized_inline(
     return sum;
 }
 
-@compute @workgroup_size(256) // 增大工作组大小以提高并行度
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>) {
     let gid = global_id.x;
     let lid = local_id.x;

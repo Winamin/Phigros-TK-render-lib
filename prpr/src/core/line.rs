@@ -316,7 +316,7 @@ impl JudgeLine {
         //}
     }
 
-    pub fn update_hand_assign_with_world_pos(&mut self, res: &mut Resource, world_pos: Vector, bpm_list: &mut BpmList, index: usize) {
+    pub fn update_hand_assign_with_world_pos(&mut self, res: &mut Resource, _world_pos: Vector, bpm_list: &mut BpmList, index: usize) {
         if !res.config.hand_split || self.notes.is_empty() {
             return;
         }
@@ -365,7 +365,7 @@ impl JudgeLine {
         let mut ai_notes: Vec<crate::core::Note> = self.notes
             .iter()
             .zip(enhanced_notes_data.iter())
-            .map(|(note, &(true_world_pos, enhanced_pos))| {
+            .map(|(note, &(_true_world_pos, enhanced_pos))| {
                 let mut ai_note = note.clone();
                 // 使用增强版位置信息进行手部分配
                 ai_note.object.translation.0 = crate::core::AnimFloat::fixed(enhanced_pos.x);

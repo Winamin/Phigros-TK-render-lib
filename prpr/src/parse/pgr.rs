@@ -25,7 +25,7 @@ fn smart_assign_hand(
     position_x: f32,
     time: f32,
     previous_notes: &[(f32, f32, Hand)],
-    switch_threshold: f32,
+    _switch_threshold: f32,
 ) -> Hand {
     // 时间窗口（秒）内，认为是连续音符
     const TEMPORAL_WINDOW: f32 = 2.0;
@@ -220,7 +220,7 @@ fn parse_notes(r: f32, mut pgr: Vec<PgrNote>, speed: &mut AnimFloat, height: &mu
     pgr.sort_by(|a, b| a.time.partial_cmp(&b.time).expect("Invalid note time"));
     
     // 用于智能手部分配的追踪
-    let mut previous_notes: Vec<(f32, f32, Hand)> = Vec::new();
+    let previous_notes: Vec<(f32, f32, Hand)> = Vec::new();
     
     pgr.into_iter()
         .map(|pgr| {

@@ -104,6 +104,10 @@ impl BpmList {
     }
     
     pub fn time_beats(&mut self, beats: f32) -> f32 {
+        if self.elements.is_empty() {
+            return beats * (60. / 120.0); // 默认BPM 120
+        }
+        
         while let Some(kf) = self.elements.get(self.cursor + 1) {
             if kf.0 > beats {
                 break;
@@ -122,6 +126,10 @@ impl BpmList {
     }
 
     pub fn beat(&mut self, time: f32) -> f32 {
+        if self.elements.is_empty() {
+            return time / (60. / 120.0); // 默认BPM 120
+        }
+        
         while let Some(kf) = self.elements.get(self.cursor + 1) {
             if kf.1 > time {
                 break;
@@ -136,6 +144,10 @@ impl BpmList {
     }
 
     pub fn now_bpm(&self, time: f32) -> f32 {
+        if self.elements.is_empty() {
+            return 120.0; // 默认BPM
+        }
+        
         let mut cursor = self.cursor;
 
         while let Some(kf) = self.elements.get(cursor + 1) {

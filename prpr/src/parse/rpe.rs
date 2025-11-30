@@ -27,7 +27,7 @@ fn smart_assign_hand(
     position_x: f32,
     time: f32,
     previous_notes: &[(f32, f32, Hand)],
-    switch_threshold: f32,
+    _switch_threshold: f32,
 ) -> Hand {
     // 时间窗口（秒）内，认为是连续音符
     const TEMPORAL_WINDOW: f32 = 2.0;
