@@ -7,18 +7,19 @@ use anyhow::{anyhow, Result};
 use image::DynamicImage;
 use lyon::{
     math::Box2D,
-    path::{builder::BorderRadii, Path, Winding},
+    path::{builder::BorderRadii, Path as LyonPath, Winding},
 };
 use macroquad::prelude::*;
+use memmap2::Mmap;
 use miniquad::{gl::GLenum, BlendFactor, BlendState, BlendValue, CompareFunc, Equation, PrimitiveType, StencilFaceState, StencilOp, StencilState};
 use once_cell::sync::Lazy;
 use ordered_float::{Float, NotNan};
 use sasa::AudioManager;
-use serde::Deserialize;
 use std::{
     collections::HashMap,
     future::Future,
     ops::Deref,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Poll, RawWaker, RawWakerVTable, Waker},
@@ -30,8 +31,17 @@ use miniquad::gl::{
     GL_TEXTURE_MIN_FILTER,
     GL_TEXTURE_MAG_FILTER,
 };
+use serde::{Deserialize, Serialize};
 
 pub type LocalTask<R> = Option<Pin<Box<dyn Future<Output = R>>>>;
+
+#[derive(Debug)]
+pub struct LoadedChunk {
+    pub chunk_id: usize,
+    pub data: ChunkData,
+    pub mmap: Arc<Mmap>,
+}
+
 const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
 
 pub trait JoinToString {
@@ -66,7 +76,7 @@ pub trait RectExt: Sized {
     fn feather(&self, radius: f32) -> Self;
     fn nonuniform_feather(&self, x: f32, y: f32) -> Self;
     fn to_euclid(&self) -> Box2D;
-    fn rounded(&self, radius: f32) -> Path;
+    fn rounded(&self, radius: f32) -> LyonPath;
 }
 
 impl RectExt for Rect {
@@ -82,8 +92,8 @@ impl RectExt for Rect {
         Box2D::new(lyon::math::point(self.x, self.y), lyon::math::point(self.right(), self.bottom()))
     }
 
-    fn rounded(&self, radius: f32) -> Path {
-        let mut path = Path::builder();
+    fn rounded(&self, radius: f32) -> LyonPath {
+        let mut path = LyonPath::builder();
         path.add_rounded_rectangle(&self.to_euclid(), &BorderRadii::new(radius), Winding::Positive);
         path.build()
     }
@@ -186,6 +196,15 @@ impl From<DynamicImage> for SafeTexture {
 pub static BLACK_TEXTURE: Lazy<SafeTexture> = Lazy::new(|| Texture2D::from_rgba8(1, 1, &[0, 0, 0, 255]).into());
 
 //2025.12.13 chunk
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ChunkData {
+    pub chunk_id: usize,
+    pub line_ids: Vec<usize>,
+    pub notes_data: Vec<u8>,
+    pub lines_data: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub struct ChartChunk {
     pub chunk_id: usize,
@@ -193,6 +212,9 @@ pub struct ChartChunk {
     pub end_time: f32,
     pub line_ids: Vec<usize>,
     pub loaded: bool,
+    pub mmap_data: Option<Arc<Mmap>>,
+    pub data_file_path: Option<String>,
+    pub loaded_chunk: Option<Arc<LoadedChunk>>,
 }
 
 #[derive(Debug)]
@@ -216,6 +238,9 @@ impl ChunkedChart {
                 end_time: (i + 1) as f32 * chunk_duration,
                 line_ids: Vec::new(),
                 loaded: i == 0,
+                mmap_data: None,
+                data_file_path: None,
+                loaded_chunk: None,
             });
         }
         
@@ -257,6 +282,32 @@ impl ChunkedChart {
         }
     }
     
+    pub fn should_unload_chunk(&self, chunk_id: usize, current_time: f32) -> bool {
+        if chunk_id >= self.chunk_count {
+            return false;
+        }
+        
+        let chunk = &self.chunks[chunk_id];
+        if !chunk.loaded {
+            return false;
+        }
+        
+        let current_chunk = self.get_chunk_for_time(current_time);
+        let unload_distance = 3; // 卸载距离：当前 chunk 前3个以外的卸载
+        
+        (chunk_id + unload_distance) < current_chunk
+    }
+    
+    pub fn mark_chunk_unloaded(&mut self, chunk_id: usize) {
+        if chunk_id < self.chunk_count {
+            let chunk = &mut self.chunks[chunk_id];
+            chunk.loaded = false;
+            chunk.loaded_chunk = None;
+            chunk.mmap_data = None;
+            chunk.data_file_path = None;
+        }
+    }
+    
     pub fn get_needed_chunks(&self, current_time: f32) -> Vec<usize> {
         let mut needed = Vec::new();
         let current_chunk = self.get_chunk_for_time(current_time);
@@ -271,41 +322,139 @@ impl ChunkedChart {
     }
 }
 
-pub struct ChunkLoader {
-    pub chunked_chart: ChunkedChart,
-    pub loading_tasks: HashMap<usize, LocalTask<Result<()>>>,
+pub struct ChunkLoadData {
+    pub chunk_id: usize,
+    pub data_dir: PathBuf,
+    pub chart_file: String,
 }
 
+pub struct ChunkLoader {
+    pub chunked_chart: ChunkedChart,
+    pub loading_tasks: HashMap<usize, LocalTask<Result<LoadedChunk>>>,
+    pub load_data: Arc<ChunkLoadData>,
+}
+
+const MAX_CONCURRENT_CHUNK_LOADS: usize = 2;
+
 impl ChunkLoader {
-    pub fn new(total_duration: f32) -> Self {
+    pub fn new(total_duration: f32, data_dir: PathBuf, chart_file: String) -> Self {
         Self {
             chunked_chart: ChunkedChart::new(total_duration, 5),//5 chunk
             loading_tasks: HashMap::new(),
+            load_data: Arc::new(ChunkLoadData {
+                chunk_id: 0,
+                data_dir,
+                chart_file,
+            }),
+        }
+    }
+    
+    pub fn with_shared_data(total_duration: f32, load_data: Arc<ChunkLoadData>) -> Self {
+        Self {
+            chunked_chart: ChunkedChart::new(total_duration, 5),
+            loading_tasks: HashMap::new(),
+            load_data,
         }
     }
     
     pub fn update(&mut self, current_time: f32) -> Vec<usize> {
         let mut newly_loaded = Vec::new();
         let mut completed_tasks = Vec::new();
+        
         let task_keys: Vec<_> = self.loading_tasks.keys().copied().collect();
         for &chunk_id in &task_keys {
             if let Some(task) = self.loading_tasks.get_mut(&chunk_id) {
                 if let Some(task) = task {
                     if let Some(result) = poll_future(task.as_mut()) {
                         match result {
-                            Ok(_) => { self.chunked_chart.mark_chunk_loaded(chunk_id);newly_loaded.push(chunk_id); }
-                            Err(e) => { debug!("Failed to load chunk {}: {:?}", chunk_id, e); }
-                        }completed_tasks.push(chunk_id);
+                            Ok(loaded_chunk) => {
+                                if let Some(chunk) = self.chunked_chart.chunks.get_mut(chunk_id) {
+                                    chunk.loaded_chunk = Some(Arc::new(loaded_chunk));
+                                    chunk.loaded = true;
+                                }
+                                newly_loaded.push(chunk_id);
+                            }
+                            Err(e) => {
+                                debug!("Failed to load chunk {}: {:?}", chunk_id, e);
+                            }
+                        }
+                        completed_tasks.push(chunk_id);
                     }
                 }
             }
         }
-        for chunk_id in completed_tasks { self.loading_tasks.remove(&chunk_id); }
+        
+        for chunk_id in completed_tasks {
+            self.loading_tasks.remove(&chunk_id);
+        }
+        
+        let active_task_count = self.loading_tasks.len();
+        if active_task_count >= MAX_CONCURRENT_CHUNK_LOADS {
+            return newly_loaded;
+        }
+        
+        let available_slots = MAX_CONCURRENT_CHUNK_LOADS - active_task_count;
         let needed_chunks = self.chunked_chart.get_needed_chunks(current_time);
-        for chunk_id in needed_chunks { if !self.loading_tasks.contains_key(&chunk_id) {
-            self.loading_tasks.insert(chunk_id, None); } }
+        let needed_chunks_clone = needed_chunks.clone();
+        
+        for chunk_id in needed_chunks_clone.iter().take(available_slots) {
+            if !self.loading_tasks.contains_key(chunk_id) {
+                let load_data = Arc::clone(&self.load_data);
+                let chunk_id = *chunk_id;
+                let future = Box::pin(async move {
+                    load_chunk_mmap(chunk_id, &load_data.data_dir, &load_data.chart_file).await
+                });
+                self.loading_tasks.insert(chunk_id, Some(future));
+            }
+        }
+        
+        // 卸载不再需要的 chunk
+        let current_chunk = self.chunked_chart.get_chunk_for_time(current_time);
+        for chunk_id in 0..self.chunked_chart.chunk_count {
+            if self.chunked_chart.should_unload_chunk(chunk_id, current_time) {
+                self.chunked_chart.mark_chunk_unloaded(chunk_id);
+                debug!("Unloaded chunk {}", chunk_id);
+            }
+        }
+        
         newly_loaded
     }
+}
+
+pub fn serialize_chunk_data(chunk_data: &ChunkData, output_path: &Path) -> Result<()> {
+    use std::fs::File;
+    use std::io::Write;
+    
+    let encoded = bincode::serialize(chunk_data)?;
+    let mut file = File::create(output_path)?;
+    file.write_all(&encoded)?;
+    
+    debug!("Serialized chunk {} to {}, size: {} bytes", chunk_data.chunk_id, output_path.display(), encoded.len());
+    
+    Ok(())
+}
+
+async fn load_chunk_mmap(chunk_id: usize, data_dir: &Path, _chart_file: &str) -> Result<LoadedChunk> {
+    use std::fs::File;
+    
+    let chunk_path = data_dir.join(format!("chunk_{}.bin", chunk_id));
+    
+    if !chunk_path.exists() {
+        return Err(anyhow!("Chunk file not found: {}", chunk_path.display()));
+    }
+    
+    let file = File::open(&chunk_path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    
+    let chunk_data: ChunkData = bincode::deserialize(&mmap)?;
+    
+    debug!("Loaded chunk {} via mmap, size: {} bytes", chunk_id, mmap.len());
+    
+    Ok(LoadedChunk {
+        chunk_id,
+        data: chunk_data,
+        mmap: Arc::new(mmap),
+    })
 }
 
 pub fn nalgebra_to_glm(mat: &Matrix) -> Mat4 {
@@ -347,7 +496,7 @@ pub fn draw_text_aligned_fix(ui: &mut Ui, text: &str, x: f32, y: f32, anchor: (f
     ui.text(text).pos(x, y).anchor(anchor.0, anchor.1).size(scale).color(color).draw()
 }
 
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScaleType {
     #[default]

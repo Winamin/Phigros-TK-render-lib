@@ -3,11 +3,16 @@ use super::{StaticTween, TweenFunction, TweenId, Tweenable, Vector};
 use std::fmt::Debug;
 use std::sync::Arc;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Keyframe<T> {
     pub time: f32,
     pub value: T,
+    #[serde(skip)]
+    #[serde(default = "default_tween")]
     pub tween: Arc<dyn TweenFunction>,
 }
+
+fn default_tween() -> Arc<dyn TweenFunction> { Arc::new(StaticTween(0)) }
 
 impl<T: Clone> Clone for Keyframe<T> {
     fn clone(&self) -> Self {
@@ -48,11 +53,12 @@ impl<T> Keyframe<T> {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Anim<T: Tweenable> {
     pub time: f32,
     pub keyframes: Box<[Keyframe<T>]>,
     pub cursor: usize,
+    #[serde(skip)]
     pub next: Option<Box<Anim<T>>>,
 }
 
@@ -172,7 +178,7 @@ impl<T: Tweenable + Default> Anim<T> {
 }
 
 pub type AnimFloat = Anim<f32>;
-#[derive(Default, Clone, PartialEq, Debug)]
+#[derive(Default, Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AnimVector(pub AnimFloat, pub AnimFloat);
 
 impl AnimVector {

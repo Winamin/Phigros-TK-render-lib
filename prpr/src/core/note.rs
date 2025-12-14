@@ -67,7 +67,7 @@ pub struct NoteInstance {
     pub vertices: [Vertex; 4],
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Note {
     pub time: f32,
     pub kind: NoteKind,

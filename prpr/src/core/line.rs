@@ -50,17 +50,20 @@ impl UIElement {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub enum JudgeLineKind {
     #[default]
     Normal,
+    #[serde(skip)]
     Texture(SafeTexture, String),
     Text(Anim<String>),
+    #[serde(skip)]
     Paint(Anim<f32>, Arc<Mutex<(Option<RenderPass>, bool)>>),
+    #[serde(skip)]
     TextureGif(Anim<f32>, GifFrames, String),
 }
 
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct JudgeLineCache {
     update_order: Vec<u32>,
     not_plain_count: usize,
@@ -120,6 +123,7 @@ struct Painter {
     cached_pass: Option<RenderPass>,
 }
 
+#[derive(Clone)]
 pub struct GifFrames {
     /// time of each frame in milliseconds
     frames: Vec<(u128, SafeTexture)>,
@@ -154,19 +158,23 @@ impl GifFrames {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct JudgeLine {
     pub object: Object,
+    #[serde(skip)]
     pub ctrl_obj: Arc<Mutex<CtrlObject>>,
     pub kind: JudgeLineKind,
     pub height: AnimFloat,
     pub incline: AnimFloat,
     pub notes: Vec<Note>,
+    #[serde(skip)]
     pub color: Anim<Color>,
     pub parent: Option<usize>,
     pub z_index: i32,
     pub show_below: bool,
+    #[serde(skip)]
     pub attach_ui: Option<UIElement>,
-
+    #[serde(skip)]
     pub cache: JudgeLineCache,
 }
 

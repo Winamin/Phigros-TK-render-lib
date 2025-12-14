@@ -2,7 +2,7 @@ use super::{AnimFloat, AnimVector, Color, Matrix, Resource, Vector};
 use macroquad::prelude::*;
 use nalgebra::Rotation2;
 
-#[derive(Default, Clone, PartialEq, Debug)]
+#[derive(Default, Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Object {
     pub alpha: AnimFloat,
     pub scale: AnimVector,
