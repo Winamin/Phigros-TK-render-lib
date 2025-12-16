@@ -1044,61 +1044,16 @@ pub async fn parse_rpe_chunked(source: &str, fs: &mut dyn FileSystem, extra: Cha
     let mut chunked_chart = ChunkedChart::new(max_time, 5);
 
     let mut lines = Vec::new();
-    let mut all_notes_by_chunk: Vec<Vec<crate::core::Note>> = vec![Vec::new(); 5];
-    let mut all_lines_by_chunk: Vec<Vec<crate::core::JudgeLine>> = vec![Vec::new(); 5];
-    
     for (id, rpe) in rpe.judge_line_list.into_iter().enumerate() {
         let name = rpe.name.clone();
-        let line = parse_judge_line_chunked(&mut r, rpe, max_time, fs, &bezier_map, &mut texture_cache, id, &mut chunked_chart)
+        lines.push(
+            parse_judge_line_chunked(&mut r, rpe, max_time, fs, &bezier_map, &mut texture_cache, id, &mut chunked_chart)
                 .await
-                .with_context(move || ptl!("judge-line-location-name", "jlid" => id, "name" => name))?;
-        
-        // 根据 chunk 分配 line 和 notes
-        for chunk in &chunked_chart.chunks {
-            if chunk.line_ids.contains(&id) {
-                // 克隆该 line 的 notes 到对应的 chunk
-                let notes_for_chunk: Vec<crate::core::Note> = line.notes.iter()
-                    .filter(|note| {
-                        let note_chunk = chunked_chart.get_chunk_for_time(note.time);
-                        note_chunk == chunk.chunk_id
-                    })
-                    .cloned()
-                    .collect();
-                
-                if !notes_for_chunk.is_empty() || chunk.chunk_id == 0 {
-                    all_notes_by_chunk[chunk.chunk_id].extend(notes_for_chunk);
-                    all_lines_by_chunk[chunk.chunk_id].push(line.clone());
-                }
-            }
-        }
-        
-        lines.push(line);
+                .with_context(move || ptl!("judge-line-location-name", "jlid" => id, "name" => name))?,
+        );
     }
     process_lines(&mut lines);
     let mut chart = Chart::new(rpe.meta.offset as f32 / 1000.0, lines, r, ChartSettings::default(), extra);
-    
-    // 生成 chunk 文件
-    let data_dir = std::path::PathBuf::from("./chunk_data");
-    std::fs::create_dir_all(&data_dir).ok();
-    
-    // 为每个 chunk 生成数据文件
-    for (chunk_id, (notes, lines)) in all_notes_by_chunk.into_iter().zip(all_lines_by_chunk).enumerate() {
-        if chunk_id < chart.chunk_loader.as_ref().unwrap().chunked_chart.chunks.len() {
-            let notes_data = bincode::serialize(&notes).unwrap_or_default();
-            let lines_data = bincode::serialize(&lines).unwrap_or_default();
-            
-            let chunk_data = crate::ext::ChunkData {
-                chunk_id,
-                line_ids: chart.chunk_loader.as_ref().unwrap().chunked_chart.chunks[chunk_id].line_ids.clone(),
-                notes_data,
-                lines_data,
-            };
-            
-            let chunk_path = data_dir.join(format!("chunk_{}.bin", chunk_id));
-            crate::ext::serialize_chunk_data(&chunk_data, &chunk_path).ok();
-        }
-    }
-    
-    chart.enable_chunked_loading(data_dir, "chart.bin".to_string());
+    chart.enable_chunked_loading();
     Ok(chart)
 }

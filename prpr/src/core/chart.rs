@@ -71,8 +71,8 @@ impl Chart {
         }
     }
 
-    pub fn enable_chunked_loading(&mut self, data_dir: std::path::PathBuf, chart_file: String) {
-        self.chunk_loader = Some(ChunkLoader::new(self.max_time, data_dir, chart_file));
+    pub fn enable_chunked_loading(&mut self) {
+        self.chunk_loader = Some(ChunkLoader::new(self.max_time));
     }
 
     pub fn update_chunk_loading(&mut self, current_time: f32) -> Vec<usize> {

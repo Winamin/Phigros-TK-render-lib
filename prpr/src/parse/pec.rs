@@ -541,7 +541,7 @@ pub fn parse_pec_with_list(source: &str, extra: ChartExtra, _r: &mut BpmList) ->
 }
 
 // 分块加载版本的 parse_pec_with_list
-pub fn parse_pec_with_list_chunked(source: &str, extra: ChartExtra, _r: &mut BpmList, data_dir: std::path::PathBuf) -> Result<Chart> {
+pub fn parse_pec_with_list_chunked(source: &str, extra: ChartExtra, _r: &mut BpmList) -> Result<Chart> {
     let mut offset = None;
     let mut r = None;
     let mut lines = Vec::new();
@@ -773,7 +773,7 @@ pub fn parse_pec_with_list_chunked(source: &str, extra: ChartExtra, _r: &mut Bpm
         },
         extra,
      );
-    chart.enable_chunked_loading(data_dir, "chart.bin".to_string());
+    chart.enable_chunked_loading();
     Ok(chart)
 }
 
@@ -782,7 +782,7 @@ pub fn parse_pec(source: &str, extra: ChartExtra) -> Result<Chart> {
     parse_pec_with_list(source, extra, &mut bpm_list)
 }
 
-pub fn parse_pec_chunked(source: &str, extra: ChartExtra, data_dir: std::path::PathBuf) -> Result<Chart> {
+pub fn parse_pec_chunked(source: &str, extra: ChartExtra) -> Result<Chart> {
     let mut bpm_list = BpmList::new(vec![]);
-    parse_pec_with_list_chunked(source, extra, &mut bpm_list, data_dir)
+    parse_pec_with_list_chunked(source, extra, &mut bpm_list)
 }

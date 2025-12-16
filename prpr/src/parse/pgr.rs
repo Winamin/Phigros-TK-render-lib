@@ -444,7 +444,7 @@ pub fn parse_phigros(source: &str, extra: ChartExtra) -> Result<Chart> {
     Ok(Chart::new(pgr.offset, lines, BpmList::new_time(bpm_values), ChartSettings::default(), extra))
 }
 
-pub fn parse_phigros_chunked(source: &str, extra: ChartExtra, data_dir: std::path::PathBuf) -> Result<Chart> {
+pub fn parse_phigros_chunked(source: &str, extra: ChartExtra) -> Result<Chart> {
     let pgr: PgrChart = serde_json::from_str(source).with_context(|| ptl!("json-parse-failed"))?;
     let mut bpm_values = Vec::new();
     let _indices: Vec<usize> = (0..pgr.judge_line_list.len()).collect();
@@ -480,6 +480,6 @@ pub fn parse_phigros_chunked(source: &str, extra: ChartExtra, data_dir: std::pat
 
     process_lines(&mut lines);
     let mut chart = Chart::new(pgr.offset, lines, BpmList::new_time(bpm_values), ChartSettings::default(), extra);
-    chart.enable_chunked_loading(data_dir, "chart.bin".to_string());
+    chart.enable_chunked_loading();
     Ok(chart)
 }
