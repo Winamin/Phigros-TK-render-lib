@@ -7,7 +7,7 @@ use crate::{
         JudgeLine, JudgeLineCache, JudgeLineKind, Keyframe, Note, NoteKind, Object, StaticTween, Triple, TweenFunction, Tweenable, UIElement, EPS,
         HEIGHT_RATIO,
     },
-    ext::{NotNanExt, ChunkedChart},
+    ext::NotNanExt,
     fs::FileSystem,
     judge::JudgeStatus,
 };
@@ -33,11 +33,11 @@ fn smart_assign_hand(
     const TEMPORAL_WINDOW: f32 = 2.0;
     // 位置切换阈值
     const POSITION_THRESHOLD: f32 = 0.2;
-    
+
     // 查找时间窗口内最近的音符
     let mut best_match = None;
     let mut min_time_diff = f32::INFINITY;
-    
+
     for &(note_time, note_pos, note_hand) in previous_notes {
         let time_diff = (time - note_time).abs();
         if time_diff < TEMPORAL_WINDOW && time_diff < min_time_diff {
@@ -45,20 +45,20 @@ fn smart_assign_hand(
             best_match = Some((note_hand, note_pos, time_diff));
         }
     }
-    
+
     if let Some((best_hand, best_pos, time_diff)) = best_match {
         // 如果位置变化不大，保持同一只手
         let pos_diff = (position_x - best_pos).abs();
         if pos_diff < POSITION_THRESHOLD {
             return best_hand;
         }
-        
+
         // 位置变化大但时间很近，避免频繁切换
         if time_diff < TEMPORAL_WINDOW * 0.3 {
             return best_hand;
         }
     }
-    
+
     // 基于位置的智能分配
     if position_x < 0.0 {
         Hand::Left
@@ -361,7 +361,7 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
 fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Result<Vec<Note>> {
     // 用于智能手部分配的追踪
     let mut previous_notes: Vec<(f32, f32, Hand)> = Vec::new();
-    
+
     let notes = rpe.into_iter()
         .map(|note| {
             let time = r.time(&note.start_time);
@@ -426,105 +426,13 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    
+
     // 更新追踪列表
     for note in &notes {
         let pos = note.object.translation.0.now();
         previous_notes.push((note.time, pos, note.hand));
     }
-    
-    Ok(notes)
-}
 
-fn parse_notes_chunked(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat, chunked_chart: &mut ChunkedChart, line_id: usize) -> Result<Vec<Note>> {
-    let mut previous_notes: Vec<(f32, f32, Hand)> = Vec::new();
-    for note in &rpe {
-        let time = r.time(&note.start_time);
-        let chunk_id = chunked_chart.get_chunk_for_time(time);
-        if chunk_id < chunked_chart.chunks.len() {
-            if !chunked_chart.chunks[chunk_id].line_ids.contains(&line_id) {
-                chunked_chart.chunks[chunk_id].line_ids.push(line_id);
-            }
-        }
-    }
-    let first_chunk_notes: Vec<_> = rpe.into_iter()
-        .filter(|note| {
-            let time = r.time(&note.start_time);
-            let chunk_id = chunked_chart.get_chunk_for_time(time);
-            chunk_id == 0
-        })
-        .collect();
-    
-    let notes = first_chunk_notes.into_iter()
-        .map(|note| {
-            let time = r.time(&note.start_time);
-            let y_offset = note.y_offset * 2. / RPE_HEIGHT * note.speed;
-
-            // Set time and get height after calculating y_offset
-            height.set_time(time);
-            let note_height = height.now() + y_offset;
-            let normalized_x = note.position_x / (RPE_WIDTH / 2.0) - 1.0;
-
-            Ok(Note {
-                object: Object {
-                    alpha: if note.visible_time >= time {
-                        if note.alpha >= 255 {
-                            AnimFloat::default()
-                        } else {
-                            AnimFloat::fixed(note.alpha as f32 / 255.)
-                        }
-                    } else {
-                        let alpha = note.alpha.min(255) as f32 / 255.;
-                        AnimFloat::new(vec![Keyframe::new(0.0, 0.0, 0), Keyframe::new(time - note.visible_time, alpha, 0)])
-                    },
-                    translation: AnimVector(AnimFloat::fixed(note.position_x / (RPE_WIDTH / 2.)), AnimFloat::fixed(y_offset)),
-                    scale: AnimVector(
-                        if note.size == 1.0 {
-                            AnimFloat::default()
-                        } else {
-                            AnimFloat::fixed(note.size)
-                        },
-                        AnimFloat::default(),
-                    ),
-                    ..Default::default()
-                },
-                kind: match note.kind {
-                    1 => NoteKind::Click,
-                    2 => {
-                        let end_time = r.time(&note.end_time);
-                        height.set_time(end_time);
-                        NoteKind::Hold {
-                            end_time,
-                            end_height: height.now() + y_offset,
-                        }
-                    }
-                    3 => NoteKind::Flick,
-                    4 => NoteKind::Drag,
-                    _ => ptl!(bail "unknown-note-type", "type" => note.kind),
-                },
-                time,
-                height: note_height,
-                speed: note.speed,
-                end_speed: note.speed,
-                start_height: {
-                    height.set_time(r.time(&note.start_time));
-                    height.now() + y_offset
-                },
-                hand: smart_assign_hand(normalized_x, time, &previous_notes, 0.3),
-                above: note.above == 1,
-                multiple_hint: false,
-                fake: note.is_fake != 0,
-                judge: JudgeStatus::NotJudged,
-                format: false,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    for note in &notes {
-        let pos = note.object.translation.0.now();
-        previous_notes.push((note.time, pos, note.hand));
-    }
-    
     Ok(notes)
 }
 
@@ -590,179 +498,6 @@ async fn parse_judge_line(
 
     let mut height = parse_speed_events(r, &event_layers, max_time)?;
     let mut notes = parse_notes(r, rpe.notes.unwrap_or_default(), &mut height)?;
-    let config = Config::default();
-    let mut rotation = events_with_factor(r, &event_layers, |it| &it.rotate_events, -1., "rotate", bezier_map)?;
-    rotation.set_time(0.0);
-    let rotation_angle = rotation.now();
-    assign_hands(&mut notes, &config, id, rotation_angle, r);
-    let cache = JudgeLineCache::new(&mut notes);
-
-    Ok(JudgeLine {
-        object: Object {
-            alpha: events_with_factor(r, &event_layers, |it| &it.alpha_events, 1. / 255., "alpha", bezier_map)?,
-            rotation: events_with_factor(r, &event_layers, |it| &it.rotate_events, -1., "rotate", bezier_map)?,
-            translation: AnimVector(
-                events_with_factor(r, &event_layers, |it| &it.move_x_events, 2. / RPE_WIDTH, "move X", bezier_map)?,
-                events_with_factor(r, &event_layers, |it| &it.move_y_events, 2. / RPE_HEIGHT, "move Y", bezier_map)?,
-            ),
-            scale: {
-                fn parse(r: &mut BpmList, opt: &Option<Vec<RPEEvent>>, factor: f32, bezier_map: &BezierMap) -> Result<AnimFloat> {
-                    let mut res = opt
-                        .as_ref()
-                        .map(|it| parse_events(r, it, None, bezier_map))
-                        .transpose()?
-                        .unwrap_or_default();
-                    res.map_value(|v| v * factor);
-                    Ok(res)
-                }
-                let factor = if rpe.texture == "line.png" {
-                    1.
-                } else {
-                    2. / RPE_WIDTH /*TODO tweak*/
-                };
-                rpe.extended
-                    .as_ref()
-                    .map(|e| -> Result<_> {
-                        Ok(AnimVector(
-                            parse(
-                                r,
-                                &e.scale_x_events,
-                                factor
-                                    * if rpe.texture == "line.png"
-                                    && rpe
-                                    .extended
-                                    .as_ref()
-                                    .map_or(true, |it| it.text_events.as_ref().map_or(true, |it| it.is_empty()))
-                                    && rpe.attach_ui.is_none()
-                                {
-                                    0.5
-                                } else {
-                                    1.
-                                },
-                                bezier_map,
-                            )?,
-                            parse(r, &e.scale_y_events, factor, bezier_map)?,
-                        ))
-                    })
-                    .transpose()?
-                    .unwrap_or_default()
-            },
-        },
-        ctrl_obj: Arc::new(Mutex::new(CtrlObject {
-            alpha: parse_ctrl_events(&rpe.alpha_control, "alpha"),
-            size: parse_ctrl_events(&rpe.size_control, "size"),
-            pos: parse_ctrl_events(&rpe.pos_control, "pos"),
-            y: parse_ctrl_events(&rpe.y_control, "y"),
-        })),
-        height,
-        incline: if let Some(events) = rpe.extended.as_ref().and_then(|e| e.incline_events.as_ref()) {
-            parse_events(r, events, Some(0.), bezier_map).with_context(|| ptl!("incline-events-parse-failed"))?
-        } else {
-            AnimFloat::default()
-        },
-        notes,
-        kind: if rpe.texture == "line.png" {
-            if let Some(events) = rpe.extended.as_ref().and_then(|e| e.paint_events.as_ref()) {
-                JudgeLineKind::Paint(
-                    parse_events(r, events, Some(-1.), bezier_map).with_context(|| ptl!("paint-events-parse-failed"))?,
-                    Arc::new(Mutex::new((None, false))),
-                )
-            } else if let Some(extended) = rpe.extended.as_ref() {
-                if let Some(events) = extended.gif_events.as_ref() {
-                    let data = fs
-                        .load_file(&rpe.texture)
-                        .await
-                        .with_context(|| ptl!("gif-load-failed", "path" => rpe.texture.clone()))?;
-                    let decoder = gif::GifDecoder::new(&data[..])?;
-                    let frames = GifFrames::new(
-                        decoder
-                            .into_frames()
-                            .map(|frame| -> (u128, SafeTexture) {
-                                let frame = frame.unwrap();
-                                let delay: Duration = frame.delay().into();
-                                (delay.as_millis(), SafeTexture::from(DynamicImage::ImageRgba8(frame.into_buffer())))
-                            })
-                            .collect(),
-                    );
-                    // TODO: process events
-                    let events = parse_events(r, events, Some(0.), bezier_map).with_context(|| ptl!("gif-events-parse-failed"))?;
-                    JudgeLineKind::TextureGif(events, frames, rpe.texture.clone())
-                } else if let Some(events) = extended.text_events.as_ref() {
-                    JudgeLineKind::Text(parse_events(r, events, Some(String::new()), bezier_map).with_context(|| ptl!("text-events-parse-failed"))?)
-                } else {
-                    JudgeLineKind::Normal
-                }
-            } else {
-                JudgeLineKind::Normal
-            }
-        } else {
-            match texture_cache.get(&rpe.texture) {
-                Some(texture) => JudgeLineKind::Texture(texture.clone(), rpe.texture.clone()),
-                None => {
-                    let img_data = fs
-                        .load_file(&rpe.texture)
-                        .await
-                        .with_context(|| ptl!("illustration-load-failed", "path" => rpe.texture.clone()))?;
-                    let img = image::load_from_memory(&img_data)?;
-                    let texture = SafeTexture::from_image(&img).with_mipmap();
-                    texture_cache.insert(rpe.texture.clone(), texture.clone());
-
-                    JudgeLineKind::Texture(texture, rpe.texture.clone())
-                }
-            }
-        },
-        color: if let Some(events) = rpe.extended.as_ref().and_then(|e| e.color_events.as_ref()) {
-            parse_events(r, events, Some(Color::new(0.0, 0.0, 0.0, 0.0)), bezier_map).with_context(|| ptl!("color-events-parse-failed"))?
-        } else {
-            Anim::default()
-        },
-        parent: {
-            let parent = rpe.parent.unwrap_or(-1);
-            if parent == -1 {
-                None
-            } else {
-                Some(parent as usize)
-            }
-        },
-        z_index: rpe.z_order,
-        show_below: rpe.is_cover != 1,
-        attach_ui: rpe.attach_ui,
-        cache,
-    })
-}
-
-async fn parse_judge_line_chunked(
-    r: &mut BpmList,
-    rpe: RPEJudgeLine,
-    max_time: f32,
-    fs: &mut dyn FileSystem,
-    bezier_map: &BezierMap,
-    texture_cache: &mut std::collections::HashMap<String, SafeTexture>,
-    id: usize,
-    chunked_chart: &mut ChunkedChart,
-) -> Result<JudgeLine> {
-    let event_layers: Vec<_> = rpe.event_layers.into_iter().flatten().collect();
-
-    fn events_with_factor(
-        r: &mut BpmList,
-        event_layers: &[RPEEventLayer],
-        get: impl Fn(&RPEEventLayer) -> &Option<Vec<RPEEvent>>,
-        factor: f32,
-        desc: &str,
-        bezier_map: &BezierMap,
-    ) -> Result<AnimFloat> {
-        let anis: Vec<_> = event_layers
-            .iter()
-            .filter_map(|it| get(it).as_ref().map(|es| parse_events(r, es, None, bezier_map)))
-            .collect::<Result<_>>()
-            .with_context(|| ptl!("type-events-parse-failed", "type" => desc))?;
-        let mut res = AnimFloat::chain(anis);
-        res.map_value(|v| v * factor);
-        Ok(res)
-    }
-
-    let mut height = parse_speed_events(r, &event_layers, max_time)?;
-    let mut notes = parse_notes_chunked(r, rpe.notes.unwrap_or_default(), &mut height, chunked_chart, id)?;
     let config = Config::default();
     let mut rotation = events_with_factor(r, &event_layers, |it| &it.rotate_events, -1., "rotate", bezier_map)?;
     rotation.set_time(0.0);
@@ -992,68 +727,4 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra)
     }
     process_lines(&mut lines);
     Ok(Chart::new(rpe.meta.offset as f32 / 1000.0, lines, r, ChartSettings::default(), extra))
-}
-
-pub async fn parse_rpe_chunked(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra) -> Result<Chart> {
-    let rpe: RPEChart = serde_json::from_str(source).with_context(|| ptl!("json-parse-failed"))?;
-    let bezier_map = get_bezier_map(&rpe);
-    let mut r = BpmList::new(rpe.bpm_list.into_iter().map(|it| (it.start_time.beats(), it.bpm)).collect());
-    let mut texture_cache = std::collections::HashMap::new();
-    fn vec<T>(v: &Option<Vec<T>>) -> impl Iterator<Item = &T> {
-        v.iter().flat_map(|it| it.iter())
-    }
-
-    #[rustfmt::skip]
-    let max_time = *rpe
-        .judge_line_list
-        .iter()
-        .map(|line| {
-            line.notes.as_ref().map(|notes| {
-                notes
-                    .iter()
-                    .map(|note| {
-                        let time = if note.kind == 2 {
-                            r.time(&note.end_time)
-                        } else {
-                            r.time(&note.start_time)
-                        };
-                        time.not_nan()
-                    })
-                    .max()
-                    .unwrap_or_default()
-            }).unwrap_or_default().max(
-                line.event_layers.iter().filter_map(|it| it.as_ref().map(|layer| {
-                    vec(&layer.alpha_events)
-                        .chain(vec(&layer.move_x_events))
-                        .chain(vec(&layer.move_y_events))
-                        .chain(vec(&layer.rotate_events))
-                        .map(|it| r.time(&it.end_time).not_nan())
-                        .max().unwrap_or_default()
-                })).max().unwrap_or_default()
-            ).max(
-                line.extended.as_ref().map(|e| {
-                    vec(&e.scale_x_events)
-                        .chain(vec(&e.scale_y_events))
-                        .map(|it| r.time(&it.end_time).not_nan())
-                        .max().unwrap_or_default()
-                        .max(vec(&e.text_events).map(|it| r.time(&it.end_time).not_nan()).max().unwrap_or_default())
-                }).unwrap_or_default()
-            )
-        })
-        .max().unwrap_or_default() + 1.;
-    let mut chunked_chart = ChunkedChart::new(max_time, 5);
-
-    let mut lines = Vec::new();
-    for (id, rpe) in rpe.judge_line_list.into_iter().enumerate() {
-        let name = rpe.name.clone();
-        lines.push(
-            parse_judge_line_chunked(&mut r, rpe, max_time, fs, &bezier_map, &mut texture_cache, id, &mut chunked_chart)
-                .await
-                .with_context(move || ptl!("judge-line-location-name", "jlid" => id, "name" => name))?,
-        );
-    }
-    process_lines(&mut lines);
-    let mut chart = Chart::new(rpe.meta.offset as f32 / 1000.0, lines, r, ChartSettings::default(), extra);
-    chart.enable_chunked_loading();
-    Ok(chart)
 }

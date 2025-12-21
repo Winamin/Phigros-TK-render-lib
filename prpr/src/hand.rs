@@ -9,7 +9,6 @@ use crate::core::Vector;
 use bincode;
 use bytemuck::{Pod, Zeroable};
 use crossbeam_channel::{unbounded, Receiver as CbReceiver, Sender as CbSender};
-use tokio::runtime::Runtime;
 use fastrand;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
@@ -408,38 +407,42 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
     drop(line_states_guard);
 }
 
-/// 增强版手部分配函数 - 为AI提供更丰富的数据特征
-pub fn assign_hands_enhanced(
-    notes: &mut [Note], 
-    config: &Config, 
-    line_id: usize, 
-    rotation: f32, 
+/// 从统一主视角计算坐标并使用异步AI系统进行决策
+pub fn assign_hands_unified_perspective(
+    notes: &mut [Note],
+    config: &Config,
+    line_id: usize,
+    rotation: f32,
     bpm_list: &BpmList,
-    enhanced_data: Vec<(Vector, Vector)> // (world_pos, enhanced_pos)
+    world_positions: &[(Vector, Vector)] // (true_world_pos, enhanced_pos)
 ) {
     if notes.is_empty() {
         return;
     }
 
+    // 启动AI worker（如果尚未启动）- 异步处理
     start_ai_worker_if_needed(config);
 
     let now = Instant::now();
+    let rad = rotation.to_radians(); // 反向旋转
+    let cos_r = rad.cos();
+    let sin_r = rad.sin();
 
+    // 获取或创建line状态
     let line_states = LINE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut line_states_guard = line_states.lock().unwrap_or_else(|poisoned| {
         eprintln!("Line states mutex poisoned, recovering...");
         poisoned.into_inner()
     });
-
     let line_state = line_states_guard.entry(line_id).or_default();
 
-    // 批量处理响应，减少锁竞争
+    // 1. 首先处理AI异步响应（如果有）
     if let Some(map) = LINE_RESP_QUEUES.get() {
-        let mut responses = Vec::with_capacity(5);
+        let mut responses = Vec::with_capacity(3);
         {
             let mut mq = map.lock().unwrap();
             if let Some(queue) = mq.get_mut(&line_id) {
-                const MAX_RESPONSES_PER_FRAME: usize = 5;
+                const MAX_RESPONSES_PER_FRAME: usize = 3;
                 for _ in 0..MAX_RESPONSES_PER_FRAME {
                     if let Some(resp) = queue.pop_front() {
                         responses.push(resp);
@@ -450,7 +453,7 @@ pub fn assign_hands_enhanced(
             }
         }
 
-        // 批量处理响应
+        // 处理AI响应并应用结果
         for resp in responses {
             if resp.line_id != line_id {
                 continue;
@@ -458,7 +461,7 @@ pub fn assign_hands_enhanced(
 
             if let Some(pending_entry) = line_state.pending_requests.remove(&resp.id) {
                 let (_req_ts, req_version) = pending_entry;
-                if resp.version == req_version && resp.checksum == calculate_checksum(&resp.notes) {
+                if resp.version == req_version {
                     if match_and_merge_notes(notes, &resp.notes) {
                         line_state.current_version = resp.version;
                         line_state.last_full_update = now;
@@ -468,159 +471,51 @@ pub fn assign_hands_enhanced(
         }
     }
 
-    // 减少全量更新的频率
+    // 2. 只使用AI分配系统，不使用硬编码快速分配
     let should_full_update = now.duration_since(line_state.last_full_update) >= Duration::from_millis(FULL_UPDATE_INTERVAL_MS);
     if should_full_update {
-        const MAX_PENDING_REQUESTS: usize = 3;
+        // 异步发送AI请求以获取更优的分配结果（不阻塞主线程）
+        const MAX_PENDING_REQUESTS: usize = 2;
         if line_state.pending_requests.len() < MAX_PENDING_REQUESTS {
             let version = VERSION_COUNTER.fetch_add(1, Ordering::Relaxed);
             let request_id = REQ_COUNTER.fetch_add(1, Ordering::Relaxed);
 
             line_state.pending_requests.insert(request_id, (now, version));
 
-            // 优化：避免不必要的克隆
+            // 准备AI输入数据（主视角坐标）
+            let main_perspective_notes: Vec<Note> = notes.iter().enumerate().map(|(i, note)| {
+                let (true_world_pos, _enhanced_pos) = world_positions[i];
+
+                let main_perspective_x = true_world_pos.x * cos_r - true_world_pos.y * sin_r;
+                let main_perspective_y = true_world_pos.x * sin_r + true_world_pos.y * cos_r;
+
+                let mut ai_note = note.clone();
+                ai_note.object.translation.0 = crate::core::AnimFloat::fixed(main_perspective_x);
+                ai_note.object.translation.1 = crate::core::AnimFloat::fixed(main_perspective_y);
+                ai_note
+            }).collect();
+
             let cfg_arc = Arc::new(config.clone());
             let bpm_arc = Arc::new(bpm_list.clone());
 
-            // 创建增强版音符数据
-            let enhanced_notes: Vec<SimpleEnhancedNote> = create_enhanced_notes(notes, &enhanced_data);
-            let enhanced_req = create_enhanced_ai_request(
-                request_id,
-                line_id,
-                version,
-                now,
-                enhanced_notes,
-                rotation,
-                cfg_arc,
-                bpm_arc,
-            );
-
             if let Some(tx) = AI_REQ_TX.get() {
-                if tx.send(enhanced_req).is_err() {
-                    line_state.pending_requests.remove(&request_id);
-                }
+                let req = AiRequest {
+                    id: request_id,
+                    line_id,
+                    version,
+                    timestamp: now,
+                    notes: main_perspective_notes, // 已经转换为主视角坐标的音符
+                    rotation,
+                    config: cfg_arc,
+                    bpm_list: bpm_arc,
+                };
+
+                // 非阻塞发送AI请求
+                let _ = tx.send(req);
             }
         }
     }
     drop(line_states_guard);
-}
-
-/// 创建增强版音符数据（简化版本）
-fn create_enhanced_notes(notes: &[Note], enhanced_data: &[(Vector, Vector)]) -> Vec<SimpleEnhancedNote> {
-    notes.iter()
-        .enumerate()
-        .map(|(i, note)| {
-            let (world_pos, enhanced_pos) = enhanced_data[i];
-            
-            SimpleEnhancedNote {
-                base_note: note.clone(),
-                world_position: Vector2::new(world_pos.x, world_pos.y),
-                difficulty_score: calculate_enhanced_difficulty(note),
-                symmetry_score: calculate_symmetry_score(enhanced_pos, Vector2::new(2.4, 1.2)),
-                fatigue_prediction: predict_fatigue_from_position(enhanced_pos),
-                accuracy_requirement: get_accuracy_requirement(&note.kind),
-            }
-        })
-        .collect()
-}
-
-/// 计算增强版难度评分
-fn calculate_enhanced_difficulty(note: &Note) -> f32 {
-    let base_difficulty = match note.kind {
-        crate::core::NoteKind::Click => 1.0,
-        crate::core::NoteKind::Drag => 1.3,
-        crate::core::NoteKind::Flick => 1.5,
-        crate::core::NoteKind::Hold { .. } => 1.8,
-    };
-    
-    // 位置难度（考虑实际按键区域）
-    let x_pos = note.object.translation.0.now().abs();
-    let position_factor = 1.0 + x_pos * 0.3; // 边缘位置稍难
-    
-    // 速度难度
-    let speed_factor = 1.0 + (note.speed - 1.0).max(0.0) * 0.4;
-    
-    base_difficulty * position_factor * speed_factor
-}
-
-/// 计算对称性评分
-fn calculate_symmetry_score(position: Vector, field_size: Vector2) -> f32 {
-    let distance_from_center = position.x.abs();
-    let max_distance = field_size.x / 2.0;
-    1.0 - (distance_from_center / max_distance).min(1.0)
-}
-
-/// 基于位置预测疲劳度
-fn predict_fatigue_from_position(position: Vector) -> f32 {
-    let mut fatigue: f32 = 0.0;
-    
-    // 边缘位置更容易疲劳
-    let edge_factor = position.x.abs() * 0.3;
-    fatigue += edge_factor;
-    
-    // 极端位置惩罚
-    if position.x.abs() > 0.8 {
-        fatigue += 0.2;
-    }
-    
-    fatigue.min(1.0)
-}
-
-/// 获取精度要求
-fn get_accuracy_requirement(kind: &crate::core::NoteKind) -> f32 {
-    match kind {
-        crate::core::NoteKind::Click => 0.8,
-        crate::core::NoteKind::Drag => 0.9,
-        crate::core::NoteKind::Flick => 0.95,
-        crate::core::NoteKind::Hold { .. } => 0.85,
-    }
-}
-
-/// 创建增强版AI请求（简化版本）
-fn create_enhanced_ai_request(
-    id: u64,
-    line_id: usize,
-    version: u64,
-    timestamp: Instant,
-    enhanced_notes: Vec<SimpleEnhancedNote>,
-    rotation: f32,
-    config: Arc<Config>,
-    bpm_list: Arc<BpmList>,
-) -> AiRequest {
-    // 将增强版数据转换为标准格式，同时保持增强特征
-    let enhanced_notes_std: Vec<Note> = enhanced_notes.into_iter().map(|en| {
-        let mut note = en.base_note;
-        // 将增强位置信息写入对象平移
-        note.object.translation.0 = crate::core::AnimFloat::fixed(en.world_position.x);
-        note.object.translation.1 = crate::core::AnimFloat::fixed(en.world_position.y);
-        
-        // 将难度信息存入speed字段作为辅助信息
-        note.speed = en.difficulty_score;
-        
-        note
-    }).collect();
-
-    AiRequest {
-        id,
-        line_id,
-        version,
-        timestamp,
-        notes: enhanced_notes_std,
-        rotation,
-        config,
-        bpm_list,
-    }
-}
-
-/// 简化的增强特征结构（避免编译复杂性）
-#[derive(Debug, Clone)]
-struct SimpleEnhancedNote {
-    pub base_note: Note,
-    pub world_position: Vector2,
-    pub difficulty_score: f32,
-    pub symmetry_score: f32,
-    pub fatigue_prediction: f32,
-    pub accuracy_requirement: f32,
 }
 
 pub fn default_max_grad_norm() -> f32 { 5.0_f32 }
@@ -1818,46 +1713,35 @@ impl DeepNeuralNetwork {
     * 构建神经网络架构
      */
     fn build_architecture(&mut self) {
-        const INPUT_FUTURE_STEPS: usize = 16;
+        //const INPUT_FUTURE_STEPS: usize = 16;
         const OUTPUT_PREDICTION_STEPS: usize = 16;
         const INPUT_DIM: usize = 2560; // 64个音符 * 40维特征，匹配特征提取器输出
-        const SEQ_LEN: usize = 64; // 匹配实际的音符窗口大小
+        //const SEQ_LEN: usize = 64; // 匹配实际的音符窗口大小
 
         // 输入编码层 - 处理2560维输入，使用更深的网络
-        self.add_dense_layer(INPUT_DIM, 1024, ActivationFunction::GELU);
-        self.add_dense_layer(1024, 512, ActivationFunction::GELU);
+        self.add_dense_layer(INPUT_DIM, 512, ActivationFunction::GELU);
         self.add_dense_layer(512, 256, ActivationFunction::GELU);
 
-        // 序列建模层 - 并行使用注意力和LSTM捕获时序依赖
-        self.add_attention_layer(256, 256);
-        self.add_residual_layer(256, 256);
-        self.add_lstm_layer_bi(256, 128, true, SEQ_LEN); // 输出256维(128*2)
-
-        // 特征融合层 - 合并注意力和LSTM的输出
-        // 将256维(注意力层索引2)和256维(LSTM层索引4)合并为512维
-        self.add_concat_layer(&[256, 256], &[2, 4]);
-
-        // 深层特征提取 - 使用GELU提供最佳梯度特性
-        self.add_dense_layer(512, 256, ActivationFunction::GELU);
+        // 简化版序列建模 - 使用轻量级注意力或单一LSTM
+        // 方案1：只使用注意力
         self.add_attention_layer(256, 256);
         self.add_residual_layer(256, 256);
 
-        // 反思层：分析历史决策模式，提取深层洞察
-        self.add_reflection_layer(256, 128);
-        self.add_residual_layer(256, 256);
+        // 或方案2：只使用双向LSTM（更轻量）
+        // self.add_lstm_layer_bi(256, 128, true, SEQ_LEN); // 输出256维
 
-        // 输出准备层 - 使用GELU提供最佳梯度特性
+        // 特征提取层
         self.add_dense_layer(256, 128, ActivationFunction::GELU);
         self.add_residual_layer(128, 128);
 
-        // 多任务输出头 - 使用GELU提供最佳梯度特性
+        // 多任务输出头 - 共享特征，分离输出
         // 主决策输出：9维
         self.add_dense_layer(128, 64, ActivationFunction::GELU);
         self.add_dense_layer(64, 9, ActivationFunction::Linear);
 
-        // 未来预测输出：48维(16*3)
-        self.add_dense_layer(128, 96, ActivationFunction::GELU);
-        self.add_dense_layer(96, OUTPUT_PREDICTION_STEPS * 3, ActivationFunction::Linear);
+        // 未来预测输出：48维
+        self.add_dense_layer(128, 64, ActivationFunction::GELU);
+        self.add_dense_layer(64, OUTPUT_PREDICTION_STEPS * 3, ActivationFunction::Linear);
     }
 
     //TODO: 归一化输出
@@ -5244,7 +5128,7 @@ impl PhiTKAdvancedAI {
             ai.main_network.init_gpu_sync();
             ai.target_network.init_gpu_sync();
             println!("[GPU/CPU SWITCH] New model GPU initialized successfully.");
-            ai.save_model(filepath); // 只在 hand_split=true 且加载失败时保存
+            ai.save_model(filepath);
             ai
     }
 
@@ -5492,7 +5376,7 @@ impl PhiTKAdvancedAI {
         }
     }
 
-    fn record_optimization_experience(&mut self, note: &ProcessedNote, original_hand: Hand, optimized_hand: Hand, line_id: usize) {
+    fn record_optimization_experience(&mut self, note: &ProcessedNote, original_hand: Hand, optimized_hand: Hand, _line_id: usize) {
         // 记录智慧AI优化神经网络分配的经验，帮助神经网络学习更好的策略
         let input = DeepNeuralNetwork::hand_model_to_input(&self.ergonomic_hand_system);
         
@@ -5649,7 +5533,7 @@ impl PhiTKAdvancedAI {
         // 先用神经网络进行主要分配
         self.ai_assign_single_notes(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
         
-        let simultaneous_groups = self.detect_simultaneous_groups(&processed_notes);
+        let _simultaneous_groups = self.detect_simultaneous_groups(&processed_notes);
         let mut bpm_list_clone = bpm_list.clone();
         self.assign_simultaneous_groups(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
         
@@ -6757,10 +6641,8 @@ impl PhiTKAdvancedAI {
             }
         }
     }
-    
-    /// 实时动作可行性验证
+
     fn validate_real_time_feasibility(&self, notes: &mut [ProcessedNote]) {
-        // 检查连续高速操作的疲劳累积 - 更严格的疲劳检查
         let mut high_speed_count = 0;
         let mut total_distance = 0.0;
         let mut consecutive_hand: Option<Hand> = None;
@@ -7579,14 +7461,13 @@ impl PhiTKAdvancedAI {
         // 2. 检查分配平衡性
         if self.recent_assignments.len() > 10 {
             let mut left_count = 0;
-            let mut right_count = 0;
             let mut confidence_sum = 0.0;
             let mut confidence_variance = 0.0;
             
             for (hand, confidence, _) in &self.recent_assignments {
                 match hand {
                     Hand::Left => left_count += 1,
-                    Hand::Right => right_count += 1,
+                    Hand::Right => {} // 不需要计数，只需要匹配
                 }
                 confidence_sum += confidence;
             }

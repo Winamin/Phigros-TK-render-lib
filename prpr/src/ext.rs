@@ -185,129 +185,6 @@ impl From<DynamicImage> for SafeTexture {
 
 pub static BLACK_TEXTURE: Lazy<SafeTexture> = Lazy::new(|| Texture2D::from_rgba8(1, 1, &[0, 0, 0, 255]).into());
 
-//2025.12.13 chunk
-#[derive(Debug)]
-pub struct ChartChunk {
-    pub chunk_id: usize,
-    pub start_time: f32,
-    pub end_time: f32,
-    pub line_ids: Vec<usize>,
-    pub loaded: bool,
-}
-
-#[derive(Debug)]
-pub struct ChunkedChart {
-    pub chunks: Vec<ChartChunk>,
-    pub current_chunk: usize,
-    pub loading_chunks: Vec<usize>,
-    pub total_duration: f32,
-    pub chunk_count: usize,
-}
-
-impl ChunkedChart {
-    pub fn new(total_duration: f32, chunk_count: usize) -> Self {
-        let chunk_duration = total_duration / chunk_count as f32;
-        let mut chunks = Vec::with_capacity(chunk_count);
-        
-        for i in 0..chunk_count {
-            chunks.push(ChartChunk {
-                chunk_id: i,
-                start_time: i as f32 * chunk_duration,
-                end_time: (i + 1) as f32 * chunk_duration,
-                line_ids: Vec::new(),
-                loaded: i == 0,
-            });
-        }
-        
-        Self {
-            chunks,
-            current_chunk: 0,
-            loading_chunks: Vec::new(),
-            total_duration,
-            chunk_count,
-        }
-    }
-    
-    pub fn get_chunk_for_time(&self, time: f32) -> usize {
-        if time >= self.total_duration {
-            return self.chunk_count - 1;
-        }
-        (time / self.total_duration * self.chunk_count as f32).floor() as usize
-    }
-    
-    pub fn should_load_chunk(&self, chunk_id: usize, current_time: f32) -> bool {
-        if chunk_id >= self.chunk_count {
-            return false;
-        }
-        
-        let chunk = &self.chunks[chunk_id];
-        if chunk.loaded {
-            return false;
-        }
-
-        let current_chunk = self.get_chunk_for_time(current_time);
-        let preload_distance = 1;
-        
-        chunk_id <= current_chunk + preload_distance
-    }
-    
-    pub fn mark_chunk_loaded(&mut self, chunk_id: usize) {
-        if chunk_id < self.chunk_count {
-            self.chunks[chunk_id].loaded = true;
-        }
-    }
-    
-    pub fn get_needed_chunks(&self, current_time: f32) -> Vec<usize> {
-        let mut needed = Vec::new();
-        let current_chunk = self.get_chunk_for_time(current_time);
-
-        for i in current_chunk..std::cmp::min(current_chunk + 3, self.chunk_count) {
-            if !self.chunks[i].loaded && !self.loading_chunks.contains(&i) {
-                needed.push(i);
-            }
-        }
-        
-        needed
-    }
-}
-
-pub struct ChunkLoader {
-    pub chunked_chart: ChunkedChart,
-    pub loading_tasks: HashMap<usize, LocalTask<Result<()>>>,
-}
-
-impl ChunkLoader {
-    pub fn new(total_duration: f32) -> Self {
-        Self {
-            chunked_chart: ChunkedChart::new(total_duration, 5),//5 chunk
-            loading_tasks: HashMap::new(),
-        }
-    }
-    
-    pub fn update(&mut self, current_time: f32) -> Vec<usize> {
-        let mut newly_loaded = Vec::new();
-        let mut completed_tasks = Vec::new();
-        let task_keys: Vec<_> = self.loading_tasks.keys().copied().collect();
-        for &chunk_id in &task_keys {
-            if let Some(task) = self.loading_tasks.get_mut(&chunk_id) {
-                if let Some(task) = task {
-                    if let Some(result) = poll_future(task.as_mut()) {
-                        match result {
-                            Ok(_) => { self.chunked_chart.mark_chunk_loaded(chunk_id);newly_loaded.push(chunk_id); }
-                            Err(e) => { debug!("Failed to load chunk {}: {:?}", chunk_id, e); }
-                        }completed_tasks.push(chunk_id);
-                    }
-                }
-            }
-        }
-        for chunk_id in completed_tasks { self.loading_tasks.remove(&chunk_id); }
-        let needed_chunks = self.chunked_chart.get_needed_chunks(current_time);
-        for chunk_id in needed_chunks { if !self.loading_tasks.contains_key(&chunk_id) {
-            self.loading_tasks.insert(chunk_id, None); } }
-        newly_loaded
-    }
-}
-
 pub fn nalgebra_to_glm(mat: &Matrix) -> Mat4 {
     /*
         [11] [12]  0  [13]
@@ -587,7 +464,7 @@ pub fn create_audio_manger(config: &Config) -> Result<AudioManager> {
         Ok(AudioManager::new(CpalBackend::new(CpalSettings {
             buffer_size: config.audio_buffer_size,
         }))
-        .expect("Failed to play sound"))
+            .expect("Failed to play sound"))
     }
 }
 
@@ -625,7 +502,7 @@ pub fn make_pipeline(write_color: bool, pass_op: StencilOp, test_func: CompareFu
         Vec::new(),
         Vec::new(),
     )
-    .unwrap()
+        .unwrap()
 }
 
 #[inline]

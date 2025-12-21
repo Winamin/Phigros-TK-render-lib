@@ -1,5 +1,5 @@
 use super::{BpmList, Effect, JudgeLine, JudgeLineKind, Matrix, Resource, UIElement, Vector, Video};
-use crate::{ext::ChunkLoader, fs::FileSystem, judge::JudgeStatus, ui::Ui};
+use crate::{fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use std::cell::RefCell;
@@ -28,8 +28,6 @@ pub struct Chart {
     pub extra: ChartExtra,
     pub order: Vec<usize>,
     pub attach_ui: [Option<usize>; 7],
-    pub chunk_loader: Option<ChunkLoader>,
-    pub max_time: f32,
 }
 
 impl Chart {
@@ -46,17 +44,6 @@ impl Chart {
             })
             .collect::<Vec<_>>();
         order.sort_by_key(|it| (lines[*it].z_index, *it));
-        let max_time = lines
-            .iter()
-            .flat_map(|line| line.notes.iter())
-            .map(|note| {
-                match note.kind {
-                    crate::core::NoteKind::Hold { end_time, .. } => end_time,
-                    _ => note.time,
-                }
-            })
-            .fold(0.0_f32, |acc, time| acc.max(time));
-            
         Self {
             offset,
             lines,
@@ -66,29 +53,6 @@ impl Chart {
 
             order,
             attach_ui,
-            chunk_loader: None,
-            max_time,
-        }
-    }
-
-    pub fn enable_chunked_loading(&mut self) {
-        self.chunk_loader = Some(ChunkLoader::new(self.max_time));
-    }
-
-    pub fn update_chunk_loading(&mut self, current_time: f32) -> Vec<usize> {
-        if let Some(loader) = &mut self.chunk_loader {
-            loader.update(current_time)
-        } else {
-            Vec::new()
-        }
-    }
-
-    pub fn should_render_at_time(&self, time: f32) -> bool {
-        if let Some(loader) = &self.chunk_loader {
-            let chunk_id = loader.chunked_chart.get_chunk_for_time(time);
-            chunk_id < loader.chunked_chart.chunks.len() && loader.chunked_chart.chunks[chunk_id].loaded
-        } else {
-            true
         }
     }
 

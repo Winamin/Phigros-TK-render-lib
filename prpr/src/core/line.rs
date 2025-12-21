@@ -16,6 +16,7 @@ use std::sync::{Mutex, Arc, RwLock};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 //use crate::config::Config;
+use miniquad::TextureFormat;
 
 // 只对纹理缓存进行线程安全优化
 static TEXTURE_CACHE: Lazy<RwLock<HashMap<usize, Texture2D>>> = Lazy::new(|| {
@@ -50,20 +51,17 @@ impl UIElement {
     }
 }
 
-#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum JudgeLineKind {
     #[default]
     Normal,
-    #[serde(skip)]
     Texture(SafeTexture, String),
     Text(Anim<String>),
-    #[serde(skip)]
     Paint(Anim<f32>, Arc<Mutex<(Option<RenderPass>, bool)>>),
-    #[serde(skip)]
     TextureGif(Anim<f32>, GifFrames, String),
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct JudgeLineCache {
     update_order: Vec<u32>,
     not_plain_count: usize,
@@ -123,7 +121,6 @@ struct Painter {
     cached_pass: Option<RenderPass>,
 }
 
-#[derive(Clone)]
 pub struct GifFrames {
     /// time of each frame in milliseconds
     frames: Vec<(u128, SafeTexture)>,
@@ -158,23 +155,19 @@ impl GifFrames {
     }
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct JudgeLine {
     pub object: Object,
-    #[serde(skip)]
     pub ctrl_obj: Arc<Mutex<CtrlObject>>,
     pub kind: JudgeLineKind,
     pub height: AnimFloat,
     pub incline: AnimFloat,
     pub notes: Vec<Note>,
-    #[serde(skip)]
     pub color: Anim<Color>,
     pub parent: Option<usize>,
     pub z_index: i32,
     pub show_below: bool,
-    #[serde(skip)]
     pub attach_ui: Option<UIElement>,
-    #[serde(skip)]
+
     pub cache: JudgeLineCache,
 }
 
@@ -191,17 +184,17 @@ impl Painter {
                 let vp = get_viewport();
 
                 let tex = Texture::new_render_texture(
-                    &mut gl.quad_context,
+                    gl.quad_context,
                     TextureParams {
                         width: vp.2 as _,
                         height: vp.3 as _,
-                        format: miniquad::TextureFormat::RGBA8,
+                        format: TextureFormat::RGBA8,
                         filter: FilterMode::Linear,
                         wrap: TextureWrap::Clamp,
                     },
                 );
 
-                let pass = RenderPass::new(&mut gl.quad_context, tex.clone(), None);
+                let pass = RenderPass::new(gl.quad_context, tex.clone(), None);
 
                 Mutex::new((pass, tex, vp))
             });
@@ -223,7 +216,7 @@ impl Painter {
 
     fn paint(&mut self, ui: &mut Ui, size: f32, alpha: f32, mut color: Color) {
         let mut gl = unsafe { get_internal_gl() };
-        let ctx = &mut gl.quad_context;
+        let ctx = gl.quad_context;
         if let Some(cached_texture) = &self.cached_texture {
             if cached_texture != &self.pass.texture(ctx) {
                 self.cached_texture = Some(self.pass.texture(ctx).clone());
@@ -332,41 +325,36 @@ impl JudgeLine {
         let config = crate::config::Config::default();
         let rot = self.object.rotation.now();
         
-        // 正确的坐标转换：使用屏幕到世界的变换
-        let mut enhanced_notes_data = Vec::with_capacity(self.notes.len());
-        let playing_field = self.calculate_playing_field(res);
+        // 获取判定线的世界位置和变换矩阵
+        let line_transform = self.now_transform(res, &[]);
+        let line_translation = Vector::new(line_transform[(0, 2)], line_transform[(1, 2)]);
+        let _line_rotation = self.object.rotation.now();
         
-        // 计算屏幕到世界的变换
+        // 从主视角计算世界坐标
+        let mut enhanced_notes_data = Vec::with_capacity(self.notes.len());
         let chart_ratio_inv = 1.0 / res.config.chart_ratio;
         let vw = 1.2 * chart_ratio_inv;
         let vh = chart_ratio_inv;
         
-        let viewport_points = [
-            res.screen_to_world(Point::new(-vw, -vh)),
-            res.screen_to_world(Point::new(-vw, vh)),
-            res.screen_to_world(Point::new(vw, -vh)),
-            res.screen_to_world(Point::new(vw, vh)),
-        ];
-        
-        // 计算屏幕坐标变换矩阵
-        let screen_to_world_matrix = self.calculate_screen_to_world_matrix(&viewport_points);
-        
         for note in &self.notes {
+            // 音符在判定线局部坐标系中的位置
             let local_x = note.object.translation.0.now();
             let local_y = note.object.translation.1.now();
             
-            // 将音符的局部坐标转换为屏幕坐标
-            let screen_x = local_x * vw * 2.0;
-            let screen_y = local_y * vh * 2.0;
+            // 转换为标准化的世界坐标（不考虑判定线旋转）
+            let world_x_no_rotation = local_x * vw;
+            let world_y_no_rotation = local_y * vh;
             
-            // 应用屏幕到世界的变换得到真正的世界坐标
-            let screen_point = Point::new(screen_x, screen_y);
-            let true_world_pos = screen_to_world_matrix.transform_point(&screen_point);
+            // 应用判定线的世界位置偏移
+            let world_x = world_x_no_rotation + line_translation.x;
+            let world_y = world_y_no_rotation + line_translation.y;
             
-            // 增强：精确的手部分配区域计算（基于真正的世界坐标）
-            let enhanced_pos = self.calculate_enhanced_hand_zones(true_world_pos.x, true_world_pos.y, playing_field);
+            // 现在将这个"主视角下的世界坐标"传递给手部分配函数
+            // 手部分配函数内部会处理旋转角度的影响
+            let true_world_pos = Vector::new(world_x, world_y);
+            let enhanced_pos = true_world_pos; // 直接使用真实世界坐标
             
-            enhanced_notes_data.push((Vector::new(true_world_pos.x, true_world_pos.y), enhanced_pos));
+            enhanced_notes_data.push((true_world_pos, enhanced_pos));
         }
         
         // 创建增强版临时音符用于AI计算
@@ -382,77 +370,12 @@ impl JudgeLine {
             })
             .collect();
         
-        // 分配手（使用增强版数据）
-        crate::hand::assign_hands_enhanced(&mut ai_notes, &config, index, rot, bpm_list, enhanced_notes_data);
+        // 分配手（使用统一主视角数据）
+        crate::hand::assign_hands_unified_perspective(&mut ai_notes, &config, index, rot, bpm_list, &enhanced_notes_data);
         
         // 将分配结果复制回原始音符
         for (orig_note, ai_note) in self.notes.iter_mut().zip(ai_notes.iter()) {
             orig_note.hand = ai_note.hand;
-        }
-    }
-    
-    /// 计算屏幕到世界的变换矩阵
-    fn calculate_screen_to_world_matrix(&self, viewport_points: &[Point; 4]) -> Matrix {
-        // 计算仿射变换矩阵的系数
-        let min_x = viewport_points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
-        let max_x = viewport_points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
-        let min_y = viewport_points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
-        let max_y = viewport_points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
-        
-        // 构建变换：屏幕坐标 [-1,1] -> 世界坐标 [min,max]
-        let scale_x = (max_x - min_x) / 2.0;
-        let scale_y = (max_y - min_y) / 2.0;
-        let offset_x = (max_x + min_x) / 2.0;
-        let offset_y = (max_y + min_y) / 2.0;
-        
-        // 使用矩阵运算构建变换
-        Matrix::identity()
-            .append_nonuniform_scaling(&Vector::new(scale_x, scale_y))
-            .append_translation(&Vector::new(offset_x, offset_y))
-    }
-    
-    /// 计算演奏区域边界
-    fn calculate_playing_field(&self, res: &Resource) -> Vector {
-        let chart_ratio = res.config.chart_ratio;
-        let aspect_ratio = res.aspect_ratio;
-        
-        // 基于图表比例和屏幕比例计算实际演奏区域
-        Vector::new(
-            1.2 * chart_ratio / aspect_ratio,  // 宽度
-            chart_ratio / aspect_ratio         // 高度
-        )
-    }
-    
-    /// 增强版手部分配区域计算
-    /// 更精确地考虑实际按键区域和人体工程学
-    fn calculate_enhanced_hand_zones(&self, world_x: f32, world_y: f32, playing_field: Vector) -> Vector {
-        let field_width = playing_field.x;
-        
-        // 动态调整手部分配边界，考虑实际按键习惯
-        let left_hand_zone = -field_width * 0.35;   // 左手区域稍大
-        let right_hand_zone = field_width * 0.35;   // 右手区域稍大
-        let center_zone = field_width * 0.1;        // 中间区域
-        
-        // 特殊位置处理
-        if world_x < left_hand_zone - center_zone {
-            // 极左侧 - 强制左手
-            Vector::new(left_hand_zone - 0.2 * field_width, world_y)
-        } else if world_x > right_hand_zone + center_zone {
-            // 极右侧 - 强制右手
-            Vector::new(right_hand_zone + 0.2 * field_width, world_y)
-        } else if world_x.abs() <= center_zone {
-            // 中间区域 - 基于更智能的分配
-            Vector::new(world_x * 0.7, world_y)  // 向中心收缩
-        } else {
-            // 边界区域 - 基于距离判断
-            let left_distance = (world_x - left_hand_zone).abs();
-            let right_distance = (world_x - right_hand_zone).abs();
-            
-            if left_distance < right_distance {
-                Vector::new(left_hand_zone - left_distance * 0.3, world_y)
-            } else {
-                Vector::new(right_hand_zone + right_distance * 0.3, world_y)
-            }
         }
     }
 
@@ -472,9 +395,9 @@ impl JudgeLine {
     }
 
     pub fn render(&self, mut ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
-        static FLIP_Y_MATRIX: Lazy<Matrix> = Lazy::new(|| {
-            Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0))
-        });
+        //static FLIP_Y_MATRIX: Lazy<Matrix> = Lazy::new(|| {
+        //    Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0))
+        //});
 
         // 早期退出优化：预先计算 alpha
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
@@ -646,7 +569,7 @@ impl JudgeLine {
             // Paint 类型的后处理
             if let JudgeLineKind::Paint(_, state) = &self.kind {
                 let mut gl = unsafe { get_internal_gl() };
-                let ctx = &mut gl.quad_context;
+                let ctx = gl.quad_context;
 
                 let guard = state.lock().unwrap();
                 let ready = guard.1;
