@@ -213,7 +213,7 @@ impl<'a, 's, 'ui> DrawText<'a, 's, 'ui> {
 }
 
 static TEXTURE_DIM: Lazy<u32> = Lazy::new(|| unsafe {
-    use miniquad::gl::*;
+    use macroquad::miniquad::gl::*;
     let mut size = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mut size);
     (size as u32).min(2048)
@@ -268,7 +268,7 @@ impl TextPainter {
                         get_internal_gl().flush();
                         flushed = true;
                     }
-                    use miniquad::gl::*;
+                    use macroquad::miniquad::gl::*;
                     glBindTexture(GL_TEXTURE_2D, self.cache_texture.raw_miniquad_texture_handle().gl_internal_id());
                     self.data_buffer.clear();
                     self.data_buffer.reserve(tex_data.len() * 4);

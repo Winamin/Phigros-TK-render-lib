@@ -73,9 +73,9 @@ impl GpuNetworkExecutor {
         });
 
         // 创建适当大小的缓冲区以支持高性能计算（16M floats = 64MB）
-        //let max_size = 4 * 1024 * 1024;
-        //let buffer_size = (max_size * std::mem::size_of::<f32>()) as u64;
-        let buffer_size = std::mem::size_of::<NetworkParams>() as u64;
+        let max_size = 1 * 1024 * 1024;
+        let buffer_size = (max_size * std::mem::size_of::<f32>()) as u64;
+        //let buffer_size = std::mem::size_of::<NetworkParams>() as u64;
 
         // Ping-Pong缓冲区：减少不必要的内存拷贝
         let buffer_a = device.create_buffer(&wgpu::BufferDescriptor {

@@ -1,7 +1,6 @@
 use chrono::Utc;
 use colored::Colorize;
-use miniquad::{debug, error, info, trace, warn};
-use tracing::{field::Visit, Level, Subscriber};
+use tracing::{debug, error, info, trace, warn, field::Visit, Level, Subscriber};
 use tracing_subscriber::{prelude::*, Layer};
 
 struct CustomLayer;

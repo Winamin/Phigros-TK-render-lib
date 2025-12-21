@@ -8,7 +8,7 @@ use crate::{
     info::ChartFormat,
 };
 use macroquad::prelude::*;
-use miniquad::{RenderPass, Texture, TextureParams, TextureWrap, FilterMode};
+use macroquad::miniquad::{RenderPass, Texture, TextureParams, TextureWrap, FilterMode, TextureFormat};
 use nalgebra::Rotation2;
 use serde::Deserialize;
 use once_cell::sync::OnceCell;
@@ -16,7 +16,6 @@ use std::sync::{Mutex, Arc, RwLock};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 //use crate::config::Config;
-use miniquad::TextureFormat;
 
 // 只对纹理缓存进行线程安全优化
 static TEXTURE_CACHE: Lazy<RwLock<HashMap<usize, Texture2D>>> = Lazy::new(|| {

@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use macroquad::prelude::*;
-use miniquad::{gl::{GLuint, GL_LINEAR}, Texture, TextureWrap};
+use macroquad::miniquad::{gl::{GLuint, GL_LINEAR}, Texture, TextureWrap};
 use sasa::{AudioClip, AudioManager, Sfx};
 use serde::Deserialize;
 use std::{cell::RefCell, collections::BTreeMap, ops::DerefMut, path::Path, sync::atomic::AtomicU32};

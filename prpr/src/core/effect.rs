@@ -2,7 +2,7 @@ use super::{Anim, Resource, Tweenable};
 use crate::ext::{get_viewport, screen_aspect};
 use anyhow::{anyhow, bail, Result};
 use macroquad::prelude::*;
-use miniquad::UniformType;
+use macroquad::miniquad::UniformType;
 use once_cell::sync::Lazy;
 use phf::phf_map;
 use regex::Regex;

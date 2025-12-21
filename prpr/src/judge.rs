@@ -7,7 +7,7 @@ use macroquad::prelude::{
     utils::{register_input_subscriber, repeat_all_miniquad_input},
     *,
 };
-use miniquad::{EventHandler, MouseButton};
+use macroquad::miniquad::{EventHandler, MouseButton};
 use once_cell::sync::Lazy;
 use sasa::{PlaySfxParams, Sfx};
 use serde::Serialize;

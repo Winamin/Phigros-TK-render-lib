@@ -4,7 +4,6 @@ use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use fastrand;
 
 #[derive(Debug, Clone)]
 pub struct ConsciousnessSuggestion {

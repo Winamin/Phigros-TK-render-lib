@@ -1,6 +1,6 @@
 use super::Ui;
 use macroquad::prelude::*;
-use miniquad::{BlendFactor, BlendState, BlendValue, Equation};
+use macroquad::miniquad::{BlendFactor, BlendState, BlendValue, Equation};
 use once_cell::sync::Lazy;
 
 fn alpha_blend_material_params(uniforms: Vec<(String, UniformType)>) -> MaterialParams {

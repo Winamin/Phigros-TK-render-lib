@@ -1,8 +1,8 @@
 use macroquad::{
     texture::{RenderTarget, Texture2D},
     window::get_internal_gl,
+    miniquad::{gl::GLuint, RenderPass, Texture, TextureFormat},
 };
-use miniquad::{gl::GLuint, RenderPass, Texture, TextureFormat};
 
 pub struct MSRenderTarget {
     dim: (u32, u32),
@@ -14,14 +14,13 @@ pub struct MSRenderTarget {
 
 pub fn copy_fbo(src: GLuint, dst: GLuint, dim: (u32, u32)) -> bool {
     unsafe {
-        use miniquad::gl::*;
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
-        let (w, h) = (dim.0 as i32, dim.1 as i32);
-        glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-        glGetError() == GL_NO_ERROR
-    }
-}
+                use macroquad::miniquad::gl::*;
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
+                let (w, h) = (dim.0 as i32, dim.1 as i32);
+                glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                glGetError() == GL_NO_ERROR
+            }}
 
 pub fn internal_id(target: &RenderTarget) -> GLuint {
     target.render_pass.gl_internal_id(unsafe { get_internal_gl() }.quad_context)
@@ -32,7 +31,7 @@ impl MSRenderTarget {
         let mut fbo = 0;
         let mut rbo = 0;
         unsafe {
-            use miniquad::gl::*;
+            use macroquad::miniquad::gl::*;
             glGenRenderbuffers(1, &mut rbo);
             glBindRenderbuffer(GL_RENDERBUFFER, rbo);
             glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples as i32, GL_RGB8, dim.0 as i32, dim.1 as i32);
@@ -47,7 +46,7 @@ impl MSRenderTarget {
         let mut create_target = || {
             let texture = Texture::new_render_texture(
                 gl.quad_context,
-                miniquad::TextureParams {
+                macroquad::miniquad::TextureParams {
                     width: dim.0,
                     height: dim.1,
                     format: TextureFormat::RGB8,
@@ -66,7 +65,7 @@ impl MSRenderTarget {
         // 创建dummy纹理
         let dummy_texture = Texture::new_render_texture(
             gl.quad_context,
-            miniquad::TextureParams {
+            macroquad::miniquad::TextureParams {
                 width: dim.0,
                 height: dim.1,
                 format: TextureFormat::RGB8,

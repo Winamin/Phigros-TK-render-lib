@@ -36,7 +36,7 @@ use lyon::{
     path::{LineCap, Path, PathEvent},
 };
 use macroquad::prelude::*;
-use miniquad::PassAction;
+use macroquad::miniquad::PassAction;
 use sasa::{AudioManager, PlaySfxParams, Sfx};
 use std::{borrow::Cow, cell::RefCell, collections::HashMap, ops::Range};
 

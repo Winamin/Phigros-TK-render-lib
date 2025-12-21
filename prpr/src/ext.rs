@@ -10,13 +10,12 @@ use lyon::{
     path::{builder::BorderRadii, Path, Winding},
 };
 use macroquad::prelude::*;
-use miniquad::{gl::GLenum, BlendFactor, BlendState, BlendValue, CompareFunc, Equation, PrimitiveType, StencilFaceState, StencilOp, StencilState};
+use macroquad::miniquad::{gl::GLenum, BlendFactor, BlendState, BlendValue, CompareFunc, Equation, PrimitiveType, StencilFaceState, StencilOp, StencilState};
 use once_cell::sync::Lazy;
 use ordered_float::{Float, NotNan};
 use sasa::AudioManager;
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
     future::Future,
     ops::Deref,
     pin::Pin,
@@ -24,7 +23,7 @@ use std::{
     task::{Poll, RawWaker, RawWakerVTable, Waker},
 };
 use tracing::{debug, info_span};
-use miniquad::gl::{
+use macroquad::miniquad::gl::{
     glGetIntegerv, glBindTexture, glTexParameteri,
     GL_TEXTURE_2D,
     GL_TEXTURE_MIN_FILTER,
@@ -112,7 +111,7 @@ impl SafeTexture {
     pub fn with_mipmap(self) -> Self {
         let id = self.0 .0.raw_miniquad_texture_handle().gl_internal_id();
         unsafe {
-            use miniquad::gl::*;
+            use macroquad::miniquad::gl::*;
             glBindTexture(GL_TEXTURE_2D, id);
             glGenerateMipmap(GL_TEXTURE_2D);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR as _);
