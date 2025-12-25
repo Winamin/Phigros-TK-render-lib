@@ -1715,33 +1715,25 @@ impl DeepNeuralNetwork {
     fn build_architecture(&mut self) {
         //const INPUT_FUTURE_STEPS: usize = 16;
         const OUTPUT_PREDICTION_STEPS: usize = 16;
-        const INPUT_DIM: usize = 2560; // 64个音符 * 40维特征，匹配特征提取器输出
-        //const SEQ_LEN: usize = 64; // 匹配实际的音符窗口大小
-
-        // 输入编码层 - 处理2560维输入，使用更深的网络
-        self.add_dense_layer(INPUT_DIM, 512, ActivationFunction::GELU);
+        const INPUT_DIM: usize = 2560;
+        self.add_dense_layer(INPUT_DIM, 1024, ActivationFunction::GELU);
+        self.add_dense_layer(1024, 512, ActivationFunction::GELU);
         self.add_dense_layer(512, 256, ActivationFunction::GELU);
-
-        // 简化版序列建模 - 使用轻量级注意力或单一LSTM
-        // 方案1：只使用注意力
         self.add_attention_layer(256, 256);
         self.add_residual_layer(256, 256);
-
-        // 或方案2：只使用双向LSTM（更轻量）
-        // self.add_lstm_layer_bi(256, 128, true, SEQ_LEN); // 输出256维
-
-        // 特征提取层
+        self.add_lstm_layer_bi(256, 128, true, 64);
+        self.add_concat_layer(&[256, 256], &[2, 4]);
+        self.add_dense_layer(512, 256, ActivationFunction::GELU);
+        self.add_attention_layer(256, 256);
+        self.add_residual_layer(256, 256);
+        self.add_reflection_layer(256, 128);
+        self.add_residual_layer(256, 256);
         self.add_dense_layer(256, 128, ActivationFunction::GELU);
         self.add_residual_layer(128, 128);
-
-        // 多任务输出头 - 共享特征，分离输出
-        // 主决策输出：9维
         self.add_dense_layer(128, 64, ActivationFunction::GELU);
         self.add_dense_layer(64, 9, ActivationFunction::Linear);
-
-        // 未来预测输出：48维
-        self.add_dense_layer(128, 64, ActivationFunction::GELU);
-        self.add_dense_layer(64, OUTPUT_PREDICTION_STEPS * 3, ActivationFunction::Linear);
+        self.add_dense_layer(128, 96, ActivationFunction::GELU);
+        self.add_dense_layer(96, OUTPUT_PREDICTION_STEPS * 3, ActivationFunction::Linear);
     }
 
     //TODO: 归一化输出
