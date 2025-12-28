@@ -7,12 +7,29 @@ use crate::{
 use serde::Serialize;
 use serde::Deserialize;
 use macroquad::prelude::*;
-//use ::rand::{thread_rng, Rng};
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 //const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
 const RPE_HEIGHT_SCALE: f32 = RPE_HEIGHT * (1.0 / 720.0);
+
+// 懒加载静态资源
+static INIT_POINTS: Lazy<[Point; 4]> = Lazy::new(|| [
+    Point::new(0., 0.),
+    Point::new(1., 0.),
+    Point::new(1., 1.),
+    Point::new(0., 1.),
+]);
+static RANDOM_SEED: AtomicU32 = AtomicU32::new(0x12345678);
+static HAND_COLORS: Lazy<[Color; 2]> = Lazy::new(|| [
+    Color::new(0.2, 0.5, 1.0, 1.0),  // Left
+    Color::new(1.0, 0.6, 0.7, 1.0),  // Right
+]);
+
+// 基础亮度常量
+const BASE_LUMINANCE: f32 = 0.9;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum NoteKind {
@@ -85,7 +102,8 @@ pub struct Note {
     pub format: bool,
 }
 
-pub struct RenderConfig<'a> {
+pub struct RenderConfig<'a>
+{
     pub settings: &'a ChartSettings,
     pub ctrl_obj: &'a mut CtrlObject,
     pub line_height: f32,
@@ -112,13 +130,6 @@ fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color
         source.y += source.h * visible_ratio;
         source.h *= 1. - visible_ratio;
     }
-    const INIT_POINTS: [Point; 4] = [
-        Point::new(0., 0.),
-        Point::new(1., 0.),
-        Point::new(1., 1.),
-        Point::new(0., 1.),
-    ];
-
     let p = INIT_POINTS.map(|pt| Point::new(x + pt.x * w, y + pt.y * h));
 
     params.flip_y = true;
@@ -140,7 +151,7 @@ fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], co
         .fold((f32::MAX, f32::MIN), |(min, max), pt|
             (min.min(pt.y), max.max(pt.y)));
 
-    let chart_ratio_inv = 1.0 / res.config.chart_ratio;
+    let chart_ratio_inv = res.chart_ratio_inv;
     if min_x > chart_ratio_inv ||
         max_x < -chart_ratio_inv ||
         min_y > chart_ratio_inv ||
@@ -176,13 +187,12 @@ fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], co
     );
 }
 
-fn random_rotate() -> f32 {
-    // good good good good good good
-    static mut SEED: u32 = 0x12345678;
-    unsafe {
-        SEED = SEED.wrapping_mul(1664525).wrapping_add(1013904223);
-        (SEED % 4) as f32 * 90.0
-    }
+fn random_rotate() -> f32
+{
+    let seed = RANDOM_SEED.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+        Some(x.wrapping_mul(1664525).wrapping_add(1013904223))
+    }).unwrap_or(0x12345678);
+    (seed % 4) as f32 * 90.0
 }
 
 fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Color) {
@@ -284,7 +294,7 @@ impl Note {
 
     let y_factor = config.ctrl_obj.y.now_opt().unwrap_or(1.);
     let spd = self.speed * y_factor * config.global_speed_factor;
-    let inv_aspect = 1.0 / res.aspect_ratio;
+    let inv_aspect = res.inv_aspect_ratio; // 使用缓存的值
     let line_height = config.line_height * inv_aspect * spd;
     let height = self.height * inv_aspect * spd;
     let base = height - line_height;
@@ -292,7 +302,7 @@ impl Note {
     if res.config.aggressive && matches!(self.kind, NoteKind::Hold { .. }) {
         let h = if self.time <= res.time { line_height } else { height };
         let bottom = h + self.object.translation.1.now() - line_height;
-        if bottom - line_height > 1. / res.config.chart_ratio {
+        if bottom - line_height > res.chart_ratio_inv {
             return;
         }
     }
@@ -315,13 +325,14 @@ impl Note {
     self.init_ctrl_obj(&mut config.ctrl_obj, config.line_height);
     let mut color = self.object.now_color();
 
-    // Hand split color
     if res.config.hand_split {
-        match self.hand {
-            Hand::Left => { color.r = 0.2; color.g = 0.5; color.b = 1.0; }
-            Hand::Right => { color.r = 1.0; color.g = 0.6; color.b = 0.7; }
-        }
-        const BASE_LUMINANCE: f32 = 0.9;
+        let hand_color = match self.hand {
+            Hand::Left => &HAND_COLORS[0],
+            Hand::Right => &HAND_COLORS[1],
+        };
+        color.r = hand_color.r;
+        color.g = hand_color.g;
+        color.b = hand_color.b;
         let luminance = color.r * 0.299 + color.g * 0.587 + color.b * 0.114;
         let adjust = BASE_LUMINANCE / luminance.max(0.001);
         color.r = (color.r * adjust).min(1.0);
@@ -499,15 +510,10 @@ impl Note {
             Point::new(x, y + h),
         ];
 
-        // Apply transform
         let transform = self.now_transform(res, &config.ctrl_obj, base, config.incline_sin);
         let p_world = p.map(|pt| transform.transform_point(&pt));
-
-        // Convert to screen
         let p_screen = p_world.map(|pt| res.world_to_screen(pt));
-
-        // Frustum culling
-        let chart_ratio_inv = 1.0 / res.config.chart_ratio;
+        let chart_ratio_inv = res.chart_ratio_inv; // 使用缓存的值
         let (min_x, max_x) = p_screen.iter().fold((f32::MAX, f32::MIN), |(a,b), pt| (a.min(pt.x), b.max(pt.x)));
         let (min_y, max_y) = p_screen.iter().fold((f32::MAX, f32::MIN), |(a,b), pt| (a.min(pt.y), b.max(pt.y)));
         if min_x > chart_ratio_inv || max_x < -chart_ratio_inv || min_y > chart_ratio_inv || max_y < -chart_ratio_inv {

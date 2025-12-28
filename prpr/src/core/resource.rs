@@ -376,6 +376,8 @@ pub struct Resource {
     pub sfx_flick: Sfx,
     pub info: ChartInfo,
     pub aspect_ratio: f32,
+    pub inv_aspect_ratio: f32,  // 缓存的 aspect_ratio 倒数
+    pub chart_ratio_inv: f32,   // 缓存的 chart_ratio 倒数
     pub dpi: u32,
     pub last_vp: (i32, i32, i32, i32),
     pub note_width: f32,
@@ -483,6 +485,8 @@ impl Resource {
         let sfx_flick = audio.create_sfx(res_pack.sfx_flick.clone(), buffer_size)?;
 
         let aspect_ratio = config.aspect_ratio.unwrap_or(info.aspect_ratio);
+        let inv_aspect_ratio = 1.0 / aspect_ratio;
+        let chart_ratio_inv = 1.0 / config.chart_ratio;
         let note_width = config.note_scale * NOTE_WIDTH_RATIO_BASE;
         let note_scale = config.note_scale;
 
@@ -496,6 +500,8 @@ impl Resource {
             chart_format,
             info,
             aspect_ratio,
+            inv_aspect_ratio,
+            chart_ratio_inv,
             dpi: DPI_VALUE.load(std::sync::atomic::Ordering::SeqCst),
             last_vp: (0, 0, 0, 0),
             note_width,

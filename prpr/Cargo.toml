@@ -41,7 +41,7 @@ tokio = "1.47.1"
 uuid = { version = "1.0", features = ["v4"] }
 num_cpus = "1.16"
 macroquad = { git = "https://github.com/Winamin/prpr-macroquad", default-features = false }
-miniquad = { git = "https://github.com/Mivik/prpr-miniquad" }
+miniquad = { git = "https://github.com/Winamin/prpr-miniquad" }
 #me,e,eemmemmemmemmememme
 #macroquad = { path = "D:/Github/prpr-macroquad", default-features = false}
 #miniquad = { path = "D:/Github/prpr-miniquad"}

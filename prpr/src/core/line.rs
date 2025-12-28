@@ -11,16 +11,61 @@ use macroquad::prelude::*;
 use macroquad::miniquad::{RenderPass, Texture, TextureParams, TextureWrap, FilterMode, TextureFormat};
 use nalgebra::Rotation2;
 use serde::Deserialize;
-use once_cell::sync::OnceCell;
 use std::sync::{Mutex, Arc, RwLock};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 //use crate::config::Config;
 
-// 只对纹理缓存进行线程安全优化
+// 优化的纹理缓存懒加载
 static TEXTURE_CACHE: Lazy<RwLock<HashMap<usize, Texture2D>>> = Lazy::new(|| {
-    RwLock::new(HashMap::new())
+    let map = HashMap::with_capacity(1024); // 预分配容量，减少重新分配
+    RwLock::new(map)
 });
+
+// 统一的翻转Y矩阵懒加载
+static FLIP_Y_MATRIX: Lazy<Matrix> = Lazy::new(|| {
+    Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0))
+});
+
+// Painter缓存懒加载
+static PAINTER_CACHE: Lazy<Mutex<(RenderPass, Texture, (i32, i32, i32, i32))>> = Lazy::new(|| {
+    let gl = unsafe { get_internal_gl() };
+    let vp = get_viewport();
+
+    let tex = Texture::new_render_texture(
+        gl.quad_context,
+        TextureParams {
+            width: vp.2 as _,
+            height: vp.3 as _,
+            format: TextureFormat::RGBA8,
+            filter: FilterMode::Linear,
+            wrap: TextureWrap::Clamp,
+        },
+    );
+
+    let pass = RenderPass::new(gl.quad_context, tex.clone(), None);
+    Mutex::new((pass, tex, vp))
+});
+
+// 渲染优化常量懒加载
+static RENDER_CONSTANTS: Lazy<RenderConstants> = Lazy::new(|| RenderConstants {
+    duration: 4.03,
+    threshold: 0.2,
+    inv_threshold: 1.0 / 0.2,
+    inv_one_minus_threshold: 1.0 / (1.0 - 0.2),
+    line_width_normal: 0.01,
+    line_width_loading: 0.0075,
+});
+
+// 渲染常量结构体
+struct RenderConstants {
+    duration: f32,
+    threshold: f32,
+    inv_threshold: f32,
+    inv_one_minus_threshold: f32,
+    line_width_normal: f32,
+    line_width_loading: f32,
+}
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -172,33 +217,8 @@ pub struct JudgeLine {
 
 impl Painter {
     pub fn new() -> Self {
-        static CACHE: OnceCell<Mutex<(RenderPass, Texture, (i32, i32, i32, i32))>> = OnceCell::new();
-
         let (pass, tex, vp) = {
-            let mut gl = unsafe { get_internal_gl() };
-            let _vp = get_viewport();
-
-            let cache = CACHE.get_or_init(|| {
-                let mut _gl = unsafe { get_internal_gl() };
-                let vp = get_viewport();
-
-                let tex = Texture::new_render_texture(
-                    gl.quad_context,
-                    TextureParams {
-                        width: vp.2 as _,
-                        height: vp.3 as _,
-                        format: TextureFormat::RGBA8,
-                        filter: FilterMode::Linear,
-                        wrap: TextureWrap::Clamp,
-                    },
-                );
-
-                let pass = RenderPass::new(gl.quad_context, tex.clone(), None);
-
-                Mutex::new((pass, tex, vp))
-            });
-
-            let guard = cache.lock().unwrap();
+            let guard = PAINTER_CACHE.lock().unwrap();
             (guard.0.clone(), guard.1.clone(), guard.2)
         };
 
@@ -214,7 +234,7 @@ impl Painter {
     }
 
     fn paint(&mut self, ui: &mut Ui, size: f32, alpha: f32, mut color: Color) {
-        let mut gl = unsafe { get_internal_gl() };
+        let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
         if let Some(cached_texture) = &self.cached_texture {
             if cached_texture != &self.pass.texture(ctx) {
@@ -331,7 +351,7 @@ impl JudgeLine {
         
         // 从主视角计算世界坐标
         let mut enhanced_notes_data = Vec::with_capacity(self.notes.len());
-        let chart_ratio_inv = 1.0 / res.config.chart_ratio;
+        let chart_ratio_inv = res.chart_ratio_inv; // 使用缓存的值
         let vw = 1.2 * chart_ratio_inv;
         let vh = chart_ratio_inv;
         
@@ -394,9 +414,6 @@ impl JudgeLine {
     }
 
     pub fn render(&self, mut ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
-        //static FLIP_Y_MATRIX: Lazy<Matrix> = Lazy::new(|| {
-        //    Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0))
-        //});
 
         // 早期退出优化：预先计算 alpha
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
@@ -435,27 +452,22 @@ impl JudgeLine {
                             let len = res.info.line_length;
 
                             if res.config.disable_loading {
-                                draw_line(-len, 0., len, 0., 0.01, line_color);
+                                draw_line(-len, 0., len, 0., RENDER_CONSTANTS.line_width_normal, line_color);
                             } else {
-                                // 优化4: 预计算常量
-                                const DURATION: f32 = 4.03;
-                                const THRESHOLD: f32 = 0.2;
-                                const INV_THRESHOLD: f32 = 1.0 / THRESHOLD;
-                                const INV_ONE_MINUS_THRESHOLD: f32 = 1.0 / (1.0 - THRESHOLD);
-
-                                let t_norm = (res.time / DURATION).min(1.0);
+                                // 使用懒加载的渲染常量
+                                let t_norm = (res.time / RENDER_CONSTANTS.duration).min(1.0);
 
                                 // 优化5: 使用 FMA (Fused Multiply-Add) 友好的计算
-                                let exp_factor = if t_norm < THRESHOLD {
-                                    let normalized = t_norm * INV_THRESHOLD;
+                                let exp_factor = if t_norm < RENDER_CONSTANTS.threshold {
+                                    let normalized = t_norm * RENDER_CONSTANTS.inv_threshold;
                                     0.5 * normalized * normalized
                                 } else {
-                                    let normalized = (1.0 - t_norm) * INV_ONE_MINUS_THRESHOLD;
+                                    let normalized = (1.0 - t_norm) * RENDER_CONSTANTS.inv_one_minus_threshold;
                                     0.5 + 0.5 * (1.0 - normalized * normalized)
                                 };
 
                                 let current_len = len * exp_factor;
-                                draw_line(-current_len, 0., current_len, 0., 0.0075, line_color);
+                                draw_line(-current_len, 0., current_len, 0., RENDER_CONSTANTS.line_width_loading, line_color);
                             }
                         }
                         JudgeLineKind::Texture(texture, _) => {
@@ -567,7 +579,7 @@ impl JudgeLine {
 
             // Paint 类型的后处理
             if let JudgeLineKind::Paint(_, state) = &self.kind {
-                let mut gl = unsafe { get_internal_gl() };
+                let gl = unsafe { get_internal_gl() };
                 let ctx = gl.quad_context;
 
                 let guard = state.lock().unwrap();
@@ -576,7 +588,7 @@ impl JudgeLine {
                 if ready {
                     if let Some(pass) = guard.0.as_ref() {
                         let tex = pass.texture(ctx);
-                        let top = 1. / res.aspect_ratio;
+                        let top = res.inv_aspect_ratio; // 使用缓存的值
                         draw_texture_ex(
                             Texture2D::from_miniquad_texture(tex),
                             -1.,
@@ -591,7 +603,6 @@ impl JudgeLine {
                 }
             }
 
-            // 优化7: 减少锁持有时间
             let mut ctrl_obj = self.ctrl_obj.lock().unwrap();
             let line_height = self.height.now();
 
@@ -624,12 +635,10 @@ impl JudgeLine {
                 return;
             }
 
-            // 优化9: 预计算视口边界
-            let chart_ratio_inv = 1.0 / res.config.chart_ratio;
+            let chart_ratio_inv = res.chart_ratio_inv; // 使用缓存的值
             let vw = 1.2 * chart_ratio_inv;
             let vh = chart_ratio_inv;
 
-            // 优化10: 使用 SIMD 友好的数组操作
             let viewport_points = [
                 res.screen_to_world(Point::new(-vw, -vh)),
                 res.screen_to_world(Point::new(-vw, vh)),
@@ -637,14 +646,14 @@ impl JudgeLine {
                 res.screen_to_world(Point::new(vw, vh)),
             ];
 
-            // 优化11: 使用迭代器链和 SIMD 友好的 min/max
+            let inv_aspect_ratio = res.inv_aspect_ratio; // 使用缓存的值
             let height_above = viewport_points.iter()
                 .map(|p| p.y)
-                .fold(f32::NEG_INFINITY, f32::max) * res.aspect_ratio;
+                .fold(f32::NEG_INFINITY, f32::max) * (1.0 / inv_aspect_ratio);
 
             let height_below = viewport_points.iter()
                 .map(|p| p.y)
-                .fold(f32::INFINITY, f32::min) * res.aspect_ratio;
+                .fold(f32::INFINITY, f32::min) * (1.0 / inv_aspect_ratio);
 
             let agg = res.config.aggressive;
             let chart_format_matches = matches!(res.chart_format, ChartFormat::Pgr | ChartFormat::Rpe);
@@ -653,12 +662,9 @@ impl JudgeLine {
             if !note_scale_positive {
                 return;
             }
-
-            // 优化12: 复用 height 对象，减少克隆
             let mut height = self.height.clone();
             let not_plain_count = self.cache.not_plain_count;
 
-            // 优化13: 批量渲染 - 分离条件检查和渲染逻辑
             // 渲染上方音符（普通）
             for note in self.notes[..not_plain_count].iter().filter(|n| n.above) {
                 height.set_time(note.time.min(res.time));
@@ -679,7 +685,6 @@ impl JudgeLine {
                 note.render(res, &mut config, bpm_list);
             }
 
-            // 优化15: 预计算索引范围，减少间接访问
             for &index in &self.cache.above_indices {
                 let speed = self.notes[index].speed;
                 let inv_speed = 1.0 / speed;
@@ -703,11 +708,6 @@ impl JudgeLine {
                     note.render(res, &mut config, bpm_list);
                 }
             }
-
-            // 优化16: 使用静态矩阵避免重复创建
-            static FLIP_Y_MATRIX: Lazy<Matrix> = Lazy::new(|| {
-                Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0))
-            });
 
             res.with_model(*FLIP_Y_MATRIX, |res| {
                 // 渲染下方音符（普通）
@@ -755,10 +755,6 @@ impl JudgeLine {
                 }
             });
             if res.config.chart_debug {
-                static FLIP_Y_MATRIX: Lazy<Matrix> = Lazy::new(|| {
-                    Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0))
-                });
-                
                 let pos = Self::fetch_pos(self, res, lines);
                 let rotation = self.object.rotation.now();
                 let text_alpha = {
