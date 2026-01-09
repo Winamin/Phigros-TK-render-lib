@@ -29,6 +29,7 @@ use lyon::path::Path;
 use macroquad::{prelude::*, window::InternalGlContext};
 use sasa::{Music, MusicParams};
 use serde::{Deserialize, Serialize};
+use wgpu::hal::dx12::AccelerationStructure;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
@@ -300,6 +301,17 @@ pub struct GameScene {
 
     pub target_chart_ratio: f32,  // 目标缩放比例
     pub current_chart_ratio: f32, // 当前缩放比例
+    
+    // Score动画相关字段
+    pub actual_score: u32,      // 实际分数（judge中的真实值，立即更新）
+    pub display_score: u32,     // 显示分数（UI上显示的值，平滑过渡）
+    pub score_animation_speed: f32,
+    pub current_speed: f32,
+
+    //combo 动画相关字段
+    pub combo_pluse_anim: f32,
+    pub combo_pluse_duration: f32,
+    pub last_combo: u32,
 }
 
 macro_rules! reset {
@@ -518,6 +530,16 @@ impl GameScene {
 
             target_chart_ratio,
             current_chart_ratio: 1.0,
+            
+            // 初始化score动画字段
+            actual_score: 0,
+            display_score: 0,
+            score_animation_speed: 5400.0, // 降低动画速度，让效果更明显
+            current_speed: 0.0,
+            // 初始化combo动画字段
+            combo_pluse_anim: 0.0,
+            combo_pluse_duration: 1.7, // 动画持续时间
+            last_combo: 0,
         })
     }
 
@@ -574,7 +596,10 @@ impl GameScene {
                 1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
             }
         };
-        let c = Color::new(1., 1., 1., self.res.alpha);
+        let mut c = Color::new(1., 1., 1., self.res.alpha);
+        // 在Starting状态时，所有UI元素从0透明度渐变到1透明度
+        if matches!(self.state, State::Starting) { c.a *= p; }
+        if matches!(self.state, State::Ending) { c.a *= -p }
         let res = &mut self.res;
         const BASE_ASPECT_RATIO: f32 = 16.0 / 9.0;
         let is_narrow = res.aspect_ratio < 1.5;  // 1.5 ≈ 3:2，4:3 .1.333
@@ -600,7 +625,7 @@ impl GameScene {
         }
 
         //score
-        let score = format!("{:07}", self.judge.score());
+        let score = format!("{:07}", self.display_score);
         let margin = 0.046;
         let mut score_top = top + eps * 2.2 - (1. - p) * 0.4;
         let mut score_y_offset = 0.07; // default
@@ -673,7 +698,7 @@ impl GameScene {
                     text_size *= max_width / text_width
                 }
                 drop(text);
-                ui.text(format!("{:07}", self.judge.score()))
+                ui.text(format!("{:07}", self.display_score))
                     .pos(1. - margin + 0.001, adjusted_score_y)
                     .anchor(1., 0.)
                     .size(text_size)
@@ -706,8 +731,13 @@ impl GameScene {
         let unit_h = ui.text("0").measure().h;
         if res.config.ui_combo {
             if self.judge.combo() >= 3 {
+                let pluse_scale = if self.combo_pluse_anim > 0.0 {
+                    1.0 + 0.3 * (self.combo_pluse_anim / self.combo_pluse_duration).sin()
+                } else {
+                    1.0
+                };
                 let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
-                    let mut text_size = 1. * scale_4_3;
+                    let mut text_size = 1. * scale_4_3 * pluse_scale;
                     let max_width = 0.55;
                     let mut text = ui.text(&res.config.combo)
                         .pos(0., combo_top)
@@ -1307,9 +1337,21 @@ impl Scene for GameScene {
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
         self.res.audio.recover_if_needed()?;
         let current_time = tm.now();
+        let delta_time = tm.delta_time() as f32;
         for counter in self.judgement_counters.iter_mut() {
             counter.update_alpha_anim(current_time);
         }
+        if self.combo_pluse_anim > 0.0 {
+            self.combo_pluse_anim = (
+                self.combo_pluse_anim - delta_time / self.combo_pluse_duration.max(0.0)
+
+            );
+        }
+        let current_combo = self.judge.combo();
+        if current_combo > self.last_combo && current_combo >= 3 {
+            self.combo_pluse_anim = 0.5
+        }
+        self.last_combo = current_combo;
         let time = tm.now() as f32;
         let p = match self.state {
             State::Starting => {
@@ -1379,6 +1421,8 @@ impl Scene for GameScene {
                     tm.now() as f32
                 } else {
                     self.res.alpha = 1. - (1. - time / Self::BEFORE_TIME).powi(3);
+                    self.actual_score = self.judge.score();
+                    self.display_score = self.actual_score;
                     if self.mode == GameMode::Exercise {
                         self.exercise_range.start
                     } else {
@@ -1475,9 +1519,37 @@ impl Scene for GameScene {
             self.gl.quad_gl.viewport(None);
         }
 
+        // 更新实际分数（从 judge 获取最新分数）
+        self.actual_score = self.judge.score();
+
         self.process_judgements(tm);
 
         let dt = 0.016_f32;
+
+        if self.display_score != self.actual_score {
+            let diff = (self.actual_score as i32 - self.display_score as i32) as f32;
+
+            let acceleration = self.score_animation_speed * diff.signum();
+            self.current_speed += acceleration * dt;
+
+            self.current_speed *= 0.9f32.powf(dt);
+
+            let max_speed = 12320.0;
+            let acceleration = 100.0;
+            let time = 10.0; // seconds to reach max speed
+            let mut speed_limit = acceleration * time * time;
+            if speed_limit < max_speed { speed_limit = max_speed; }
+            self.current_speed = self.current_speed.clamp(-max_speed, max_speed);
+
+            let step_f = self.current_speed * dt;
+            let step = step_f.abs().ceil() as u32;
+
+            if diff > 0.0 {
+                self.display_score = (self.display_score + step).min(self.actual_score);
+            } else {
+                self.display_score = self.display_score.saturating_sub(step);
+            }
+        }
         {
             // 先排序，获得目标位置
             let chart_ratio = self.current_chart_ratio;

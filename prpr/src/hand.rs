@@ -290,6 +290,7 @@ pub fn assign_hands(notes: &mut [Note], config: &Config, line_id: usize, rotatio
     if notes.is_empty() {
         return;
     }
+    if! config.hand_split { return; } //TODO：GPU显存分配异常
 
     start_ai_worker_if_needed(config);
 
