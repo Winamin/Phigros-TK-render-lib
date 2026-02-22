@@ -634,10 +634,6 @@ impl Emitter {
     fn update(&mut self, ctx: &mut Context, dt: f32) {
         self.active_particles = self.cpu_counterpart.len();
 
-        if self.config.emitting {
-
-        }
-
         if self.mesh_dirty {
             self.bindings = self
                 .config

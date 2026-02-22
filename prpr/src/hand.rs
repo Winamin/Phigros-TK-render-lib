@@ -1332,6 +1332,7 @@ impl DeepNeuralNetwork {
 
         let instance_desc = wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::DX12 | wgpu::Backends::METAL,
+            // backends: wgpu::Backends:: PRIMARY,
             ..Default::default()
         };
         let instance = wgpu::Instance::new(&instance_desc);

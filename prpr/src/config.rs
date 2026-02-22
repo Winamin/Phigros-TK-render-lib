@@ -81,6 +81,9 @@ pub struct Config {
     pub volume_bgm: f32,
     pub hand_split: bool,
     pub note_speed_factor: f32,
+    pub bar: bool,
+    pub combo_anim: bool,
+    pub emitting: bool,
 
     // for compatibility
     pub autoplay: Option<bool>,
@@ -141,6 +144,9 @@ impl Default for Config {
             show_time_text: false,
             hand_split: false,
             note_speed_factor: 1.0,
+            bar: true,
+            combo_anim: false,
+            emitting: false,
 
             ui_score: true,
             ui_combo: true,

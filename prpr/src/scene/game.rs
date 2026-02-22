@@ -9,7 +9,7 @@ use super::{
     request_input, return_input, show_message, take_input, EndingScene, NextScene, Scene,
 };
 use crate::core::NoteKind;
-use crate::judge::JudgeStatus;
+use crate::judge::{JudgeStatus, Judgement};
 use crate::{
     bin::{BinaryReader, BinaryWriter},
     config::{Config, Mods},
@@ -29,7 +29,6 @@ use lyon::path::Path;
 use macroquad::{prelude::*, window::InternalGlContext};
 use sasa::{Music, MusicParams};
 use serde::{Deserialize, Serialize};
-use wgpu::hal::dx12::AccelerationStructure;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
@@ -44,6 +43,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tracing::{debug, warn};
+use wgpu::hal::dx12::AccelerationStructure;
 
 const PAUSE_CLICK_INTERVAL: f32 = 0.7;
 
@@ -142,6 +142,23 @@ struct JudgementCounter {
     alpha_anim_duration: f32,
 }
 
+// 判定条，显示全局判定偏移
+#[derive(Clone)]
+struct JudgementBar {
+    diffs: Vec<f32>,         // 存储最近的判定偏移（毫秒）
+    max_diffs: usize,        // 最大存储数量
+    current_avg: f32,        // 当前平均偏移
+    target_avg: f32,         // 目标平均偏移（用于动画）
+    bar_width: f32,          // 条的宽度
+    bar_height: f32,         // 条的高度
+    bar_y: f32,              // 条的垂直位置
+    max_ms: f32,             // 最大显示毫秒数（±）
+
+    // 判定历史记录（用于显示垂直白条）
+    history: Vec<(f32, f64)>, // (偏移毫秒, 创建时间)
+    history_duration: f64,    // 历史记录显示持续时间（秒）
+}
+
 impl JudgementCounter {
     fn new(note_type: NoteType, chart_ratio: f32, initial_y: f32) -> Self {
         let color = match note_type {
@@ -236,9 +253,9 @@ impl JudgementCounter {
     fn display_text(&self) -> String {
         let type_str = match self.note_type {
             NoteType::Click => "Tap",
-            NoteType::Drag  => "Drag",
+            NoteType::Drag => "Drag",
             NoteType::Flick => "Flick",
-            NoteType::Hold  => "Hold",
+            NoteType::Hold => "Hold",
         };
         if self.multiplier > 1 {
             //format!("X{} {}:{} [{:.2}s]", self.multiplier, type_str, self.count, self.interval)
@@ -258,6 +275,59 @@ impl JudgementCounter {
         self.alpha_anim_start = 0.0;
         self.alpha_anim_duration = 0.0;
         self.alpha_anim_phase = 0;
+    }
+}
+
+impl JudgementBar {
+    fn new() -> Self {
+        Self {
+            diffs: Vec::new(),
+            max_diffs: 20,           // 保存最近20次判定
+            current_avg: 0.0,
+            target_avg: 0.0,
+            bar_width: 0.6,
+            bar_height: 0.04,
+            bar_y: 0.85,
+            max_ms: 100.0,           // ±100ms 范围
+
+            history: Vec::new(),
+            history_duration: 0.2,   // 0.2秒后消失
+        }
+    }
+
+    fn add_diff(&mut self, diff_ms: f32, current_time: f64) {
+        self.diffs.push(diff_ms);
+        if self.diffs.len() > self.max_diffs {
+            self.diffs.remove(0);
+        }
+        self.update_target();
+
+        // 添加到历史记录
+        self.history.push((diff_ms, current_time));
+    }
+
+    fn update_target(&mut self) {
+        if self.diffs.is_empty() {
+            self.target_avg = 0.0;
+        } else {
+            self.target_avg = self.diffs.iter().sum::<f32>() / self.diffs.len() as f32;
+        }
+    }
+
+    fn update(&mut self, dt: f32, current_time: f64) {
+        // 平滑动画到目标值
+        let diff = self.target_avg - self.current_avg;
+        self.current_avg += diff * dt * 10.0;
+
+        // 清理过期的历史记录
+        self.history.retain(|(_, time)| current_time - *time < self.history_duration);
+    }
+
+    fn reset(&mut self) {
+        self.diffs.clear();
+        self.current_avg = 0.0;
+        self.target_avg = 0.0;
+        self.history.clear();
     }
 }
 
@@ -301,7 +371,7 @@ pub struct GameScene {
 
     pub target_chart_ratio: f32,  // 目标缩放比例
     pub current_chart_ratio: f32, // 当前缩放比例
-    
+
     // Score动画相关字段
     pub actual_score: u32,      // 实际分数（judge中的真实值，立即更新）
     pub display_score: u32,     // 显示分数（UI上显示的值，平滑过渡）
@@ -312,6 +382,9 @@ pub struct GameScene {
     pub combo_pluse_anim: f32,
     pub combo_pluse_duration: f32,
     pub last_combo: u32,
+
+    // 判定条相关字段
+    pub judgement_bar: JudgementBar,
 }
 
 macro_rules! reset {
@@ -328,6 +401,7 @@ macro_rules! reset {
         for counter in $self.judgement_counters.iter_mut() {
             counter.reset($res.config.chart_ratio, 0.0);
         }
+        $self.judgement_bar.reset();
         $self.state = State::Starting;
     }};
 }
@@ -343,6 +417,7 @@ macro_rules! reset_speed {
         $tm.speed = $res.config.speed as _;
         $tm.reset();
         $self.last_update_time = $tm.now();
+        $self.judgement_bar.reset();
         $self.state = State::Starting;
     }};
 }
@@ -431,6 +506,120 @@ impl GameScene {
                 .draw();
         }
     }
+
+        ///你说为什么要加一个判断状态呢 -> 太闲导致的
+        fn draw_judgement_bar(&self, ui: &mut Ui, tm: &TimeManager) {
+            if !self.res.config.bar {
+                return;
+            }
+            let bar = &self.judgement_bar;
+            // 使用屏幕坐标（-1 到 1），位置与名字同一行
+            let center_x = 0.0;
+            let top = -1. / self.res.aspect_ratio;
+            let eps = 2e-2 / self.res.aspect_ratio;
+            let center_y = -top - eps * 3.64;  // 与名字同一行（bt）
+            let half_width = 0.5;
+            let half_height = 0.02;
+
+            // 如果没有数据，显示空状态的判定条
+            let show_empty = bar.diffs.is_empty();
+            // 计算滑块位置（基于平均偏移）
+            let avg = if show_empty { 0.0 } else { bar.current_avg };
+            let slider_offset = (avg / bar.max_ms).clamp(-1.0, 1.0) * half_width;
+            let slider_x = center_x + slider_offset;
+            // 绘制背景条（灰色）
+            let bg_color = Color::new(0.3, 0.3, 0.3, 0.8 * self.res.alpha);
+            ui.fill_rect(
+                Rect::new(center_x - half_width, center_y - half_height, bar.bar_width, bar.bar_height),
+                bg_color,
+            );
+            // 绘制中心线（白色，表示完美判定）
+            let center_line_color = Color::new(1.0, 1.0, 1.0, 0.9 * self.res.alpha);
+            ui.fill_rect(
+                Rect::new(center_x - 0.002, center_y - half_height - 0.005, 0.004, bar.bar_height + 0.01),
+                center_line_color,
+            );
+            for i in -5..=5 {
+                if i == 0 {
+                    continue;
+                }
+                let tick_x = center_x + (i as f32 / 5.0) * half_width;
+                let tick_color = Color::new(0.6, 0.6, 0.6, 0.6 * self.res.alpha);
+                ui.fill_rect(
+                    Rect::new(tick_x - 0.001, center_y - half_height - 0.003, 0.002, bar.bar_height + 0.006),
+                    tick_color,
+                );
+                // 显示刻度数值
+                let ms = i32::abs(i * 20);
+                let text_color = Color::new(0.7, 0.7, 0.7, 0.7 * self.res.alpha);
+                ui.text(&format!("{}ms", ms))
+                    .pos(tick_x, center_y + half_height + 0.02)
+                    .anchor(0.5, 0.0)
+                    .size(0.15 / self.current_chart_ratio)
+                    .color(text_color)
+                    .draw();
+            }
+            // 绘制滑块（根据平均偏移颜色变化）
+            let slider_color = if show_empty || avg.abs() < 10.0 {
+                Color::new(0.0, 1.0, 0.5, 1.0)  // 绿色：接近完美
+            } else if avg.abs() < 30.0 {
+                Color::new(0.0, 0.8, 1.0, 1.0)  // 蓝色：Good 范围
+            } else if avg.abs() < 50.0 {
+                Color::new(1.0, 0.5, 0.0, 1.0)  // 橙色：Bad 范围
+            } else {
+                Color::new(1.0, 0.0, 0.0, 1.0)  // 红色：Miss 范围
+            };
+            let slider_color = Color::new(slider_color.r, slider_color.g, slider_color.b, slider_color.a * self.res.alpha);
+
+            ui.fill_rect(
+                Rect::new(slider_x - 0.015, center_y - half_height - 0.01, 0.03, bar.bar_height + 0.02),
+                slider_color,
+            );
+            // 显示当前平均偏移值
+            let avg_text = if show_empty {
+                "0.0ms".to_string()
+            } else if avg >= 0.0 {
+                format!("+{:.1}ms", avg)
+            } else {
+                format!("{:.1}ms", avg)
+            };
+            let avg_color = if show_empty || avg.abs() < 10.0 {
+                Color::new(0.0, 1.0, 0.5, 1.0)
+            } else if avg < 0.0 {
+                Color::new(1.0, 0.5, 0.0, 1.0)  // 早：橙色
+            } else {
+                Color::new(0.0, 0.8, 1.0, 1.0)  // 晚：蓝色
+            };
+
+            let avg_color = Color::new(avg_color.r, avg_color.g, avg_color.b, avg_color.a * self.res.alpha);
+            ui.text(&avg_text)
+                .pos(slider_x, center_y - half_height - 0.03)
+                .anchor(0.5, 1.0)
+                .size(0.2 / self.current_chart_ratio)
+                .color(avg_color)
+                .draw();
+            // 绘制历史记录（垂直白条）
+            for &(diff_ms, time) in &bar.history {
+                // 计算透明度（基于剩余时间）
+                let elapsed = tm.now() - time;
+                let progress = ((elapsed / bar.history_duration) as f32).min(1.0);
+                let alpha = 1.0 - progress;
+
+                if alpha <= 0.01 {
+                    continue;
+                }
+                // 计算位置
+                let history_offset = (diff_ms / bar.max_ms).clamp(-1.0, 1.0) * half_width;
+                let history_x = center_x + history_offset;
+                // 绘制垂直白条
+                let history_color = Color::new(1.0, 1.0, 1.0, alpha * 0.8 * self.res.alpha);
+                let history_height = half_height * 2.0 * (1.0 - progress * 0.5);  // 随时间缩小
+                ui.fill_rect(
+                    Rect::new(history_x - 0.003, center_y - history_height / 2.0, 0.006, history_height),
+                    history_color,
+                );
+            }
+        }
 
     pub async fn new(
         mode: GameMode,
@@ -530,16 +719,20 @@ impl GameScene {
 
             target_chart_ratio,
             current_chart_ratio: 1.0,
-            
+
             // 初始化score动画字段
             actual_score: 0,
             display_score: 0,
-            score_animation_speed: 5400.0, // 降低动画速度，让效果更明显
+            //TODO: 暂定动画速度 -> Score
+            score_animation_speed: 4800.0,
             current_speed: 0.0,
             // 初始化combo动画字段
             combo_pluse_anim: 0.0,
             combo_pluse_duration: 1.7, // 动画持续时间
             last_combo: 0,
+
+            // 初始化判定条
+            judgement_bar: JudgementBar::new(),
         })
     }
 
@@ -603,7 +796,7 @@ impl GameScene {
         let res = &mut self.res;
         const BASE_ASPECT_RATIO: f32 = 16.0 / 9.0;
         let is_narrow = res.aspect_ratio < 1.5;  // 1.5 ≈ 3:2，4:3 .1.333
-        let is_4_3 = (res.aspect_ratio - 4.0/3.0).abs() < 0.01;
+        let is_4_3 = (res.aspect_ratio - 4.0 / 3.0).abs() < 0.01;
 
         let scale_4_3 = if is_4_3 { 1.245 } else { 1.0 };
         let combo_offset_4_3 = if is_4_3 { 0.012 } else { 0.0 };
@@ -883,6 +1076,7 @@ impl GameScene {
             }
         });
         self.draw_judgement_counters(ui, tm, score_top, 2.3);
+        GameScene::draw_judgement_bar(self, ui, tm);
         Ok(())
     }
 
@@ -1133,15 +1327,26 @@ impl GameScene {
     }
 
     fn process_judgements(&mut self, tm: &TimeManager) {
-        if !self.res.config.chart_debug {
-            return;
-        }
         let combo_threshold = 0.02;
         let flash_threshold = 1.8; // 1.8秒内再次触发执行闪烁动画
-
         let mut judgements = self.judge.judgements.borrow_mut();
         judgements.sort_by(|(t1, _, _, _), (t2, _, _, _)| t1.partial_cmp(t2).unwrap());
-
+        for &(t, line_id, note_id, result) in judgements.iter() {
+            if let Some(line) = self.chart.lines.get(line_id as usize) {
+                if let Some(note) = line.notes.get(note_id as usize) {
+                    if !matches!(note.kind, NoteKind::Hold { .. }) {
+                        if let Ok(judgement) = result {
+                            let diff_ms = (t - note.time) * 1000.0 / self.res.config.speed;
+                            self.judgement_bar.add_diff(diff_ms, tm.now());
+                        }
+                    }
+                }
+            }
+        }
+        if !self.res.config.chart_debug {
+            judgements.clear();
+            return;
+        }
         let note_types = [
             NoteType::Click,
             NoteType::Drag,
@@ -1337,15 +1542,17 @@ impl Scene for GameScene {
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
         self.res.audio.recover_if_needed()?;
         let current_time = tm.now();
+        let combo_anim = self.res.config.combo_anim;
         let delta_time = tm.delta_time() as f32;
         for counter in self.judgement_counters.iter_mut() {
             counter.update_alpha_anim(current_time);
         }
-        if self.combo_pluse_anim > 0.0 {
-            self.combo_pluse_anim = (
-                self.combo_pluse_anim - delta_time / self.combo_pluse_duration.max(0.0)
-
-            );
+        if combo_anim {
+            if self.combo_pluse_anim > 0.0 {
+                self.combo_pluse_anim = (
+                    self.combo_pluse_anim - delta_time / self.combo_pluse_duration.max(0.0)
+                );
+            }
         }
         let current_combo = self.judge.combo();
         if current_combo > self.last_combo && current_combo >= 3 {
@@ -1523,6 +1730,10 @@ impl Scene for GameScene {
         self.actual_score = self.judge.score();
 
         self.process_judgements(tm);
+
+        // 更新判定条
+        let dt = 0.016_f32;
+        self.judgement_bar.update(dt, tm.now());
 
         let dt = 0.016_f32;
 
@@ -1703,11 +1914,11 @@ impl Scene for GameScene {
                 -h,
                 (1. - x_range * 2.) * 2.,
                 h * 2.,
-                Color::new(0., 0., 0., res.alpha * res.info.background_dim)
+                Color::new(0., 0., 0., res.alpha * res.info.background_dim),
             );
         }
 
-        set_camera( &Camera2D {
+        set_camera(&Camera2D {
             zoom: vec2_asp,
             viewport: chart_target_vp,
             ..Default::default()
@@ -1717,7 +1928,7 @@ impl Scene for GameScene {
         draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
         self.chart.render(ui, res);
 
-        set_camera( &Camera2D {
+        set_camera(&Camera2D {
             zoom: vec2_asp,
             viewport: chart_target_vp,
             ..Default::default()
@@ -1736,7 +1947,9 @@ impl Scene for GameScene {
         if res.config.particle {
             res.emitter.draw(dt);
         }
-
+        drop(res);
+        let res = &mut self.res;
+        // 特效zoom
         if !res.no_effect {
             set_camera(&Camera2D {
                 zoom: vec2(1., asp2),
