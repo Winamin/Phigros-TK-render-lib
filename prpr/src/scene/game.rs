@@ -678,6 +678,22 @@ impl GameScene {
         ];
         let target_chart_ratio = config.chart_ratio;
 
+        // 动态计算分数动画速度，基于谱面信息
+        // 音符总数
+        let num_of_notes: u32 = chart.lines.iter()
+            .map(|line| line.notes.iter().filter(|note| !note.fake).count() as u32)
+            .sum();
+        // 谱面时长（秒）
+        let track_length = res.track_length;
+        // 基础速度：每秒处理基础分数量，与音符密度相关
+        // 音符密度 = num_of_notes / track_length
+        // 期望每个音符的分数动画在合理时间内完成
+        let base_score_per_note = 1_000_000.0 / num_of_notes.max(1) as f32;
+        let note_density = num_of_notes as f32 / track_length.max(1.0);
+        // 速度 = 基础分/音符 * 音符密度 * 系数
+        // 高密度谱面需要更快的处理速度
+        let score_animation_speed = base_score_per_note * note_density * 2.0;
+
         Ok(Self {
             should_exit: false,
             next_scene: None,
@@ -723,8 +739,8 @@ impl GameScene {
             // 初始化score动画字段
             actual_score: 0,
             display_score: 0,
-            //TODO: 暂定动画速度 -> Score
-            score_animation_speed: 4800.0,
+            // 动态计算的动画速度
+            score_animation_speed,
             current_speed: 0.0,
             // 初始化combo动画字段
             combo_pluse_anim: 0.0,
@@ -798,7 +814,8 @@ impl GameScene {
         let is_narrow = res.aspect_ratio < 1.5;  // 1.5 ≈ 3:2，4:3 .1.333
         let is_4_3 = (res.aspect_ratio - 4.0 / 3.0).abs() < 0.01;
 
-        let scale_4_3 = if is_4_3 { 1.245 } else { 1.0 };
+        let scale_4_3 = if is_4_3 { 1.230 } else { 1.0 };
+        let combo_text_1 = if is_4_3 { 1.180 } else { 0.94 };
         let combo_offset_4_3 = if is_4_3 { 0.012 } else { 0.0 };
 
         let eps = 2e-2 / res.aspect_ratio;
@@ -930,7 +947,7 @@ impl GameScene {
                     1.0
                 };
                 let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
-                    let mut text_size = 1. * scale_4_3 * pluse_scale;
+                    let mut text_size = 1. * combo_text_1 * pluse_scale;
                     let max_width = 0.55;
                     let mut text = ui.text(&res.config.combo)
                         .pos(0., combo_top)
@@ -1739,20 +1756,23 @@ impl Scene for GameScene {
 
         if self.display_score != self.actual_score {
             let diff = (self.actual_score as i32 - self.display_score as i32) as f32;
+            let base_speed = self.score_animation_speed;
+            let diff_magnitude = diff.abs();
+            
+            // 纯指数增长：速度 = base * e^(diff / k)
+            // k 控制增长速率，差值每增加 k，速度翻 e 倍
+            let k = base_speed;  // 使用 base_speed 作为缩放因子
+            let exp_multiplier = (diff_magnitude / k).exp();
+            
+            let target_speed = base_speed * exp_multiplier;
+            
+            // 平滑过渡到目标速度
+            let speed_diff = target_speed - self.current_speed.abs();
+            self.current_speed += speed_diff.signum() * speed_diff.abs() * dt * 5.0;
+            // 最小速度为 base_speed，最大速度无硬编码限制
+            self.current_speed = self.current_speed.max(base_speed);
 
-            let acceleration = self.score_animation_speed * diff.signum();
-            self.current_speed += acceleration * dt;
-
-            self.current_speed *= 0.9f32.powf(dt);
-
-            let max_speed = 12320.0;
-            let acceleration = 100.0;
-            let time = 10.0; // seconds to reach max speed
-            let mut speed_limit = acceleration * time * time;
-            if speed_limit < max_speed { speed_limit = max_speed; }
-            self.current_speed = self.current_speed.clamp(-max_speed, max_speed);
-
-            let step_f = self.current_speed * dt;
+            let step_f = self.current_speed * dt * diff.signum();
             let step = step_f.abs().ceil() as u32;
 
             if diff > 0.0 {
@@ -1760,7 +1780,11 @@ impl Scene for GameScene {
             } else {
                 self.display_score = self.display_score.saturating_sub(step);
             }
+        } else {
+            // 差值为0时，重置速度
+            self.current_speed = 0.0;
         }
+
         {
             // 先排序，获得目标位置
             let chart_ratio = self.current_chart_ratio;
