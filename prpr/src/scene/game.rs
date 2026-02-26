@@ -43,7 +43,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tracing::{debug, warn};
-use wgpu::hal::dx12::AccelerationStructure;
 
 const PAUSE_CLICK_INTERVAL: f32 = 0.7;
 
