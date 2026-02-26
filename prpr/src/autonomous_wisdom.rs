@@ -1,3 +1,4 @@
+/// Pending projects
 use crate::hand_model::{ErgonomicHandSystem, Vector2};
 use crate::core::{Note, note::Hand};
 use crate::config::Config;
@@ -25,11 +26,11 @@ pub struct ConsciousnessCore {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Hash, PartialEq)]
 pub enum ConsciousnessState {
-    Exploring,    // 探索模式
-    Learning,     // 学习模式
-    Optimizing,   // 优化模式
-    Creating,     // 创造模式
-    Reflecting,   // 反思模式
+    Exploring,
+    Learning,
+    Optimizing,
+    Creating,
+    Reflecting,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
