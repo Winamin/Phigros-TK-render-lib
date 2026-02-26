@@ -810,12 +810,14 @@ impl GameScene {
         if matches!(self.state, State::Starting) { c.a *= p; }
         if matches!(self.state, State::Ending) { c.a *= -p }
         let res = &mut self.res;
+        /// 4：3
         const BASE_ASPECT_RATIO: f32 = 16.0 / 9.0;
         let is_narrow = res.aspect_ratio < 1.5;  // 1.5 ≈ 3:2，4:3 .1.333
         let is_4_3 = (res.aspect_ratio - 4.0 / 3.0).abs() < 0.01;
 
         let scale_4_3 = if is_4_3 { 1.230 } else { 1.0 };
-        let combo_text_1 = if is_4_3 { 1.180 } else { 0.94 };
+        let combo_text_1 = if is_4_3 { 1.120 } else { 0.959191 }; // 看什么看，没见过乱调吗,jpg
+
         let combo_offset_4_3 = if is_4_3 { 0.012 } else { 0.0 };
 
         let eps = 2e-2 / res.aspect_ratio;
@@ -947,7 +949,7 @@ impl GameScene {
                     1.0
                 };
                 let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, Some((0., combo_top + unit_h / 2.)), Some((0., combo_top + unit_h / 2.)), |ui, color| {
-                    let mut text_size = 1. * combo_text_1 * pluse_scale;
+                    let mut text_size = 0.98 * combo_text_1 * pluse_scale;
                     let max_width = 0.55;
                     let mut text = ui.text(&res.config.combo)
                         .pos(0., combo_top)
