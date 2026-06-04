@@ -28,6 +28,8 @@ pub struct Chart {
     pub extra: ChartExtra,
     pub order: Vec<usize>,
     pub attach_ui: [Option<usize>; 7],
+    world_positions: Vec<Vector>,
+    trs: Vec<Matrix>,
 }
 
 impl Chart {
@@ -44,6 +46,7 @@ impl Chart {
             })
             .collect::<Vec<_>>();
         order.sort_by_key(|it| (lines[*it].z_index, *it));
+        let capacity = lines.len();
         Self {
             offset,
             lines,
@@ -53,6 +56,8 @@ impl Chart {
 
             order,
             attach_ui,
+            world_positions: Vec::with_capacity(capacity),
+            trs: Vec::with_capacity(capacity),
         }
     }
 
@@ -117,23 +122,25 @@ impl Chart {
             line.object.set_time(res.time);
         }
 
-        let world_positions: Vec<Vector> = (0..self.lines.len())
-            .map(|i| JudgeLine::fetch_pos(&self.lines[i], res, &self.lines))
-            .collect();
+        let count = self.lines.len();
+        self.world_positions.clear();
+        self.trs.clear();
+        for i in 0..count {
+            let pos = JudgeLine::fetch_pos(&self.lines[i], res, &self.lines);
+            self.world_positions.push(pos);
+            self.lines[i].cached_world_pos = Some(pos);
+            self.trs.push(self.lines[i].now_transform_with_pos(pos));
+        }
 
-        let trs: Vec<Matrix> = self.lines
-            .iter()
-            .map(|line| line.now_transform(res, &self.lines))
-            .collect();
-
-        let mut guard = self.bpm_list.borrow_mut();
-        for (index, (line, tr)) in self.lines.iter_mut().zip(trs).enumerate() {
-            line.update(res, tr, &mut guard, index);
+        let guard = self.bpm_list.borrow();
+        for (index, line) in self.lines.iter_mut().enumerate() {
+            line.update(res, self.trs[index], &guard, index);
 
             if res.config.hand_split {
-                line.update_hand_assign_with_world_pos(res, world_positions[index], &mut guard, index);
+                line.update_hand_assign_with_world_pos(res, self.world_positions[index], &guard, index);
             }
         }
+        self.trs.clear();
         drop(guard);
 
         for effect in &mut self.extra.effects {
@@ -153,9 +160,9 @@ impl Chart {
             }
         });
         res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(if res.config.flip_x() { -1. } else { 1. }, -1.)), |res| {
-            let mut guard = self.bpm_list.borrow_mut();
+            let guard = self.bpm_list.borrow();
             for id in &self.order {
-                self.lines[*id].render(ui, res, &self.lines, &mut guard, &self.settings, *id);
+                self.lines[*id].render(ui, res, &self.lines, &guard, &self.settings, *id);
             }
             drop(guard);
             res.note_buffer.borrow_mut().draw_all();

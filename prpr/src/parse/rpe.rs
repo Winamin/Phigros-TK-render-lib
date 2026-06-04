@@ -21,6 +21,8 @@ use crate::core::note::Hand;
 use crate::hand::assign_hands;
 use crate::config::Config;
 use std::sync::{Arc, Mutex};
+use std::rc::Rc;
+use std::cell::RefCell;
 
 // 智能手部分配函数
 fn smart_assign_hand(
@@ -556,7 +558,7 @@ async fn parse_judge_line(
                     .unwrap_or_default()
             },
         },
-        ctrl_obj: Arc::new(Mutex::new(CtrlObject {
+        ctrl_obj: Rc::new(RefCell::new(CtrlObject {
             alpha: parse_ctrl_events(&rpe.alpha_control, "alpha"),
             size: parse_ctrl_events(&rpe.size_control, "size"),
             pos: parse_ctrl_events(&rpe.pos_control, "pos"),
@@ -636,6 +638,7 @@ async fn parse_judge_line(
         show_below: rpe.is_cover != 1,
         attach_ui: rpe.attach_ui,
         cache,
+        cached_world_pos: None,
     })
 }
 

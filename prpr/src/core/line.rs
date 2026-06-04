@@ -1,4 +1,4 @@
-use super::{chart::ChartSettings, object::CtrlObject, Anim, AnimFloat, BpmList, Matrix, Note, Object, Point, RenderConfig, Resource, Vector};
+use super::{chart::ChartSettings, object::CtrlObject, Anim, AnimFloat, BpmList, Matrix, Note, Object, Point, RenderConfig, Resource, Tweenable, Vector};
 use crate::{
     config::Mods,
     ext::{draw_text_aligned, get_viewport, NotNanExt, SafeTexture},
@@ -11,10 +11,70 @@ use macroquad::prelude::*;
 use macroquad::miniquad::{RenderPass, Texture, TextureParams, TextureWrap, FilterMode, TextureFormat};
 use nalgebra::Rotation2;
 use serde::Deserialize;
-use std::sync::{Mutex, Arc, RwLock};
-use once_cell::sync::Lazy;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, RwLock};
+use once_cell::sync::Lazy;
 //use crate::config::Config;
+
+// Thread-local buffers for hand assignment - avoids per-frame Vec allocations
+thread_local! {
+    static ENHANCED_NOTES_BUFFER: RefCell<Vec<(Vector, Vector)>> = RefCell::new(Vec::with_capacity(256));
+    static AI_NOTES_BUFFER: RefCell<Vec<crate::core::Note>> = RefCell::new(Vec::with_capacity(256));
+}
+
+/// A lightweight view into an `AnimFloat` that avoids cloning.
+/// Tracks time and cursor locally while borrowing the keyframes.
+struct AnimFloatView<'a> {
+    anim: &'a AnimFloat,
+    time: f32,
+    cursor: usize,
+}
+
+impl<'a> AnimFloatView<'a> {
+    fn new(anim: &'a AnimFloat) -> Self {
+        Self { anim, time: 0.0, cursor: 0 }
+    }
+
+    fn set_time(&mut self, time: f32) {
+        if self.anim.keyframes.is_empty() || time == self.time {
+            self.time = time;
+            return;
+        }
+        while let Some(kf) = self.anim.keyframes.get(self.cursor + 1) {
+            if kf.time > time {
+                break;
+            }
+            self.cursor += 1;
+        }
+        while self.cursor != 0 && self.anim.keyframes[self.cursor].time > time {
+            self.cursor -= 1;
+        }
+        self.time = time;
+    }
+
+    fn now(&self) -> f32 {
+        if self.anim.keyframes.is_empty() {
+            return 0.0;
+        }
+        let value = if self.cursor == self.anim.keyframes.len() - 1 {
+            self.anim.keyframes[self.cursor].value
+        } else {
+            let kf1 = &self.anim.keyframes[self.cursor];
+            let kf2 = &self.anim.keyframes[self.cursor + 1];
+            let t = (self.time - kf1.time) / (kf2.time - kf1.time);
+            f32::tween(&kf1.value, &kf2.value, kf1.tween.y(t))
+        };
+        // Handle next chain - for simplicity, assume single anim (no next)
+        // If next is needed, fall back to original behavior
+        if self.anim.next.is_some() {
+            self.anim.now_opt().unwrap_or(0.0)
+        } else {
+            value
+        }
+    }
+}
 
 // 优化的纹理缓存懒加载
 static TEXTURE_CACHE: Lazy<RwLock<HashMap<usize, Texture2D>>> = Lazy::new(|| {
@@ -55,6 +115,11 @@ static RENDER_CONSTANTS: Lazy<RenderConstants> = Lazy::new(|| RenderConstants {
     inv_one_minus_threshold: 1.0 / (1.0 - 0.2),
     line_width_normal: 0.01,
     line_width_loading: 0.0075,
+});
+
+// 视口角点世界坐标缓存 (viewport, [top-left, bottom-left, top-right, bottom-right])
+static VIEWPORT_CACHE: Lazy<Mutex<(Option<(i32, i32, i32, i32)>, Option<[Point; 4]>)>> = Lazy::new(|| {
+    Mutex::new((None, None))
 });
 
 // 渲染常量结构体
@@ -190,6 +255,8 @@ impl GifFrames {
     }
 
     pub fn get_prog_frame(&self, prog: f32) -> &SafeTexture {
+        // TODO: For large frame counts (>30), consider using binary search (slice::binary_search_by)
+        // instead of linear scan to improve performance.
         let time = (prog * self.total_time as f32) as u128;
         self.get_time_frame(time)
     }
@@ -201,7 +268,7 @@ impl GifFrames {
 
 pub struct JudgeLine {
     pub object: Object,
-    pub ctrl_obj: Arc<Mutex<CtrlObject>>,
+    pub ctrl_obj: Rc<RefCell<CtrlObject>>,
     pub kind: JudgeLineKind,
     pub height: AnimFloat,
     pub incline: AnimFloat,
@@ -213,6 +280,7 @@ pub struct JudgeLine {
     pub attach_ui: Option<UIElement>,
 
     pub cache: JudgeLineCache,
+    pub cached_world_pos: Option<Vector>,
 }
 
 impl Painter {
@@ -236,15 +304,13 @@ impl Painter {
     fn paint(&mut self, ui: &mut Ui, size: f32, alpha: f32, mut color: Color) {
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
-        if let Some(cached_texture) = &self.cached_texture {
-            if cached_texture != &self.pass.texture(ctx) {
-                self.cached_texture = Some(self.pass.texture(ctx).clone());
-            }
+        // Update cache when pass/texture actually changes
+        let current_texture = self.pass.texture(ctx);
+        if self.cached_texture.as_ref() != Some(&current_texture) {
+            self.cached_texture = Some(current_texture.clone());
         }
-        if let Some(cached_pass) = &self.cached_pass {
-            if cached_pass != &self.pass {
-                self.cached_pass = Some(self.pass.clone());
-            }
+        if self.cached_pass.as_ref() != Some(&self.pass) {
+            self.cached_pass = Some(self.pass.clone());
         }
         if self.cleared {
             if let Some(ref pass) = self.cached_pass {
@@ -277,15 +343,12 @@ impl Painter {
     }
 }
 
-unsafe impl Sync for JudgeLine {}
-unsafe impl Send for JudgeLine {}
-
 impl JudgeLine {
-    pub fn update(&mut self, res: &mut Resource, tr: Matrix, bpm_list: &mut BpmList, index: usize) {
+    pub fn update(&mut self, res: &mut Resource, tr: Matrix, bpm_list: &BpmList, index: usize) {
         let rot = self.object.rotation.now();
         self.height.set_time(res.time);
         let line_height = self.height.now();
-        let mut ctrl_obj = self.ctrl_obj.lock().unwrap();
+        let mut ctrl_obj = self.ctrl_obj.borrow_mut();
         self.cache.update_order.retain(|id| {
             let note = &mut self.notes[*id as usize];
             note.update(res, rot, &tr, &mut ctrl_obj, line_height, bpm_list, index);
@@ -336,7 +399,7 @@ impl JudgeLine {
         //}
     }
 
-    pub fn update_hand_assign_with_world_pos(&mut self, res: &mut Resource, _world_pos: Vector, bpm_list: &mut BpmList, index: usize) {
+    pub fn update_hand_assign_with_world_pos(&mut self, res: &mut Resource, world_pos: Vector, bpm_list: &BpmList, index: usize) {
         if !res.config.hand_split || self.notes.is_empty() {
             return;
         }
@@ -344,58 +407,84 @@ impl JudgeLine {
         let config = crate::config::Config::default();
         let rot = self.object.rotation.now();
         
-        // 获取判定线的世界位置和变换矩阵
-        let line_transform = self.now_transform(res, &[]);
-        let line_translation = Vector::new(line_transform[(0, 2)], line_transform[(1, 2)]);
-        let _line_rotation = self.object.rotation.now();
+        // Use the passed world_pos directly instead of calling now_transform
+        let line_translation = world_pos;
         
-        // 从主视角计算世界坐标
-        let mut enhanced_notes_data = Vec::with_capacity(self.notes.len());
         let chart_ratio_inv = res.chart_ratio_inv; // 使用缓存的值
         let vw = 1.2 * chart_ratio_inv;
         let vh = chart_ratio_inv;
         
-        for note in &self.notes {
-            // 音符在判定线局部坐标系中的位置
-            let local_x = note.object.translation.0.now();
-            let local_y = note.object.translation.1.now();
+        // 复用线程本地缓冲区
+        ENHANCED_NOTES_BUFFER.with(|buffer| {
+            let mut enhanced_notes_data = buffer.borrow_mut();
+            enhanced_notes_data.clear();
+            enhanced_notes_data.reserve(self.notes.len());
             
-            // 转换为标准化的世界坐标（不考虑判定线旋转）
-            let world_x_no_rotation = local_x * vw;
-            let world_y_no_rotation = local_y * vh;
+            for note in &self.notes {
+                // 音符在判定线局部坐标系中的位置
+                let local_x = note.object.translation.0.now();
+                let local_y = note.object.translation.1.now();
+                
+                // 转换为标准化的世界坐标（不考虑判定线旋转）
+                let world_x_no_rotation = local_x * vw;
+                let world_y_no_rotation = local_y * vh;
+                
+                // 应用判定线的世界位置偏移
+                let world_x = world_x_no_rotation + line_translation.x;
+                let world_y = world_y_no_rotation + line_translation.y;
+                
+                // 现在将这个"主视角下的世界坐标"传递给手部分配函数
+                // 手部分配函数内部会处理旋转角度的影响
+                let true_world_pos = Vector::new(world_x, world_y);
+                let enhanced_pos = true_world_pos; // 直接使用真实世界坐标
+                
+                enhanced_notes_data.push((true_world_pos, enhanced_pos));
+            }
             
-            // 应用判定线的世界位置偏移
-            let world_x = world_x_no_rotation + line_translation.x;
-            let world_y = world_y_no_rotation + line_translation.y;
-            
-            // 现在将这个"主视角下的世界坐标"传递给手部分配函数
-            // 手部分配函数内部会处理旋转角度的影响
-            let true_world_pos = Vector::new(world_x, world_y);
-            let enhanced_pos = true_world_pos; // 直接使用真实世界坐标
-            
-            enhanced_notes_data.push((true_world_pos, enhanced_pos));
-        }
-        
-        // 创建增强版临时音符用于AI计算
-        let mut ai_notes: Vec<crate::core::Note> = self.notes
-            .iter()
-            .zip(enhanced_notes_data.iter())
-            .map(|(note, &(_true_world_pos, enhanced_pos))| {
-                let mut ai_note = note.clone();
-                // 使用增强版位置信息进行手部分配
-                ai_note.object.translation.0 = crate::core::AnimFloat::fixed(enhanced_pos.x);
-                ai_note.object.translation.1 = crate::core::AnimFloat::fixed(enhanced_pos.y);
-                ai_note
-            })
-            .collect();
-        
-        // 分配手（使用统一主视角数据）
-        crate::hand::assign_hands_unified_perspective(&mut ai_notes, &config, index, rot, bpm_list, &enhanced_notes_data);
-        
-        // 将分配结果复制回原始音符
-        for (orig_note, ai_note) in self.notes.iter_mut().zip(ai_notes.iter()) {
-            orig_note.hand = ai_note.hand;
-        }
+            // 创建增强版临时音符用于AI计算（复用缓冲区）
+            // 避免全量 clone，只复制必要字段
+            AI_NOTES_BUFFER.with(|ai_buffer| {
+                let mut ai_notes = ai_buffer.borrow_mut();
+                ai_notes.clear();
+                ai_notes.reserve(self.notes.len());
+                
+                for (note, &(_true_world_pos, enhanced_pos)) in self.notes.iter().zip(enhanced_notes_data.iter()) {
+                    // 只复制手部分配需要的字段，避免克隆整个 Object
+                    let ai_note = crate::core::Note {
+                        time: note.time,
+                        kind: note.kind.clone(),
+                        height: note.height,
+                        object: crate::core::Object {
+                            alpha: crate::core::AnimFloat::default(),
+                            scale: crate::core::AnimVector(crate::core::AnimFloat::fixed(1.0), crate::core::AnimFloat::fixed(1.0)),
+                            rotation: crate::core::AnimFloat::default(),
+                            translation: crate::core::AnimVector(
+                                crate::core::AnimFloat::fixed(enhanced_pos.x),
+                                crate::core::AnimFloat::fixed(enhanced_pos.y),
+                            ),
+                        },
+                        speed: note.speed,
+                        end_speed: note.end_speed,
+                        start_height: note.start_height,
+                        hand: note.hand,
+                        above: note.above,
+                        multiple_hint: note.multiple_hint,
+                        fake: note.fake,
+                        judge: note.judge.clone(),
+                        format: note.format,
+                    };
+                    ai_notes.push(ai_note);
+                }
+                
+                // 分配手（使用统一主视角数据）
+                crate::hand::assign_hands_unified_perspective(&mut ai_notes, &config, index, rot, bpm_list, &enhanced_notes_data);
+                
+                // 将分配结果复制回原始音符
+                for (orig_note, ai_note) in self.notes.iter_mut().zip(ai_notes.iter()) {
+                    orig_note.hand = ai_note.hand;
+                }
+            });
+        });
     }
 
     pub fn fetch_pos(line: &JudgeLine, res: &Resource, lines: &[JudgeLine]) -> Vector {
@@ -413,7 +502,11 @@ impl JudgeLine {
         self.object.now_rotation().append_translation(&Self::fetch_pos(self, res, lines))
     }
 
-    pub fn render(&self, mut ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
+    pub fn now_transform_with_pos(&self, world_pos: Vector) -> Matrix {
+        self.object.now_rotation().append_translation(&world_pos)
+    }
+
+    pub fn render(&self, mut ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &BpmList, settings: &ChartSettings, id: usize) {
 
         // 早期退出优化：预先计算 alpha
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
@@ -424,10 +517,13 @@ impl JudgeLine {
         let is_debug = res.config.chart_debug;
         let is_fade_out = res.config.has_mod(Mods::FADE_OUT);
 
-        // 优化2: 预分配并重用 painter_state
-        let painter_state: Arc<Mutex<Option<Painter>>> = Arc::new(Mutex::new(None));
-
-        res.with_model(self.now_transform(res, lines), |res| {
+        // Use cached world position if available (set by chart.rs update())
+        // to avoid redundant fetch_pos recursive traversal
+        let transform = match self.cached_world_pos {
+            Some(pos) => self.now_transform_with_pos(pos),
+            None => self.now_transform(res, lines),
+        };
+        res.with_model(transform, |res| {
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| {
                     // 优化3: 使用查找表代替 match，提高分支预测性能
@@ -568,9 +664,8 @@ impl JudgeLine {
                         JudgeLineKind::Paint(anim, _state) => {
                             let size = anim.now();
                             let paint_color = color.unwrap_or(WHITE);
-
-                            let mut opt = painter_state.lock().unwrap();
-                            let painter = opt.get_or_insert_with(|| Painter::new());
+                            // Lazy Painter creation - only allocated for Paint lines
+                            let mut painter = Painter::new();
                             painter.paint(&mut ui, size, alpha, paint_color);
                         }
                     }
@@ -603,7 +698,7 @@ impl JudgeLine {
                 }
             }
 
-            let mut ctrl_obj = self.ctrl_obj.lock().unwrap();
+            let mut ctrl_obj = self.ctrl_obj.borrow_mut();
             let line_height = self.height.now();
 
             let mut config = RenderConfig {
@@ -639,12 +734,25 @@ impl JudgeLine {
             let vw = 1.2 * chart_ratio_inv;
             let vh = chart_ratio_inv;
 
-            let viewport_points = [
-                res.screen_to_world(Point::new(-vw, -vh)),
-                res.screen_to_world(Point::new(-vw, vh)),
-                res.screen_to_world(Point::new(vw, -vh)),
-                res.screen_to_world(Point::new(vw, vh)),
-            ];
+            // Use cached viewport corner world positions to avoid repeated matrix inverse calls.
+            // The cache is invalidated when the viewport changes.
+            let viewport = get_viewport();
+            let viewport_points = {
+                let mut cache = VIEWPORT_CACHE.lock().unwrap();
+                if cache.0 == Some(viewport) {
+                    cache.1.unwrap()
+                } else {
+                    let points = [
+                        res.screen_to_world(Point::new(-vw, -vh)),
+                        res.screen_to_world(Point::new(-vw, vh)),
+                        res.screen_to_world(Point::new(vw, -vh)),
+                        res.screen_to_world(Point::new(vw, vh)),
+                    ];
+                    cache.0 = Some(viewport);
+                    cache.1 = Some(points);
+                    points
+                }
+            };
 
             let inv_aspect_ratio = res.inv_aspect_ratio; // 使用缓存的值
             let height_above = viewport_points.iter()
@@ -662,7 +770,8 @@ impl JudgeLine {
             if !note_scale_positive {
                 return;
             }
-            let mut height = self.height.clone();
+            // Use a lightweight view that borrows keyframes instead of cloning the entire AnimFloat
+            let mut height = AnimFloatView::new(&self.height);
             let not_plain_count = self.cache.not_plain_count;
 
             // 渲染上方音符（普通）
@@ -755,7 +864,7 @@ impl JudgeLine {
                 }
             });
             if res.config.chart_debug {
-                let pos = Self::fetch_pos(self, res, lines);
+                let pos = self.cached_world_pos.unwrap_or_else(|| Self::fetch_pos(self, res, lines));
                 let rotation = self.object.rotation.now();
                 let text_alpha = {
                     let mut alpha_val = alpha;

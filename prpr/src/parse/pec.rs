@@ -14,7 +14,8 @@ use tracing::warn;
 use crate::core::note::Hand;
 use crate::hand::assign_hands;
 use crate::config::Config;
-use std::sync::{Mutex, Arc};
+use std::rc::Rc;
+use std::cell::RefCell;
 use crate::core::CtrlObject;
 
 // 智能手部分配函数
@@ -224,7 +225,7 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32, r: &mut Bpm
             scale: AnimVector(AnimFloat::fixed(3.91 / 6.), AnimFloat::default()),
         },
         //ctrl_obj: RefCell::default(),
-        ctrl_obj: Arc::new(Mutex::new(CtrlObject::default())),
+        ctrl_obj: Rc::new(RefCell::new(CtrlObject::default())),
         kind: JudgeLineKind::Normal,
         height,
         incline: AnimFloat::default(),
@@ -236,6 +237,7 @@ fn parse_judge_line(mut pec: PECJudgeLine, id: usize, max_time: f32, r: &mut Bpm
         attach_ui: None,
 
         cache,
+        cached_world_pos: None,
     })
 }
 

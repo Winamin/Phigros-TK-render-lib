@@ -12,6 +12,9 @@ pub struct NetworkParams {
     pub seq_len: u32,
     pub layer_index: u32,
     pub extra_params: u32,
+    // Padding fields to match shader's expected 32-byte size
+    pub padding0: u32,
+    pub padding1: u32,
 }
 
 // 统一的GPU网络执行器
@@ -72,8 +75,7 @@ impl GpuNetworkExecutor {
             mapped_at_creation: false,
         });
 
-        // 创建适当大小的缓冲区以支持高性能计算（16M floats = 64MB）
-        let max_size = 16 * 1024 * 1024;
+        let max_size = 128 * 128;
         let buffer_size = (max_size * std::mem::size_of::<f32>()) as u64;
 
         // Ping-Pong缓冲区：减少不必要的内存拷贝
@@ -196,7 +198,8 @@ impl GpuNetworkExecutor {
             label: Some("Common Bind Group Layout"),
         });
 
-        // 创建LSTM专用绑定组布局
+        // 创建LSTM专用绑定组布局 (减少到 8 个绑定)
+        // 优化：合并 params+dispatch 为 uniform，合并 initial_hidden+initial_cell 为一个 storage
         let lstm_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -259,38 +262,20 @@ impl GpuNetworkExecutor {
                     },
                     count: None,
                 },
+                // binding 6: 合并的 uniform 缓冲区 (params + dispatch)
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
                     count: None,
                 },
+                // binding 7: 合并的 storage 缓冲区 (initial_hidden + initial_cell)
                 wgpu::BindGroupLayoutEntry {
                     binding: 7,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 8,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -535,6 +520,8 @@ impl GpuNetworkExecutor {
                     }
                     LayerTypeGPU::Concat => layer.num_inputs as u32,
                 },
+                padding0: 0,
+                padding1: 0,
             };
             self.params_data_cache.push(params);
             current_input_size = layer.output_size;
@@ -645,21 +632,15 @@ impl GpuNetworkExecutor {
                                 binding: 5,
                                 resource: self.cell_states_buffer.as_entire_binding(),
                             },
+                            // binding 6: 合并的 uniform 缓冲区 (params + dispatch)
                             wgpu::BindGroupEntry {
                                 binding: 6,
                                 resource: self.params_buffer.as_entire_binding(),
                             },
+                            // binding 7: 合并的 storage 缓冲区 (initial_hidden + initial_cell)
                             wgpu::BindGroupEntry {
                                 binding: 7,
-                                resource: self.dispatch_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 8,
                                 resource: self.initial_hidden_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 9,
-                                resource: self.initial_cell_buffer.as_entire_binding(),
                             },
                         ],
                         label: Some(&format!("Layer {} LSTM Bind Group", i)),
@@ -759,6 +740,34 @@ impl GpuNetworkExecutor {
 
     // 优化的层执行：减少CPU-GPU同步，批量更新参数
     fn execute_layers_optimized(&self, layers: &[NetworkLayerGPU], bind_groups: &[wgpu::BindGroup]) {
+        // 首先准备所有层的参数
+        let mut all_params: Vec<NetworkParams> = Vec::with_capacity(layers.len());
+        for (i, layer) in layers.iter().enumerate() {
+            let params = if i < self.params_data_cache.len() {
+                self.params_data_cache[i]
+            } else {
+                // 回退方案
+                NetworkParams {
+                    input_size: if i == 0 { 0 } else { layers[i-1].output_size as u32 },
+                    output_size: layer.output_size as u32,
+                    batch_size: 1,
+                    seq_len: layer.seq_len as u32,
+                    layer_index: i as u32,
+                    extra_params: match layer.layer_type {
+                        LayerTypeGPU::LSTM => (1024u32 << 16) | 0u32,
+                        LayerTypeGPU::Dense | LayerTypeGPU::Attention | LayerTypeGPU::Residual => {
+                            (1u32 << 8) | 1u32
+                        }
+                        LayerTypeGPU::Concat => layer.num_inputs as u32,
+                    },
+                    padding0: 0,
+                    padding1: 0,
+                }
+            };
+            all_params.push(params);
+        }
+
+        // 创建单个命令编码器和一个compute pass来执行所有层
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Optimized Compute Encoder"),
         });
@@ -770,34 +779,8 @@ impl GpuNetworkExecutor {
             });
 
             for (i, layer) in layers.iter().enumerate() {
-                // 使用预计算的参数（如果有缓存）
-                let params = if i < self.params_data_cache.len() {
-                    self.params_data_cache[i]
-                } else {
-                    // 回退方案
-                    NetworkParams {
-                        input_size: if i == 0 { 0 } else { layers[i-1].output_size as u32 },
-                        output_size: layer.output_size as u32,
-                        batch_size: 1,
-                        seq_len: layer.seq_len as u32,
-                        layer_index: i as u32,
-                        extra_params: match layer.layer_type {
-                            LayerTypeGPU::LSTM => (1024u32 << 16) | 0u32,
-                            LayerTypeGPU::Dense | LayerTypeGPU::Attention | LayerTypeGPU::Residual => {
-                                (1u32 << 8) | 1u32
-                            }
-                            LayerTypeGPU::Concat => layer.num_inputs as u32,
-                        },
-                    }
-                };
-
-                // 在compute pass外更新参数
-                drop(cpass);
-                self.queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
-                cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Optimized Compute Pass"),
-                    timestamp_writes: None,
-                });
+                // 参数已在pass外准备好，直接写入
+                self.queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&all_params[i]));
 
                 // 选择管线
                 let pipeline = match layer.layer_type {

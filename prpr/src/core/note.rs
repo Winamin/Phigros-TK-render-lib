@@ -7,8 +7,11 @@ use crate::{
 use serde::Serialize;
 use serde::Deserialize;
 use macroquad::prelude::*;
-use once_cell::sync::Lazy;
+use macroquad::miniquad::gl::GLuint;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use once_cell::sync::Lazy;
 
 //const HOLD_PARTICLE_INTERVAL: f32 = 0.15;
 const FADEOUT_TIME: f32 = 0.16;
@@ -27,6 +30,22 @@ static HAND_COLORS: Lazy<[Color; 2]> = Lazy::new(|| [
     Color::new(0.2, 0.5, 1.0, 1.0),  // Left
     Color::new(1.0, 0.6, 0.7, 1.0),  // Right
 ]);
+
+// Cache texture GL internal IDs by raw pointer to avoid repeated FFI calls
+thread_local! {
+    static TEXTURE_GL_CACHE: RefCell<HashMap<u32, GLuint>> = RefCell::new(HashMap::new());
+}
+
+#[inline(always)]
+fn get_texture_gl_id(texture: &Texture2D) -> GLuint {
+    let tex = texture.raw_miniquad_texture_handle();
+    let key = tex.gl_internal_id();
+    TEXTURE_GL_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let id = *cache.entry(key).or_insert(key);
+        id
+    })
+}
 
 // 基础亮度常量
 const BASE_LUMINANCE: f32 = 0.9;
@@ -143,13 +162,12 @@ fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color
 fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], color: Color, params: DrawTextureParams) {
     let p_screen = p.map(|pt| res.world_to_screen(pt));
 
-    let (min_x, max_x) = p_screen.iter()
-        .fold((f32::MAX, f32::MIN), |(min, max), pt|
-            (min.min(pt.x), max.max(pt.x)));
-
-    let (min_y, max_y) = p_screen.iter()
-        .fold((f32::MAX, f32::MIN), |(min, max), pt|
-            (min.min(pt.y), max.max(pt.y)));
+    let (min_x, max_x, min_y, max_y) = p_screen.iter().fold(
+        (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+        |(min_x, max_x, min_y, max_y), pt| {
+            (min_x.min(pt.x), max_x.max(pt.x), min_y.min(pt.y), max_y.max(pt.y))
+        }
+    );
 
     let chart_ratio_inv = res.chart_ratio_inv;
     if min_x > chart_ratio_inv ||
@@ -182,7 +200,7 @@ fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], co
     ];
 
     res.note_buffer.borrow_mut().push(
-        (order, texture.raw_miniquad_texture_handle().gl_internal_id()),
+        (order, get_texture_gl_id(&texture)),
         vertices
     );
 }
@@ -227,7 +245,7 @@ impl Note {
             && self.object.dead()
     }
 
-    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &mut BpmList, index: usize) {
+    pub fn update(&mut self, res: &mut Resource, parent_rot: f32, parent_tr: &Matrix, ctrl_obj: &mut CtrlObject, line_height: f32, bpm_list: &BpmList, index: usize) {
         self.object.set_time(res.time);
         //if matches!(self.judge, JudgeStatus::Hold(..)) {
         //    self.height = line_height;
@@ -275,7 +293,7 @@ impl Note {
             .append_translation(&tr)
     }
 
-    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
+    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &BpmList) {
     if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
         return;
     }
@@ -341,11 +359,7 @@ impl Note {
     }
 
     // Alpha
-    let ctrl_alpha = match config.ctrl_obj.alpha.now_opt() {
-        Some(a) => a,
-        None if self.object.is_default() && !res.config.chart_debug => 0.0,
-        _ => 1.0,
-    };
+    let ctrl_alpha = config.ctrl_obj.alpha.now_opt().unwrap_or(1.0);
     color.a *= res.alpha * ctrl_alpha;
 
     if should_skip && res.config.chart_debug {
@@ -436,8 +450,12 @@ impl Note {
             } else {
                 style.hold_body_rect()
             };
+
+            // Compute transform once for all hold parts
+            let transform = self.now_transform(res, &config.ctrl_obj, 0., config.incline_sin);
+
             self.render_quad_raw(
-                res, config, 0., scale, color, order,
+                res, config, &transform, scale, color, order,
                 **body_tex, body_source,
                 vec2(scale * 2., top - bottom), clip, bottom
             );
@@ -447,7 +465,7 @@ impl Note {
                 let hf = vec2(scale, r.h / r.w * scale * ratio);
                 let head_y = bottom - if res.res_pack.info.hold_compact { hf.y } else { hf.y * 2. };
                 self.render_quad_raw(
-                    res, config, 0., scale, color, order,
+                    res, config, &transform, scale, color, order,
                     **tex, r, hf * 2., clip, head_y
                 );
             }
@@ -456,7 +474,7 @@ impl Note {
             let hf = vec2(scale, r.h / r.w * scale * ratio);
             let tail_y = top - if res.res_pack.info.hold_compact { hf.y } else { 0. };
             self.render_quad_raw(
-                res, config, 0., scale, color, order,
+                res, config, &transform, scale, color, order,
                 **tex, r, hf * 2., clip, tail_y
             );
         }
@@ -466,7 +484,8 @@ impl Note {
     // 渲染居中 quad
     fn render_quad(&self, res: &Resource, config: &RenderConfig, base: f32, scale: f32, color: Color, order: i8, tex: Texture2D, source: Rect) {
         let hf = vec2(scale, tex.height() * scale / tex.width());
-        self.render_quad_raw(res, config, base, scale, color, order, tex, source, hf * 2., false, -hf.y);
+        let transform = self.now_transform(res, &config.ctrl_obj, base, config.incline_sin);
+        self.render_quad_raw(res, config, &transform, scale, color, order, tex, source, hf * 2., false, -hf.y);
     }
 
     // 底层 quad 提交
@@ -474,7 +493,7 @@ impl Note {
         &self,
         res: &Resource,
         config: &RenderConfig,
-        base: f32,
+        transform: &Matrix,
         scale: f32,
         color: Color,
         order: i8,
@@ -502,7 +521,7 @@ impl Note {
             final_source.h *= 1.0 - ratio;
         }
 
-        // Compute world positions
+        // Compute world positions using pre-computed transform
         let p = [
             Point::new(x, y),
             Point::new(x + w, y),
@@ -510,12 +529,15 @@ impl Note {
             Point::new(x, y + h),
         ];
 
-        let transform = self.now_transform(res, &config.ctrl_obj, base, config.incline_sin);
         let p_world = p.map(|pt| transform.transform_point(&pt));
         let p_screen = p_world.map(|pt| res.world_to_screen(pt));
         let chart_ratio_inv = res.chart_ratio_inv; // 使用缓存的值
-        let (min_x, max_x) = p_screen.iter().fold((f32::MAX, f32::MIN), |(a,b), pt| (a.min(pt.x), b.max(pt.x)));
-        let (min_y, max_y) = p_screen.iter().fold((f32::MAX, f32::MIN), |(a,b), pt| (a.min(pt.y), b.max(pt.y)));
+        let (min_x, max_x, min_y, max_y) = p_screen.iter().fold(
+            (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+            |(min_x, max_x, min_y, max_y), pt| {
+                (min_x.min(pt.x), max_x.max(pt.x), min_y.min(pt.y), max_y.max(pt.y))
+            }
+        );
         if min_x > chart_ratio_inv || max_x < -chart_ratio_inv || min_y > chart_ratio_inv || max_y < -chart_ratio_inv {
             return;
         }
@@ -538,7 +560,7 @@ impl Note {
 
         // Submit to batch buffer
         res.note_buffer.borrow_mut().push(
-            (order, tex.raw_miniquad_texture_handle().gl_internal_id()),
+            (order, get_texture_gl_id(&tex)),
             vertices
         );
     }

@@ -1976,6 +1976,8 @@ impl Scene for GameScene {
         let res = &mut self.res;
         // 特效zoom
         if !res.no_effect {
+            // Single flush before all effects (replaces per-effect flush)
+            self.gl.flush();
             set_camera(&Camera2D {
                 zoom: vec2(1., asp2),
                 viewport: chart_target_vp,
@@ -1998,6 +2000,8 @@ impl Scene for GameScene {
         }
 
         if !self.res.no_effect && !self.effects.is_empty() {
+            // Single flush before global effects
+            self.gl.flush();
             set_camera(&Camera2D {
                 zoom: vec2(1., asp),
                 ..Default::default()

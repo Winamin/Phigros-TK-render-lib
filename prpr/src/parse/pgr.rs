@@ -17,7 +17,8 @@ use anyhow::bail;
 use crate::core::note::Hand;
 use crate::hand::assign_hands;
 use crate::config::Config;
-use std::sync::{Mutex, Arc};
+use std::rc::Rc;
+use std::cell::RefCell;
 use crate::core::CtrlObject;
 
 // 智能手部分配函数
@@ -288,7 +289,7 @@ fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32, bpm_list: &BpmList, id: us
             translation: parse_move_events(r, pgr.move_events).with_context(|| ptl!("move-events-parse-failed"))?,
             ..Default::default()
         },
-        ctrl_obj: Arc::new(Mutex::new(CtrlObject::default())),
+        ctrl_obj: Rc::new(RefCell::new(CtrlObject::default())),
         kind: JudgeLineKind::Normal,
         height,
         incline: AnimFloat::default(),
@@ -300,6 +301,7 @@ fn parse_judge_line(pgr: PgrJudgeLine, max_time: f32, bpm_list: &BpmList, id: us
         attach_ui: None,
 
         cache,
+        cached_world_pos: None,
     })
 }
 

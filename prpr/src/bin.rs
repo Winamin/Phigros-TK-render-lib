@@ -16,6 +16,8 @@ use std::{
 };
 use crate::core::note::Hand;
 use std::sync::{Mutex, Arc};
+use std::rc::Rc;
+use std::cell::RefCell;
 
 pub trait BinaryData: Sized {
     fn read_binary<R: Read>(r: &mut BinaryReader<R>) -> Result<Self>;
@@ -380,8 +382,7 @@ impl BinaryData for JudgeLine {
         let show_below = r.read()?;
         let cache = JudgeLineCache::new(&mut notes);
         let attach_ui = UIElement::from_u8(r.read()?);
-        let ctrl_obj = Arc::new(Mutex::new(r.read()?));
-        //let ctrl_obj = RefCell::new(r.read()?);
+        let ctrl_obj = Rc::new(RefCell::new(r.read()?));
         let incline = r.read()?;
         let z_index = r.read()?;
         Ok(Self {
@@ -399,6 +400,7 @@ impl BinaryData for JudgeLine {
             z_index,
 
             cache,
+            cached_world_pos: None,
         })
     }
 
@@ -431,8 +433,7 @@ impl BinaryData for JudgeLine {
         })?;
         w.write_val(self.show_below)?;
         w.write_val(self.attach_ui.map_or(0, |it| it as u8))?;
-        //w.write(self.ctrl_obj.borrow().deref())?;
-        w.write(self.ctrl_obj.lock().unwrap().deref())?;
+        w.write(self.ctrl_obj.borrow().deref())?;
         w.write(&self.incline)?;
         w.write(&self.z_index)?;
         Ok(())

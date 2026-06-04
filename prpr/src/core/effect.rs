@@ -6,7 +6,7 @@ use macroquad::miniquad::UniformType;
 use once_cell::sync::Lazy;
 use phf::phf_map;
 use regex::Regex;
-use std::{collections::HashSet, ops::Range};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, ops::Range};
 
 static SHADERS: phf::Map<&'static str, &'static str> = phf_map! {
     "chromatic" => include_str!("shaders/chromatic.glsl"),
@@ -54,7 +54,7 @@ static RPE_SHADERS: phf::Map<&'static str, &'static str> = phf_map! {
     "wave_pr" => include_str!("shaders/rpe/wave_pr.glsl"),
 };
 
-pub trait UniformValue: Clone + Default {
+pub trait UniformValue: Clone + Default + std::fmt::Debug {
     const UNIFORM_TYPE: UniformType;
 }
 
@@ -70,10 +70,23 @@ impl UniformValue for Color {
     const UNIFORM_TYPE: UniformType = UniformType::Float4;
 }
 
+fn format_uniform_value<T: UniformValue>(value: &T) -> String {
+    format!("{:?}", value)
+}
+
+fn set_uniform_cached<T: UniformValue>(material: &Material, name: &str, value: T, cache: &mut HashMap<String, String>) {
+    let formatted = format_uniform_value(&value);
+    if cache.get(name).map_or(true, |prev| *prev != formatted) {
+        material.set_uniform(name, value);
+        cache.insert(name.to_owned(), formatted);
+    }
+}
+
 pub trait Uniform {
     fn uniform_pair(&self) -> (String, UniformType);
     fn set_time(&mut self, t: f32);
     fn apply(&self, material: &Material);
+    fn apply_cached(&self, material: &Material, cache: &mut HashMap<String, String>);
 }
 
 impl<T: UniformValue> Uniform for (String, T) {
@@ -85,6 +98,14 @@ impl<T: UniformValue> Uniform for (String, T) {
 
     fn apply(&self, material: &Material) {
         material.set_uniform(&self.0, self.1.clone());
+    }
+
+    fn apply_cached(&self, material: &Material, cache: &mut HashMap<String, String>) {
+        let value = format_uniform_value(&self.1);
+        if cache.get(&self.0).map_or(true, |prev| *prev != value) {
+            material.set_uniform(&self.0, self.1.clone());
+            cache.insert(self.0.clone(), value);
+        }
     }
 }
 
@@ -100,6 +121,15 @@ impl<T: UniformValue + Tweenable> Uniform for (String, Anim<T>) {
     fn apply(&self, material: &Material) {
         material.set_uniform(&self.0, self.1.now());
     }
+
+    fn apply_cached(&self, material: &Material, cache: &mut HashMap<String, String>) {
+        let value = self.1.now();
+        let formatted = format_uniform_value(&value);
+        if cache.get(&self.0).map_or(true, |prev| *prev != formatted) {
+            material.set_uniform(&self.0, value);
+            cache.insert(self.0.clone(), formatted);
+        }
+    }
 }
 
 pub struct Effect {
@@ -109,6 +139,7 @@ pub struct Effect {
     defaults: Vec<Box<dyn Uniform>>,
     uniforms: Vec<Box<dyn Uniform>>,
     pub global: bool,
+    prev_uniforms: RefCell<HashMap<String, String>>,
 }
 
 impl Effect {
@@ -176,6 +207,7 @@ impl Effect {
             )?,
             uniforms,
             global,
+            prev_uniforms: RefCell::new(HashMap::new()),
         })
     }
 
@@ -190,29 +222,28 @@ impl Effect {
     }
 
     pub fn render(&self, res: &mut Resource) {
-        if !self.time_range.contains(&self.t) {
+        if !self.time_range.contains(&self.t) || res.alpha == 0.0 {
             return;
         }
-        let mut gl = unsafe { get_internal_gl() };
-        gl.flush();
 
         for def in &self.defaults {
-            def.apply(&self.material);
+            def.apply_cached(&self.material, &mut self.prev_uniforms.borrow_mut());
         }
         for uniform in &self.uniforms {
-            uniform.apply(&self.material);
+            uniform.apply_cached(&self.material, &mut self.prev_uniforms.borrow_mut());
         }
-        self.material.set_uniform("time", self.t);
+        set_uniform_cached(&self.material, "time", self.t, &mut self.prev_uniforms.borrow_mut());
         let target = res.chart_target.as_mut().unwrap();
         target.swap();
         let tex = target.old().texture;
         self.material.set_texture("screenTexture", tex);
         let screen_dim = vec2(tex.width(), tex.height());
-        self.material.set_uniform("screenSize", screen_dim);
+        set_uniform_cached(&self.material, "screenSize", screen_dim, &mut self.prev_uniforms.borrow_mut());
+        let gl = unsafe { get_internal_gl() };
         gl.quad_gl.render_pass(Some(target.output().render_pass));
 
         let vp = get_viewport();
-        self.material.set_uniform("UVScale", vec2(vp.2 as _, vp.3 as _) / screen_dim);
+        set_uniform_cached(&self.material, "UVScale", vec2(vp.2 as _, vp.3 as _) / screen_dim, &mut self.prev_uniforms.borrow_mut());
 
         gl_use_material(self.material);
         let top = 1. / if self.global { screen_aspect() } else { res.aspect_ratio };

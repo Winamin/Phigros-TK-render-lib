@@ -397,7 +397,8 @@ struct CpuParticle {
     initial_size: f32,
     color: Color,
     fade_order: f32,
-    fade_start_time: Option<f32>,
+    /// -1.0 means "not yet set", otherwise holds the time when fading begins.
+    fade_start_time: f32,
 }
 
 pub struct Emitter {
@@ -627,7 +628,7 @@ impl Emitter {
             initial_size: r,
             color: self.config.base_color,
             fade_order: rand::gen_range(0.0, 1.0),
-            fade_start_time: None,
+            fade_start_time: -1.0,
         });
     }
 
@@ -668,7 +669,7 @@ impl Emitter {
             }
             self.batch_particle_count = self.cpu_counterpart
                 .iter()
-                .filter(|p| p.fade_start_time.is_none())
+                .filter(|p| p.fade_start_time < 0.0)
                 .count();
         }
 
@@ -678,58 +679,56 @@ impl Emitter {
             self.config.emitting = false;
         }
 
+        // Hoist invariant computations outside the particle loop
+        let linear_velocity_factor = (self.config.linear_accel * dt).exp();
+        let angular_net_factor = self.config.angular_accel - self.config.angular_damping;
+        let angular_velocity_factor = (angular_net_factor * dt).exp();
+        let color_start = self.config.colors_curve.start.to_vec();
+        let color_mid = self.config.colors_curve.mid.to_vec();
+        let color_end = self.config.colors_curve.end.to_vec();
+
         for (gpu, cpu) in self.gpu_particles.iter_mut().zip(&mut self.cpu_counterpart) {
-            let linear_velocity_factor = (self.config.linear_accel * dt).exp();
             cpu.velocity *= linear_velocity_factor;
-            let angular_net_factor = self.config.angular_accel - self.config.angular_damping;
-            let angular_velocity_factor = (angular_net_factor * dt).exp();
             cpu.angular_velocity *= angular_velocity_factor;
 
+            let life_ratio = if cpu.lifetime != 0.0 { cpu.lived / cpu.lifetime } else { 0.0 };
+
             gpu.color = {
-                let t = cpu.lived / cpu.lifetime;
-                if t < 0.5 {
-                    let t = t * 2.;
-                    self.config.colors_curve.start.to_vec() * (1.0 - t) + self.config.colors_curve.mid.to_vec() * t
+                if life_ratio < 0.5 {
+                    let t = life_ratio * 2.;
+                    color_start * (1.0 - t) + color_mid * t
                 } else {
-                    let t = (t - 0.5) * 2.;
-                    self.config.colors_curve.mid.to_vec() * (1.0 - t) + self.config.colors_curve.end.to_vec() * t
+                    let t = (life_ratio - 0.5) * 2.;
+                    color_mid * (1.0 - t) + color_end * t
                 }
             };
             gpu.color *= cpu.color.to_vec();
 
             gpu.pos += vec4(cpu.velocity.x, cpu.velocity.y, cpu.angular_velocity, 0.0) * dt;
-            let base_size = cpu.initial_size * self.batched_size_curve.as_ref().map_or(1.0, |curve| curve.get(cpu.lived / cpu.lifetime));
+            let base_size = cpu.initial_size * self.batched_size_curve.as_ref().map_or(1.0, |curve| curve.get(life_ratio));
 
-            if cpu.fade_start_time.is_none() && cpu.lived > self.config.lifetime * 0.561124 {
+            if cpu.fade_start_time < 0.0 && cpu.lived > self.config.lifetime * 0.561124 {
                 let fade_delay = cpu.fade_order * self.config.lifetime * 0.3;
-                cpu.fade_start_time = Some(cpu.lived + fade_delay);
+                cpu.fade_start_time = cpu.lived + fade_delay;
             }
 
-            let extra_scale = if let Some(fade_start) = cpu.fade_start_time {
-                if cpu.lived > fade_start {
-                    let fade_duration = self.config.lifetime * 0.3;
-                    let fade_progress = ((cpu.lived - fade_start) / fade_duration).min(1.0);
-                    1.0 - fade_progress
-                } else {
-                    1.0
-                }
+            let extra_scale = if cpu.fade_start_time >= 0.0 && cpu.lived > cpu.fade_start_time {
+                let fade_duration = self.config.lifetime * 0.3;
+                let fade_progress = ((cpu.lived - cpu.fade_start_time) / fade_duration).min(1.0);
+                1.0 - fade_progress
             } else {
                 1.0
             };
 
             gpu.pos.w = base_size * extra_scale;
 
-            if cpu.lifetime != 0.0 {
-                gpu.data.y = cpu.lived / cpu.lifetime;
-            }
+            gpu.data.y = life_ratio;
 
             cpu.lived += dt;
             cpu.velocity += self.config.gravity * dt;
 
             if let Some(atlas) = &self.config.atlas {
-                if cpu.lifetime != 0.0 {
-                    cpu.frame = (cpu.lived / cpu.lifetime * (atlas.end_index - atlas.start_index) as f32) as u16 + atlas.start_index;
-                }
+                cpu.frame = (life_ratio * (atlas.end_index - atlas.start_index) as f32) as u16 + atlas.start_index;
 
                 let x = cpu.frame % atlas.n;
                 let y = cpu.frame / atlas.n;

@@ -766,7 +766,7 @@ impl Judge {
                                 let incline_sin = line.incline.now_opt().map(|it| it.to_radians().sin()).unwrap_or_default();
                                 mat *= note.now_transform(
                                     res,
-                                    &mut line.ctrl_obj.lock().unwrap(),
+                                    &mut line.ctrl_obj.borrow_mut(),
                                     (note.height - line.height.now()) / res.aspect_ratio * note.speed,
                                     incline_sin,
                                 );

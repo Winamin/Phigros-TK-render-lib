@@ -103,63 +103,34 @@ impl BpmList {
         BpmList { elements, cursor: 0 }
     }
     
-    pub fn time_beats(&mut self, beats: f32) -> f32 {
+    pub fn time_beats(&self, beats: f32) -> f32 {
         if self.elements.is_empty() {
             return beats * (60. / 120.0); // 默认BPM 120
         }
-        
-        while let Some(kf) = self.elements.get(self.cursor + 1) {
-            if kf.0 > beats {
-                break;
-            }
-            self.cursor += 1;
-        }
-        while self.cursor != 0 && self.elements[self.cursor].0 > beats {
-            self.cursor -= 1;
-        }
-        let (start_beats, time, bpm) = &self.elements[self.cursor];
-        time + (beats - start_beats) * (60. / bpm)
+        let idx = self.elements.partition_point(|e| e.0 <= beats).saturating_sub(1);
+        let (start_beats, time, bpm) = &self.elements[idx];
+        time + (beats - start_beats) * (60. / *bpm)
     }
 
-    pub fn time(&mut self, triple: &Triple) -> f32 {
+    pub fn time(&self, triple: &Triple) -> f32 {
         self.time_beats(triple.beats())
     }
 
-    pub fn beat(&mut self, time: f32) -> f32 {
+    pub fn beat(&self, time: f32) -> f32 {
         if self.elements.is_empty() {
             return time / (60. / 120.0); // 默认BPM 120
         }
-        
-        while let Some(kf) = self.elements.get(self.cursor + 1) {
-            if kf.1 > time {
-                break;
-            }
-            self.cursor += 1;
-        }
-        while self.cursor != 0 && self.elements[self.cursor].1 > time {
-            self.cursor -= 1;
-        }
-        let (beats, start_time, bpm) = &self.elements[self.cursor];
-        beats + (time - start_time) / (60. / bpm)
+        let idx = self.elements.partition_point(|e| e.1 <= time).saturating_sub(1);
+        let (beats, start_time, bpm) = &self.elements[idx];
+        beats + (time - start_time) / (60. / *bpm)
     }
 
     pub fn now_bpm(&self, time: f32) -> f32 {
         if self.elements.is_empty() {
             return 120.0; // 默认BPM
         }
-        
-        let mut cursor = self.cursor;
-
-        while let Some(kf) = self.elements.get(cursor + 1) {
-            if kf.1 > time {
-                break;
-            }
-            cursor += 1;
-        }
-        while cursor != 0 && self.elements[cursor].1 > time {
-            cursor -= 1;
-        }
-        let (_, _, bpm) = &self.elements[cursor];
+        let idx = self.elements.partition_point(|e| e.1 <= time).saturating_sub(1);
+        let (_, _, bpm) = &self.elements[idx];
         *bpm
     }
     pub fn points(&self) -> &[(f32, f32, f32)] {

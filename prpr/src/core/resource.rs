@@ -336,12 +336,23 @@ impl ParticleEmitter {
     }
 }
 
-#[derive(Default)]
-pub struct NoteBuffer(BTreeMap<(i8, GLuint), Vec<(Vec<Vertex>, Vec<u16>)>>);
+pub struct NoteBuffer {
+    map: BTreeMap<(i8, GLuint), Vec<(Vec<Vertex>, Vec<u16>)>>,
+    transient_keys: Vec<(i8, GLuint)>,
+}
+
+impl Default for NoteBuffer {
+    fn default() -> Self {
+        Self {
+            map: BTreeMap::new(),
+            transient_keys: Vec::with_capacity(64),
+        }
+    }
+}
 
 impl NoteBuffer {
     pub fn push(&mut self, key: (i8, GLuint), vertices: [Vertex; 4]) {
-        let meshes = self.0.entry(key).or_default();
+        let meshes = self.map.entry(key).or_default();
         if meshes.last().map_or(true, |it| it.0.len() + 4 > MAX_SIZE * 4) {
             meshes.push(Default::default());
         }
@@ -356,10 +367,20 @@ impl NoteBuffer {
         gl.flush();
         let gl = gl.quad_gl;
         gl.draw_mode(DrawMode::Triangles);
-        for ((_, tex_id), meshes) in std::mem::take(&mut self.0).into_iter() {
-            gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::TextureFormat::RGBA8) })));
-            for mesh in meshes {
-                gl.geometry(&mesh.0, &mesh.1);
+        
+        // Reuse transient_keys buffer to avoid per-frame allocation
+        self.transient_keys.clear();
+        self.transient_keys.extend(self.map.keys().copied());
+        
+        for key in self.transient_keys.iter() {
+            let (_, tex_id) = *key;
+            if let Some(meshes) = self.map.get_mut(key) {
+                if meshes.is_empty() { continue; }
+                gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::TextureFormat::RGBA8) })));
+                for mesh in meshes.iter() {
+                    gl.geometry(&mesh.0, &mesh.1);
+                }
+                meshes.clear();
             }
         }
     }
@@ -503,7 +524,7 @@ impl Resource {
             aspect_ratio,
             inv_aspect_ratio,
             chart_ratio_inv,
-            dpi: DPI_VALUE.load(std::sync::atomic::Ordering::SeqCst),
+            dpi: DPI_VALUE.load(std::sync::atomic::Ordering::Relaxed),
             last_vp: (0, 0, 0, 0),
             note_width,
 
@@ -576,6 +597,9 @@ impl Resource {
         } else {
             config_aspect.min(width as f32 / height as f32)
         };
+        // 更新缓存的倒数和 chart_ratio 倒数，保持与 aspect_ratio 同步
+        self.inv_aspect_ratio = 1.0 / self.aspect_ratio;
+        self.chart_ratio_inv = 1.0 / self.config.chart_ratio;
         self.camera.viewport = Some(self.calculate_viewport(vp, self.aspect_ratio));
         if !self.config.fix_aspect_ratio {
             self.camera.zoom.y = -self.aspect_ratio;
