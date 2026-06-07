@@ -2069,6 +2069,11 @@ impl Scene for GameScene {
             }
             tm.speed = 1.0;
             tm.adjust_time = false;
+
+            // 停止音乐：暂停并重置到开头
+            let _ = self.music.pause();
+            let _ = self.music.seek_to(0.0);
+
             match self.mode {
                 GameMode::Normal | GameMode::Exercise | GameMode::NoRetry | GameMode::View => NextScene::Pop,
                 GameMode::TweakOffset => NextScene::PopWithResult(Box::new(None::<f32>)),
@@ -2076,6 +2081,10 @@ impl Scene for GameScene {
         } else if let Some(next_scene) = self.next_scene.take() {
             tm.speed = 1.0;
             tm.adjust_time = false;
+            if matches!(&next_scene, NextScene::Overlay(_)) {
+                let _ = self.music.pause();
+                let _ = self.music.seek_to(0.0);
+            }
             next_scene
         } else {
             NextScene::None

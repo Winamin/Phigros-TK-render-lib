@@ -59,6 +59,8 @@ pub struct EndingScene {
     btn_retry: RectButton,
     btn_proceed: RectButton,
     initial_score: u32,
+
+    music_play: bool,
 }
 
 impl EndingScene {
@@ -132,6 +134,7 @@ impl EndingScene {
             btn_retry: RectButton::new(),
             btn_proceed: RectButton::new(),
             initial_score: 0,
+            music_play: false,
         })
     }
 }
@@ -183,9 +186,13 @@ impl Scene for EndingScene {
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
         self.audio.recover_if_needed()?;
-        if tm.now() >= EndingScene::BPM_WAIT_TIME && self.target.is_none() && self.bgm.paused() {
+        if !self.music_play && tm.now() >= EndingScene::BPM_WAIT_TIME && self.target.is_none() {
             self.bgm.play()?;
+            self.music_play = true;
         }
+        //if tm.now() >= EndingScene::BPM_WAIT_TIME && self.target.is_none() && self.bgm.paused() {
+        //    self.bgm.play()?;
+        //}
         if RE_UPLOAD.with(|it| std::mem::replace(it.borrow_mut().deref_mut(), false)) && self.upload_task.is_none() {
             self.upload_task = self
                 .record_data
