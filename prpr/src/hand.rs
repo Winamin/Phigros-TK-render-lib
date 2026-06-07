@@ -4,7 +4,6 @@ use crate::core::note::Hand;
 
 use crate::core::{BpmList, Note, NoteKind};
 use crate::hand_model::{ErgonomicHandSystem, FingerType, Vector2};
-use crate::autonomous_wisdom::{AutonomousWisdomAI, ConsciousnessState};
 use crate::core::Vector;
 use bincode;
 use bytemuck::{Pod, Zeroable};
@@ -80,7 +79,6 @@ impl Default for LineState {
 static AI_REQ_TX: OnceCell<CbSender<AiRequest>> = OnceCell::new();
 static AI_RESP_RX: OnceCell<CbReceiver<AiResponse>> = OnceCell::new();
 //static AI_SYSTEM: OnceCell<Mutex<PhiTKAdvancedAI>> = OnceCell::new();
-static WISDOM_AI: OnceCell<Mutex<AutonomousWisdomAI>> = OnceCell::new();
 static LINE_STATES: OnceCell<Mutex<HashMap<usize, LineState>>> = OnceCell::new();
 static LINE_RESP_QUEUES: OnceCell<Mutex<HashMap<usize, VecDeque<AiResponse>>>> = OnceCell::new();
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -185,9 +183,6 @@ fn cleanup_expired_requests(line_states: &mut HashMap<usize, LineState>) {
 fn start_ai_worker_if_needed(config: &Config) {
     static HAND_SPLIT: OnceCell<bool> = OnceCell::new();
     HAND_SPLIT.get_or_init(|| config.hand_split);
-    
-    // 初始化自主智慧AI
-    WISDOM_AI.get_or_init(|| Mutex::new(AutonomousWisdomAI::new(0.0)));
     
     START_ONCE.call_once(|| {
         let (tx_req, rx_req) = unbounded::<AiRequest>();
@@ -595,7 +590,6 @@ pub struct PhiTKAdvancedAI {
     reflection_learning_rate: f32, // 反思学习率
     // 自主智慧AI集成
     wisdom_ai_enabled: bool, // 是否启用智慧AI
-    consciousness_state: ConsciousnessState, // 当前意识状态
     wisdom_integration_level: f32, // 智慧集成程度
 }
 
@@ -664,8 +658,6 @@ struct Experience {
     reflection_features: Vec<f32>, // 反思提取的特征
     // 智慧AI相关字段
     hand_system_interface: f32,  // 手部系统接口评分
-    evolution_history: f32,      // 进化历史评分
-    current_consciousness: f32,  // 当前意识状态评分
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1372,79 +1364,8 @@ impl DeepNeuralNetwork {
             return false;
         }
 
-        // 获取适配器支持的极限
-        let adapter_limits = adapter.limits();
-        
-        // 设置最高性能的设备限制
-        let mut limits = wgpu::Limits::default();
-        // 提高所有限制到最大值以获得最佳性能
-        limits.max_texture_dimension_1d = adapter_limits.max_texture_dimension_1d;
-        limits.max_texture_dimension_2d = adapter_limits.max_texture_dimension_2d;
-        limits.max_texture_dimension_3d = adapter_limits.max_texture_dimension_3d;
-        limits.max_texture_array_layers = adapter_limits.max_texture_array_layers;
-        limits.max_bind_groups = adapter_limits.max_bind_groups;
-        limits.max_bindings_per_bind_group = adapter_limits.max_bindings_per_bind_group;
-        limits.max_dynamic_uniform_buffers_per_pipeline_layout = adapter_limits.max_dynamic_uniform_buffers_per_pipeline_layout;
-        limits.max_dynamic_storage_buffers_per_pipeline_layout = adapter_limits.max_dynamic_storage_buffers_per_pipeline_layout;
-        limits.max_sampled_textures_per_shader_stage = adapter_limits.max_sampled_textures_per_shader_stage;
-        limits.max_samplers_per_shader_stage = adapter_limits.max_samplers_per_shader_stage;
-        limits.max_storage_buffers_per_shader_stage = adapter_limits.max_storage_buffers_per_shader_stage;
-        limits.max_storage_textures_per_shader_stage = adapter_limits.max_storage_textures_per_shader_stage;
-        limits.max_uniform_buffers_per_shader_stage = adapter_limits.max_uniform_buffers_per_shader_stage;
-        limits.max_uniform_buffer_binding_size = adapter_limits.max_uniform_buffer_binding_size;
-        limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
-        limits.min_uniform_buffer_offset_alignment = adapter_limits.min_uniform_buffer_offset_alignment;
-        limits.min_storage_buffer_offset_alignment = adapter_limits.min_storage_buffer_offset_alignment;
-        limits.max_vertex_buffers = adapter_limits.max_vertex_buffers;
-        limits.max_buffer_size = adapter_limits.max_buffer_size;
-        limits.max_vertex_attributes = adapter_limits.max_vertex_attributes;
-        limits.max_vertex_buffer_array_stride = adapter_limits.max_vertex_buffer_array_stride;
-        limits.max_inter_stage_shader_components = adapter_limits.max_inter_stage_shader_components;
-        limits.max_compute_workgroup_storage_size = adapter_limits.max_compute_workgroup_storage_size;
-        limits.max_compute_invocations_per_workgroup = adapter_limits.max_compute_invocations_per_workgroup;
-        limits.max_compute_workgroup_size_x = adapter_limits.max_compute_workgroup_size_x;
-        limits.max_compute_workgroup_size_y = adapter_limits.max_compute_workgroup_size_y;
-        limits.max_compute_workgroup_size_z = adapter_limits.max_compute_workgroup_size_z;
-        limits.max_compute_workgroups_per_dimension = adapter_limits.max_compute_workgroups_per_dimension;
-        
-        // 启用所有可用的性能特性（只使用当前wgpu版本支持的特性）
-        let required_features = wgpu::Features::all()
-            & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
-            & wgpu::Features::PIPELINE_STATISTICS_QUERY
-            & wgpu::Features::TIMESTAMP_QUERY
-            & wgpu::Features::INDIRECT_FIRST_INSTANCE
-            & wgpu::Features::SHADER_F16
-            & wgpu::Features::RG11B10UFLOAT_RENDERABLE
-            & wgpu::Features::BGRA8UNORM_STORAGE
-            & wgpu::Features::FLOAT32_FILTERABLE
-            & wgpu::Features::TEXTURE_COMPRESSION_BC
-            & wgpu::Features::TEXTURE_COMPRESSION_ETC2
-            & wgpu::Features::TEXTURE_COMPRESSION_ASTC
-            & wgpu::Features::TEXTURE_BINDING_ARRAY
-            & wgpu::Features::BUFFER_BINDING_ARRAY
-            & wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY
-            & wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
-            & wgpu::Features::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING
-            & wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY
-            & wgpu::Features::MULTI_DRAW_INDIRECT
-            & wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
-            & wgpu::Features::PUSH_CONSTANTS
-            & wgpu::Features::ADDRESS_MODE_CLAMP_TO_BORDER
-            & wgpu::Features::ADDRESS_MODE_CLAMP_TO_ZERO
-            & wgpu::Features::POLYGON_MODE_LINE
-            & wgpu::Features::POLYGON_MODE_POINT
-            & wgpu::Features::CONSERVATIVE_RASTERIZATION
-            & wgpu::Features::VERTEX_WRITABLE_STORAGE
-            & wgpu::Features::CLEAR_TEXTURE
-            & wgpu::Features::SPIRV_SHADER_PASSTHROUGH
-            & wgpu::Features::MULTIVIEW
-            & wgpu::Features::SHADER_PRIMITIVE_INDEX
-            & wgpu::Features::SHADER_EARLY_DEPTH_TEST
-            & wgpu::Features::DEPTH32FLOAT_STENCIL8
-            & wgpu::Features::DEPTH_CLIP_CONTROL
-            & wgpu::Features::DUAL_SOURCE_BLENDING
-            & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
-            & wgpu::Features::TEXTURE_COMPRESSION_ASTC_HDR;
+        let required_features = wgpu::Features::empty();
+        let limits = wgpu::Limits::default();
 
         let (device, queue) = match adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("High Performance GPU Device"),
@@ -1718,24 +1639,36 @@ impl DeepNeuralNetwork {
         //const INPUT_FUTURE_STEPS: usize = 16;
         const OUTPUT_PREDICTION_STEPS: usize = 16;
         const INPUT_DIM: usize = 2560;
-        self.add_dense_layer(INPUT_DIM, 1024, ActivationFunction::GELU);
-        self.add_dense_layer(1024, 512, ActivationFunction::GELU);
+
+        // 原版: 2560→1024→512→256
+        self.add_dense_layer(INPUT_DIM, 512, ActivationFunction::GELU);    // 减半
         self.add_dense_layer(512, 256, ActivationFunction::GELU);
-        self.add_attention_layer(256, 256);
-        self.add_residual_layer(256, 256);
-        self.add_lstm_layer_bi(256, 128, true, 64);
-        self.add_concat_layer(&[256, 256], &[2, 4]);
-        self.add_dense_layer(512, 256, ActivationFunction::GELU);
-        self.add_attention_layer(256, 256);
-        self.add_residual_layer(256, 256);
-        self.add_reflection_layer(256, 128);
-        self.add_residual_layer(256, 256);
-        self.add_dense_layer(256, 128, ActivationFunction::GELU);
+        self.add_dense_layer(256, 128, ActivationFunction::GELU);          // 减半
+
+        self.add_attention_layer(128, 128);                                 // 256→128
         self.add_residual_layer(128, 128);
+
+        // 原版: LSTM 256→128(proj=64), 这里减小
+        self.add_lstm_layer_bi(128, 64, true, 32);                          // hidden=64, proj=32
+
+        self.add_concat_layer(&[128, 128], &[2, 4]);                        // concat后 = 256
+
+        self.add_dense_layer(256, 128, ActivationFunction::GELU);
+        self.add_attention_layer(128, 128);
+        self.add_residual_layer(128, 128);
+
+        self.add_reflection_layer(128, 64);                                 // 256→128 → 128→64
+
+        self.add_residual_layer(128, 128);                                  // 注意：这里输入仍是128
         self.add_dense_layer(128, 64, ActivationFunction::GELU);
-        self.add_dense_layer(64, 9, ActivationFunction::Linear);
-        self.add_dense_layer(128, 96, ActivationFunction::GELU);
-        self.add_dense_layer(96, OUTPUT_PREDICTION_STEPS * 3, ActivationFunction::Linear);
+        self.add_residual_layer(64, 64);
+
+        // 原版有 64→9 的额外输出，这里删掉（如果是辅助loss可保留但会增参）
+        // self.add_dense_layer(64, 9, ActivationFunction::Linear);  // 删除
+
+        // 原版 128→96→48，这里改为从64维输入（因为上面删了9维分支）
+        self.add_dense_layer(64, 48, ActivationFunction::GELU);             // 128→96 → 64→48
+        self.add_dense_layer(48, OUTPUT_PREDICTION_STEPS * 3, ActivationFunction::Linear);
     }
 
     //TODO: 归一化输出
@@ -2457,36 +2390,23 @@ impl DeepNeuralNetwork {
         output
     }
 
-    /// 实现完整的多头自注意力机制
+    /// 多头自注意力机
     fn attention_forward(layer: &mut NetworkLayer, input: &[f32]) -> Vec<f32> {
         // 获取层参数
         let input_len = input.len();
         let output_size = layer.activations.len();
-        
-        // 注意力头数，假设为8
         let num_heads = 8;
         let head_dim = output_size / num_heads;
-        
-        // 确保输出维度能被头数整除
-        if output_size % num_heads != 0 {
-            // 如果不能整除，回退到简化版本
-            return Self::simplified_attention_forward(layer, input);
-        }
-        
-        // 为每个注意力头计算QKV
+        if output_size % num_heads != 0 { return Self::simplified_attention_forward(layer, input); }
+
         let mut multi_head_output = vec![0.0; output_size];
-        
-        // 获取权重和偏置
         let weights = &layer.weights;
         let biases = &layer.biases;
-        
-        // 检查权重和偏置是否足够
+
         if weights.len() < 3 * output_size || biases.len() < 3 * output_size {
-            // 如果权重或偏置不足，回退到简化版本
             return Self::simplified_attention_forward(layer, input);
         }
-        
-        // 对每个注意力头进行计算
+
         for head in 0..num_heads {
             let start_idx = head * head_dim;
             let _end_idx = (head + 1) * head_dim;
@@ -3124,15 +3044,6 @@ impl DeepNeuralNetwork {
             let avg_entropy = total_entropy / total_samples as f32;
             let total_loss = avg_policy_loss + VALUE_LOSS_COEF * avg_value_loss - ENTROPY_COEF * avg_entropy;
 
-            if let Some(ai_system) = WISDOM_AI.get() {
-                if let Ok(mut ai) = ai_system.lock() {
-                    ai.hand_ai.recent_losses.push_back(total_loss);
-                    if ai.hand_ai.recent_losses.len() > 20 {
-                        ai.hand_ai.recent_losses.pop_front();
-                    }
-                }
-            }
-            
             self.adapt_learning_rate(total_loss);
             self.epoch_count += 1;
             
@@ -3901,7 +3812,7 @@ impl DeepNeuralNetwork {
         let mut layer_errors = vec![vec![0.0; 0]; self.layers.len()];
         if let Some(last_layer_idx) = self.layers.len().checked_sub(1) {
             let last_idx = self.layers.len() - 1;
-            // 去掉错误的out_dim归一化，每个输出维度应该有独立的误差
+            // 去掉错误的out_dim归一化，这里每个输出维度应该有独立的误差
             let mut output_errors: Vec<f32> = output.iter()
                 .zip(target.iter())
                 .map(|(o, t)| 2.0 * (o - t))  // 去掉除法！
@@ -5017,7 +4928,6 @@ impl PhiTKAdvancedAI {
             reflection_learning_rate: 0.01,
             // 自主智慧AI集成初始化
             wisdom_ai_enabled: true,
-            consciousness_state: ConsciousnessState::Exploring,
             wisdom_integration_level: 0.7,
         };
         ai.target_network = DeepNeuralNetwork::new(); // 创建新实例
@@ -5180,65 +5090,6 @@ impl PhiTKAdvancedAI {
 
      */
 
-    fn apply_consciousness_optimization(&mut self, processed_notes: &mut [ProcessedNote], wisdom_ai: &mut AutonomousWisdomAI, line_id: usize) -> bool {
-        // 将神经网络分配后的音符转换为Note格式供智慧AI进行意识分析
-        let notes_for_consciousness: Vec<Note> = processed_notes.iter().map(|pn| {
-            Note {
-                time: pn.time,
-                kind: pn.kind.clone(),
-                height: pn.position.y,
-                object: crate::core::Object::default(),
-                speed: 1.0,
-                end_speed: 1.0,
-                start_height: pn.position.y,
-                hand: pn.assigned_hand.unwrap_or(Hand::Left),
-                above: false,
-                multiple_hint: false,
-                fake: false,
-                judge: crate::judge::JudgeStatus::NotJudged,
-                format: false,
-            }
-        }).collect();
-        
-        // 让智慧AI进行意识层面的分析，但不重新推理
-        let consciousness_suggestions = wisdom_ai.analyze_existing_assignments(&notes_for_consciousness, &self.ergonomic_hand_system);
-        
-        // 基于意识建议进行选择性优化
-        let mut optimized_count = 0;
-        let mut wisdom_assignments = Vec::new();
-        
-        for (i, suggestion) in consciousness_suggestions.iter().enumerate() {
-            if i < processed_notes.len() {
-                if let Some(nn_hand) = processed_notes[i].assigned_hand {
-                    wisdom_assignments.push(nn_hand); // 先记录原始分配
-                    
-                    // 根据意识状态和集成程度决定是否采纳建议
-                    let apply_consciousness = fastrand::f32() < self.wisdom_integration_level;
-                    if apply_consciousness && suggestion.suggested_hand != nn_hand {
-                        let original_hand = processed_notes[i].assigned_hand;
-                        processed_notes[i].assigned_hand = Some(suggestion.suggested_hand);
-                        optimized_count += 1;
-                        wisdom_assignments[i] = suggestion.suggested_hand; // 更新为智慧AI的建议
-                        
-                        // 记录意识优化经验
-                        if let Some(orig) = original_hand {
-                            self.record_consciousness_experience(&processed_notes[i], orig, suggestion.suggested_hand, line_id, suggestion.confidence);
-                        }
-                    }
-                } else {
-                    wisdom_assignments.push(Hand::Left); // 默认值
-                }
-            }
-        }
-        
-        // 将智慧AI经验反馈到主网络训练 - 这是关键！
-        if optimized_count > 0 {
-            self.integrate_wisdom_experience(wisdom_ai, &notes_for_consciousness, &wisdom_assignments);
-        }
-        
-        optimized_count > 0
-    }
-    
     fn record_consciousness_experience(&mut self, note: &ProcessedNote, original_hand: Hand, consciousness_hand: Hand, line_id: usize, _confidence: f32) { self.record_optimization_experience(note, original_hand, consciousness_hand, line_id); }
     
     /// 多维度判断是否应该记录优化经验
@@ -5246,9 +5097,7 @@ impl PhiTKAdvancedAI {
         let reward_significant = exp.reward.abs() > 0.5;
         let value_confident = exp.value > 0.7 || exp.value < 0.3;
         let reflection_meaningful = exp.reflection_score > 0.6;
-        let wisdom_insightful = exp.hand_system_interface > 0.6 || 
-                               exp.evolution_history > 0.6 || 
-                               exp.current_consciousness > 0.6;
+        let wisdom_insightful = exp.hand_system_interface > 0.6;
         let advantage_strong = exp.advantage.abs() > 0.1;
         let decision_pattern_interesting = exp.decision_history.len() > 3 && 
                                          (exp.decision_history.windows(2).any(|w| w[0] != w[1]));
@@ -5277,61 +5126,17 @@ impl PhiTKAdvancedAI {
             reward_stats.push(exp.reward);
             value_stats.push(exp.value);
             reflection_stats.push(exp.reflection_score);
-            wisdom_stats.push((exp.hand_system_interface, exp.evolution_history, exp.current_consciousness));
+            wisdom_stats.push(exp.hand_system_interface);
         }
         
-        // 分别计算智慧AI经验和普通经验的统计信息
-        let wisdom_experiences: Vec<_> = experiences.iter()
-            .filter(|exp| exp.evolution_history > 0.5)
-            .collect();
-        let normal_experiences: Vec<_> = experiences.iter()
-            .filter(|exp| exp.evolution_history <= 0.5)
-            .collect();
+        // 计算统计信息
+        let avg_reward = reward_stats.iter().sum::<f32>() / reward_stats.len() as f32;
+        let avg_value = value_stats.iter().sum::<f32>() / value_stats.len() as f32;
+        let avg_reflection = reflection_stats.iter().sum::<f32>() / reflection_stats.len() as f32;
+        let avg_wisdom_interface = wisdom_stats.iter().sum::<f32>() / wisdom_stats.len() as f32;
         
-        let (wisdom_avg_reward, wisdom_avg_value, wisdom_avg_reflection) = if !wisdom_experiences.is_empty() {
-            let w_reward = wisdom_experiences.iter().map(|e| e.reward).sum::<f32>() / wisdom_experiences.len() as f32;
-            let w_value = wisdom_experiences.iter().map(|e| e.value).sum::<f32>() / wisdom_experiences.len() as f32;
-            let w_reflection = wisdom_experiences.iter().map(|e| e.reflection_features.iter().sum::<f32>() / e.reflection_features.len() as f32).sum::<f32>() / wisdom_experiences.len() as f32;
-            (w_reward, w_value, w_reflection)
-        } else {
-            (0.0, 0.0, 0.0)
-        };
-        
-        let (normal_avg_reward, normal_avg_value) = if !normal_experiences.is_empty() {
-            let n_reward = normal_experiences.iter().map(|e| e.reward).sum::<f32>() / normal_experiences.len() as f32;
-            let n_value = normal_experiences.iter().map(|e| e.value).sum::<f32>() / normal_experiences.len() as f32;
-            (n_reward, n_value)
-        } else {
-            (0.0, 0.0)
-        };
-        
-        // 加权平均计算，智慧AI经验权重更高
-        let wisdom_weight = if wisdom_experiences.is_empty() { 0.0 } else { 
-            (wisdom_experiences.len() as f32 / experiences.len() as f32) * 2.0 
-        };
-        let normal_weight = 1.0 - wisdom_weight;
-        
-        let avg_reward = wisdom_avg_reward * wisdom_weight + normal_avg_reward * normal_weight;
-        let avg_value = wisdom_avg_value * wisdom_weight + normal_avg_value * normal_weight;
-        let avg_reflection = if wisdom_experiences.is_empty() { 0.0 } else { wisdom_avg_reflection };
-        let avg_wisdom_interface = wisdom_stats.iter().map(|(i, _, _)| i).sum::<f32>() / wisdom_stats.len() as f32;
-        
-        // 进化和意识水平只计算智慧AI经验的
-        let avg_evolution = if wisdom_experiences.is_empty() { 
-            0.0 
-        } else { 
-            wisdom_experiences.iter().map(|e| e.evolution_history).sum::<f32>() / wisdom_experiences.len() as f32 
-        };
-        let avg_consciousness = if wisdom_experiences.is_empty() { 
-            0.0 
-        } else { 
-            wisdom_experiences.iter().map(|e| e.current_consciousness).sum::<f32>() / wisdom_experiences.len() as f32 
-        };
-        
-        println!("[多维度分析] 奖励:{:.3}, 价值:{:.3}, 反思:{:.3}, 智慧接口:{:.3}, 进化:{:.3}, 意识:{:.3}", 
-                 avg_reward, avg_value, avg_reflection, avg_wisdom_interface, avg_evolution, avg_consciousness);
-        println!("[分析详情] 智慧AI经验:{}个, 普通经验:{}个, 智慧权重:{:.2}", 
-                 wisdom_experiences.len(), normal_experiences.len(), wisdom_weight);
+        println!("[多维度分析] 奖励:{:.3}, 价值:{:.3}, 反思:{:.3}, 智慧接口:{:.3}", 
+                 avg_reward, avg_value, avg_reflection, avg_wisdom_interface);
         
         // 根据多维度分析调整训练参数
         if avg_reward > 0.7 {
@@ -5344,10 +5149,6 @@ impl PhiTKAdvancedAI {
             self.pattern_recognition_strength = (self.pattern_recognition_strength * 1.05).min(2.0);
             println!("[自适应] 基于高反思得分，增强模式识别至{:.3}", self.pattern_recognition_strength);
         }
-        if avg_consciousness > 0.7 {
-            self.exploration_rate = (self.exploration_rate * 1.1).min(0.5);
-            println!("[自适应] 基于高意识状态，增加探索率至{:.3}", self.exploration_rate);
-        }
         
         // 基于策略停滞检测的优化
         let stagnation_score = self.check_policy_loss_stagnation();
@@ -5355,18 +5156,6 @@ impl PhiTKAdvancedAI {
             self.exploration_rate = (self.exploration_rate * 1.3).min(0.7);
             println!("[策略优化] 检测到策略停滞(评分:{:.3})，强制增加探索率至{:.3}", stagnation_score, self.exploration_rate);
             self.add_policy_perturbation();
-        }
-        
-        // 智慧AI性能调整
-        if wisdom_experiences.len() > 5 && avg_wisdom_interface > 0.8 && wisdom_avg_reward < -0.3 {
-            println!("[策略警告] 智慧AI过于自信但效果不佳，降低智慧集成度");
-            self.wisdom_integration_level = (self.wisdom_integration_level * 0.9).max(0.1);
-        }
-        
-        // 进化激励机制
-        if avg_evolution > 0.6 && avg_consciousness > 0.5 {
-            self.wisdom_integration_level = (self.wisdom_integration_level * 1.05).min(1.0);
-            println!("[进化激励] 检测到高进化水平，提升智慧集成度至{:.3}", self.wisdom_integration_level);
         }
     }
 
@@ -5411,94 +5200,9 @@ impl PhiTKAdvancedAI {
             reflection_features: vec![0.0; 8],
             // 智慧AI相关字段
             hand_system_interface: 0.5,
-            evolution_history: 0.5,
-            current_consciousness: 0.5,
         };
         
         self.experience_replay.push(experience);
-    }
-
-    fn integrate_wisdom_experience(&mut self, wisdom_ai: &AutonomousWisdomAI, notes: &[Note], wisdom_assignments: &[Hand]) {
-        for (note, &wisdom_hand) in notes.iter().zip(wisdom_assignments) {
-            let input = DeepNeuralNetwork::hand_model_to_input(&self.ergonomic_hand_system);
-
-            let mut target = vec![0.0; 3]; // [left_prob, right_prob, value]
-            match wisdom_hand {
-                Hand::Left => {
-                    target[0] = 0.8; // 高置信度的左手概率
-                    target[1] = 0.2;
-                }
-                Hand::Right => {
-                    target[0] = 0.2;
-                    target[1] = 0.8; // 高置信度的右手概率
-                }
-            }
-
-            // 基于智慧AI的意识状态调整价值预测
-            target[2] = match wisdom_ai.current_consciousness {
-                crate::autonomous_wisdom::ConsciousnessState::Creating => 0.9,
-                crate::autonomous_wisdom::ConsciousnessState::Optimizing => 0.8,
-                crate::autonomous_wisdom::ConsciousnessState::Learning => 0.7,
-                crate::autonomous_wisdom::ConsciousnessState::Exploring => 0.6,
-                _ => 0.5,
-            };
-
-            // 创建增强经验
-            let enhanced_experience = Experience {
-                state: input.clone(),
-                action: wisdom_hand as usize,
-                reward: {
-                    // 将Note转换为ProcessedNote以使用更全面的奖励计算
-                    let processed_note = ProcessedNote {
-                        index: 0,
-                        position: Vector2::new(note.object.translation.0.now(), note.object.translation.1.now()),
-                        time: note.time,
-                        kind: note.kind.clone(),
-                        assigned_hand: Some(wisdom_hand),
-                        confidence: 0.8, // 智慧AI的默认置信度
-                        features: Vec::new(),
-                        difficulty: 1.0,
-                        duration: 0.0,
-                        actual_position: None,
-                        position_error: 0.0,
-                        timing_error: 0.0,
-                        is_successful: true,
-                        physical_confidence: 0.8,
-                    };
-                    self.calculate_reward(&processed_note, wisdom_hand, 0.8)
-                },
-                //next_state: input.clone(),
-                next_state: input,
-                done: false,
-                timestamp: fastrand::f32() * 1000.0,
-                log_prob: (target[wisdom_hand as usize] as f32).ln(),
-                value: target[2],
-                next_value: target[2],
-                advantage: 0.0,
-                return_: target[2],
-                future_notes: vec![],
-                reflection_score: wisdom_ai.consciousness.intrinsic_motivation,
-                hand_system_interface: wisdom_ai.hand_system_interface.performance_metrics.accuracy,
-                evolution_history: wisdom_ai.evolution_history.len() as f32,
-                current_consciousness: match wisdom_ai.current_consciousness {
-                    ConsciousnessState::Exploring => 0.2,
-                    ConsciousnessState::Learning => 0.4,
-                    ConsciousnessState::Optimizing => 0.6,
-                    ConsciousnessState::Creating => 0.8,
-                    ConsciousnessState::Reflecting => 1.0,
-                },
-                decision_history: vec![wisdom_hand as usize],
-                outcome_success: true,
-                reflection_features: vec![
-                    wisdom_ai.consciousness.curiosity_index,
-                    wisdom_ai.consciousness.intrinsic_motivation,
-                    self.wisdom_integration_level,
-                ],
-            };
-
-            // 将智慧AI经验添加到经验回放
-            self.experience_replay.push(enhanced_experience);
-        }
     }
 
     pub fn analyze_and_assign(&mut self, notes: &mut [Note], _config: &Config, bpm_list: &BpmList, line_id: usize, time: f32) {
@@ -5540,21 +5244,6 @@ impl PhiTKAdvancedAI {
         self.apply_reflection_influence(&mut processed_notes, line_id);
         
         self.ai_assign_single_notes(&mut processed_notes, &simultaneous_groups, &mut bpm_list_clone, line_id);
-        
-        // 集成自主智慧AI - 基于神经网络分配结果进行意识层面优化
-        if self.wisdom_ai_enabled {
-            if let Some(wisdom_mutex) = WISDOM_AI.get() {
-                if let Ok(mut wisdom_ai) = wisdom_mutex.lock() {
-                    // 将神经网络分配后的音符传递给智慧AI进行意识层面分析，而不是重新推理
-                    let consciousness_optimized = self.apply_consciousness_optimization(&mut processed_notes, &mut wisdom_ai, line_id);
-                    if consciousness_optimized {
-                        self.consciousness_state = wisdom_ai.current_consciousness;
-                        // 根据智慧AI的建议调整集成程度
-                        self.wisdom_integration_level = (self.wisdom_integration_level * 0.95 + 0.05).min(1.0);
-                    }
-                }
-            }
-        }
         
         self.post_process_assignments(&mut processed_notes);
         
@@ -6328,8 +6017,6 @@ impl PhiTKAdvancedAI {
                 outcome_success: network_correct,
                 reflection_features: Vec::new(),
                 hand_system_interface: (self.ergonomic_hand_system.left_hand.dexterity + self.ergonomic_hand_system.right_hand.dexterity) / 2.0,
-                evolution_history: self.calculate_evolution_potential(), // 基于当前状态的进化潜力
-                current_consciousness: self.calculate_consciousness_level(), // 基于网络状态的意识水平
             };
         
         // 数据质量检查
@@ -6353,74 +6040,16 @@ impl PhiTKAdvancedAI {
         self.total_notes_processed += 1;
     }
 
-    fn calculate_reward(&mut self, note: &ProcessedNote, chosen_hand: Hand, confidence: f32) -> f32 {
+    fn calculate_reward(&mut self, note: &ProcessedNote, chosen_hand: Hand, _confidence: f32) -> f32 {
         // 使用人体工程学手部系统评估分配的合理性
         let note_position = crate::hand_model::Vector2::new(note.position.x, note.position.y);
-        let (optimal_hand, _optimal_finger, _optimal_confidence) = self.ergonomic_hand_system.assign_note_hand(
+        let (optimal_hand, _, _) = self.ergonomic_hand_system.assign_note_hand(
             note_position,
             &note.kind,
             note.time,
         );
-        // 基础奖励：根据人体工程学系统判断的最优手与实际选择手的匹配程度
-        let mut reward: f32 = if chosen_hand == optimal_hand { 0.5 } else { -0.3 };
-        // 根据音符类型调整奖励
-        match note.kind {
-            NoteKind::Flick => {
-                // Flick音符需要快速反应，人体工程学评估更重要
-                let hand_model = if chosen_hand == Hand::Left {
-                    &self.ergonomic_hand_system.left_hand
-                } else {
-                    &self.ergonomic_hand_system.right_hand
-                };
-                let difficulty = self.ergonomic_hand_system.calculate_hand_difficulty(hand_model, &note_position, &note.kind);
-
-                reward -= difficulty * 0.3; // 人体工程学难度越高，奖励越低
-
-            },
-
-            NoteKind::Hold { .. } => {
-                // Hold音符需要长时间保持，考虑手部疲劳
-                let hand_fatigue = if chosen_hand == Hand::Left {
-                    self.ergonomic_hand_system.left_hand.fatigue
-                } else {
-                    self.ergonomic_hand_system.right_hand.fatigue
-                };
-                reward -= hand_fatigue * 0.2; // 疲劳度越高，奖励越低
-            },
-            _ => {}
-        }
-        // 物理可行性检查
-        let hand_model = if chosen_hand == Hand::Left { &self.ergonomic_hand_system.left_hand } else { &self.ergonomic_hand_system.right_hand };
-        let distance = note.position.distance_to(&hand_model.position);
-        let time_since_last = note.time - hand_model.last_update_time;
-        if time_since_last > 0.001 {
-            let speed = distance / time_since_last;
-            if speed > 15.0 { // 增加速度阈值以适应人体工程学模型
-                reward -= 0.5; // 速度过快，惩罚
-            } else if speed < 3.0 { // 减少低速奖励以适应人体工程学模型
-                reward += 0.05; // 低速操作，小幅奖励
-            }
-        }
-        // 基于置信度的奖励调整
-        if confidence > 0.8 {
-            reward += 0.1; // 高置信度奖励
-        } else if confidence < 0.5 {
-            reward -= 0.1; // 低置信度惩罚
-        }
-        // 应用连续分配模式的奖励/惩罚
-
-        if let Some(last_hand) = self.last_assigned_hand {
-            // 防止连续同手分配过多
-            let consecutive_same = self.count_consecutive_same_hand(chosen_hand);
-            if consecutive_same > 3 {
-                reward -= 0.2 * (consecutive_same as f32 - 3.0); // 连续过多惩罚
-            }
-            // 鼓励手部交替（如果人体工程学评估支持交替）
-            if last_hand == chosen_hand && chosen_hand != optimal_hand {
-                reward -= 0.2; // 与上次相同手但不是最优选择，惩罚
-            }
-        }
-        reward.clamp(-1.0, 1.0)
+        // 简化奖励：只根据人体工程学系统判断的最优手与实际选择手的匹配程度
+        if chosen_hand == optimal_hand { 0.5 } else { -0.3 }
     }
     fn count_consecutive_same_hand(&self, current_hand: Hand) -> usize {
         let mut count = 0;
@@ -6432,70 +6061,6 @@ impl PhiTKAdvancedAI {
             }
         }
         count
-    }
-
-    fn calculate_evolution_potential(&self) -> f32 {
-        let mut potential: f32 = 0.3;
-        
-        // 基于网络性能调整
-        if self.total_notes_processed > 0 {
-            let accuracy = self.correct_predictions as f32 / self.total_notes_processed as f32;
-            // 准确率中等时进化潜力最高
-            if accuracy >= 0.6 && accuracy <= 0.8 {
-                potential += 0.3;
-            } else if accuracy > 0.9 {
-                potential -= 0.1;
-            }
-        }
-        
-        // 基于探索率调整
-        if self.exploration_rate > 0.1 && self.exploration_rate < 0.4 {
-            potential += 0.2; // 适度的探索率有利于进化
-        }
-        
-        // 基于最近损失变化调整
-        if self.recent_losses.len() > 3 {
-            let recent_avg = self.recent_losses.iter().sum::<f32>() / self.recent_losses.len() as f32;
-            if recent_avg > 0.1 && recent_avg < 1.0 {
-                potential += 0.2; // 适中的损失表明有学习空间
-            }
-        }
-        
-        potential.clamp(0.0, 1.0)
-    }
-
-    fn calculate_consciousness_level(&self) -> f32 {
-        let mut consciousness: f32 = 0.4;
-        
-        // 基于探索率
-        if self.exploration_rate > 0.2 {
-            consciousness += 0.2;
-        }
-
-        if self.recent_losses.len() > 5 {
-            let recent_losses: Vec<f32> = self.recent_losses.iter().rev().take(5).cloned().collect();
-            let loss_trend = if recent_losses.len() > 1 {
-                let first_half = &recent_losses[..recent_losses.len()/2];
-                let second_half = &recent_losses[recent_losses.len()/2..];
-                let first_avg = first_half.iter().sum::<f32>() / first_half.len() as f32;
-                let second_avg = second_half.iter().sum::<f32>() / second_half.len() as f32;
-                first_avg - second_avg
-            } else {
-                0.0
-            };
-            
-            if loss_trend > 0.01 {
-                consciousness += 0.2;
-            }
-        }
-
-        let hand_balance = (self.ergonomic_hand_system.left_hand.dexterity - 
-                           self.ergonomic_hand_system.right_hand.dexterity).abs();
-        if hand_balance < 0.2 {
-            consciousness += 0.2;
-        }
-        
-        consciousness.clamp(0.0, 1.0)
     }
 
     fn smooth_hand_transitions(&self, notes: &mut [ProcessedNote]) {
@@ -7630,8 +7195,6 @@ impl PhiTKAdvancedAI {
             outcome_success: true,
             reflection_features: vec![0.8; 8],
             hand_system_interface: 0.7,
-            evolution_history: 0.7,
-            current_consciousness: 0.7,
         })
     }
     
