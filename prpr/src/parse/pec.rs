@@ -18,45 +18,43 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use crate::core::CtrlObject;
 
-// 智能手部分配函数
-fn smart_assign_hand(
-    position_x: f32,
-    time: f32,
-    previous_notes: &[(f32, f32, Hand)],
-    _switch_threshold: f32,
+fn smart_assign_hand(position_x: f32, time: f32, previous_notes: &[(f32, f32, Hand)], switch_threshold: f32,
 ) -> Hand {
-    // 时间窗口（秒）内，认为是连续音符
+    if previous_notes.is_empty() {
+        return if position_x < 0.5 { Hand::Left } else { Hand::Right };
+    }
+
     const TEMPORAL_WINDOW: f32 = 2.0;
-    // 位置切换阈值
     const POSITION_THRESHOLD: f32 = 0.2;
+    const CLOSE_TIME_THRESHOLD: f32 = TEMPORAL_WINDOW * 0.3;
 
-    // 查找时间窗口内最近的音符
-    let mut best_match = None;
+    let len = previous_notes.len();
+    let mut best_idx = 0;
     let mut min_time_diff = f32::INFINITY;
+    for i in (0..len).rev() {
+        let (note_time, note_pos, note_hand) = previous_notes[i];
+        let time_diff = time - note_time;
+        let abs_time_diff = time_diff.abs();
 
-    for &(note_time, note_pos, note_hand) in previous_notes {
-        let time_diff = (time - note_time).abs();
-        if time_diff < TEMPORAL_WINDOW && time_diff < min_time_diff {
-            min_time_diff = time_diff;
-            best_match = Some((note_hand, note_pos, time_diff));
+        if abs_time_diff > TEMPORAL_WINDOW {
+            if time_diff > TEMPORAL_WINDOW {
+                break;
+            }
+            continue;
+        }
+        if abs_time_diff < CLOSE_TIME_THRESHOLD
+            || (position_x - note_pos).abs() < POSITION_THRESHOLD {
+            return note_hand;
+        }
+        if abs_time_diff < min_time_diff {
+            min_time_diff = abs_time_diff;
+            best_idx = i;
         }
     }
-
-    if let Some((best_hand, best_pos, time_diff)) = best_match {
-        // 如果位置变化不大，保持同一只手
-        let pos_diff = (position_x - best_pos).abs();
-        if pos_diff < POSITION_THRESHOLD {
-            return best_hand;
-        }
-
-        // 位置变化大但时间很近，避免频繁切换
-        if time_diff < TEMPORAL_WINDOW * 0.3 {
-            return best_hand;
-        }
+    if min_time_diff < TEMPORAL_WINDOW {
+        return previous_notes[best_idx].2;
     }
-
-    // 基于位置的智能分配
-    if position_x < 0.5 {
+    if position_x < switch_threshold {
         Hand::Left
     } else {
         Hand::Right
