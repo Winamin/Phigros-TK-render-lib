@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
 
-// 为GPU实现创建统一的缓冲区管理
+const DEFAULT_BUFFER_CAPACITY: usize = 1_000_000;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct NetworkParams {
@@ -17,57 +18,46 @@ pub struct NetworkParams {
     pub padding1: u32,
 }
 
-// 统一的GPU网络执行器
+#[derive(Debug)]
+struct ExecutorMutableState {
+    buffer_a: wgpu::Buffer,
+    buffer_b: wgpu::Buffer,
+    weights_buffer: wgpu::Buffer,
+    biases_buffer: wgpu::Buffer,
+    hidden_states_buffer: wgpu::Buffer,
+    cell_states_buffer: wgpu::Buffer,
+    initial_hidden_buffer: wgpu::Buffer,
+    initial_cell_buffer: wgpu::Buffer,
+    cached_bind_groups: Option<Vec<wgpu::BindGroup>>,
+    weights_uploaded: bool,
+    params_data_cache: Vec<NetworkParams>,
+    buffer_capacity: usize,
+}
+
 #[derive(Debug)]
 pub struct GpuNetworkExecutor {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-
-    // 统一的参数缓冲区
     params_buffer: wgpu::Buffer,
-
-    // Ping-Pong缓冲区策略：在层之间交替使用，减少拷贝
-    buffer_a: wgpu::Buffer,
-    buffer_b: wgpu::Buffer,
-
-    // 通用权重缓冲区
-    weights_buffer: wgpu::Buffer,
-    biases_buffer: wgpu::Buffer,
-
-    // LSTM专用缓冲区
-    hidden_states_buffer: wgpu::Buffer,
-    cell_states_buffer: wgpu::Buffer,
     dispatch_buffer: wgpu::Buffer,
-    initial_hidden_buffer: wgpu::Buffer,
-    initial_cell_buffer: wgpu::Buffer,
 
-    // 通用管线
     dense_pipeline: wgpu::ComputePipeline,
     lstm_pipeline: wgpu::ComputePipeline,
     attention_pipeline: wgpu::ComputePipeline,
     residual_pipeline: wgpu::ComputePipeline,
     concat_pipeline: wgpu::ComputePipeline,
 
-    // 不同类型的绑定组布局
     common_bind_group_layout: wgpu::BindGroupLayout,
     lstm_bind_group_layout: wgpu::BindGroupLayout,
     attention_bind_group_layout: wgpu::BindGroupLayout,
     residual_bind_group_layout: wgpu::BindGroupLayout,
     concat_bind_group_layout: wgpu::BindGroupLayout,
 
-    // 性能优化：缓存绑定组
-    cached_bind_groups: Option<Vec<wgpu::BindGroup>>,
-
-    // 性能优化：权重是否已上传
-    weights_uploaded: bool,
-
-    // 性能优化：预计算的参数数据
-    params_data_cache: Vec<NetworkParams>,
+    state: Mutex<ExecutorMutableState>,
 }
 
 impl GpuNetworkExecutor {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
-        // 创建参数缓冲区，使用高性能内存配置
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("High Performance Network Params Buffer"),
             size: std::mem::size_of::<NetworkParams>() as u64,
@@ -75,10 +65,9 @@ impl GpuNetworkExecutor {
             mapped_at_creation: false,
         });
 
-        let max_size = 128 * 128;
-        let buffer_size = (max_size * std::mem::size_of::<f32>()) as u64;
+        let capacity = DEFAULT_BUFFER_CAPACITY;
+        let buffer_size = (capacity * std::mem::size_of::<f32>()) as u64;
 
-        // Ping-Pong缓冲区：减少不必要的内存拷贝
         let buffer_a = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Ping-Pong Buffer A"),
             size: buffer_size,
@@ -141,7 +130,6 @@ impl GpuNetworkExecutor {
             mapped_at_creation: false,
         });
 
-        // 创建通用绑定组布局
         let common_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -197,9 +185,7 @@ impl GpuNetworkExecutor {
             ],
             label: Some("Common Bind Group Layout"),
         });
-
-        // 创建LSTM专用绑定组布局 (减少到 8 个绑定)
-        // 优化：合并 params+dispatch 为 uniform，合并 initial_hidden+initial_cell 为一个 storage
+        )
         let lstm_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -288,7 +274,6 @@ impl GpuNetworkExecutor {
             label: Some("LSTM Bind Group Layout"),
         });
 
-        // 创建Attention专用绑定组布局
         let attention_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -355,7 +340,6 @@ impl GpuNetworkExecutor {
             label: Some("Attention Bind Group Layout"),
         });
 
-        // 创建Residual专用绑定组布局
         let residual_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -422,7 +406,6 @@ impl GpuNetworkExecutor {
             label: Some("Residual Bind Group Layout"),
         });
 
-        // 创建Concat绑定组布局
         let concat_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -470,15 +453,7 @@ impl GpuNetworkExecutor {
             device,
             queue,
             params_buffer,
-            buffer_a,
-            buffer_b,
-            weights_buffer,
-            biases_buffer,
-            hidden_states_buffer,
-            cell_states_buffer,
             dispatch_buffer,
-            initial_hidden_buffer,
-            initial_cell_buffer,
             dense_pipeline,
             lstm_pipeline,
             attention_pipeline,
@@ -489,22 +464,95 @@ impl GpuNetworkExecutor {
             attention_bind_group_layout,
             residual_bind_group_layout,
             concat_bind_group_layout,
-            cached_bind_groups: None,
-            weights_uploaded: false,
-            params_data_cache: Vec::new(),
+            state: Mutex::new(ExecutorMutableState {
+                buffer_a,
+                buffer_b,
+                weights_buffer,
+                biases_buffer,
+                hidden_states_buffer,
+                cell_states_buffer,
+                initial_hidden_buffer,
+                initial_cell_buffer,
+                cached_bind_groups: None,
+                weights_uploaded: false,
+                params_data_cache: Vec::new(),
+                buffer_capacity: capacity,
+            }),
         }
     }
 
-    // 性能优化：一次性初始化权重和绑定组
-    pub fn initialize_network(&mut self, layers: &[NetworkLayerGPU]) {
-        // 上传权重（只需一次）
-        if !self.weights_uploaded {
-            self.upload_all_weights_and_biases(layers);
-            self.weights_uploaded = true;
+    #[inline]
+    fn data_buffer_byte_size(element_count: usize) -> u64 {
+        (element_count * std::mem::size_of::<f32>()) as u64
+    }
+
+    fn make_data_buffer(
+        device: &wgpu::Device,
+        label: &str,
+        byte_size: u64,
+        copy_src: bool,
+    ) -> wgpu::Buffer {
+        let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        if copy_src {
+            usage |= wgpu::BufferUsages::COPY_SRC;
+        }
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: byte_size,
+            usage,
+            mapped_at_creation: false,
+        })
+    }
+
+
+    pub fn ensure_capacity(&self, required_elements: usize) {
+        let mut state = self.state.lock().unwrap();
+        if required_elements <= state.buffer_capacity {
+            return;
+        }
+        let new_capacity = required_elements.max(state.buffer_capacity * 2);
+        Self::grow_buffers(&self.device, &mut state, new_capacity);
+    }
+
+    fn grow_buffers(
+        device: &wgpu::Device,
+        state: &mut ExecutorMutableState,
+        new_capacity: usize,
+    ) {
+        let new_size = Self::data_buffer_byte_size(new_capacity);
+        let old = state.buffer_capacity;
+
+        state.buffer_a = Self::make_data_buffer(device, "Ping-Pong Buffer A", new_size, true);
+        state.buffer_b = Self::make_data_buffer(device, "Ping-Pong Buffer B", new_size, true);
+        state.weights_buffer = Self::make_data_buffer(device, "Weights Buffer", new_size, false);
+        state.biases_buffer = Self::make_data_buffer(device, "Biases Buffer", new_size, false);
+        state.hidden_states_buffer = Self::make_data_buffer(device, "Hidden States Buffer", new_size, true);
+        state.cell_states_buffer = Self::make_data_buffer(device, "Cell States Buffer", new_size, true);
+        state.initial_hidden_buffer = Self::make_data_buffer(device, "Initial Hidden Buffer", new_size, false);
+        state.initial_cell_buffer = Self::make_data_buffer(device, "Initial Cell Buffer", new_size, false);
+
+        state.cached_bind_groups = None;
+        state.weights_uploaded = false;
+        state.buffer_capacity = new_capacity;
+        println!("[GPU] Grew data buffers: {} -> {} f32 elements ({} bytes each)",
+                 old, new_capacity, new_size);
+    }
+
+    pub fn initialize_network(&self, layers: &[NetworkLayerGPU]) {
+        let mut state = self.state.lock().unwrap();
+
+        let required = Self::required_capacity_for_layers(layers, 0);
+        if required > state.buffer_capacity {
+            let new_capacity = required.max(state.buffer_capacity * 2);
+            Self::grow_buffers(&self.device, &mut state, new_capacity);
         }
 
-        // 预计算所有层的参数
-        self.params_data_cache.clear();
+        if !state.weights_uploaded {
+            Self::upload_all_weights_and_biases(&self.queue, &state, layers);
+            state.weights_uploaded = true;
+        }
+
+        state.params_data_cache.clear();
         let mut current_input_size = 0;
         for (i, layer) in layers.iter().enumerate() {
             let params = NetworkParams {
@@ -523,66 +571,113 @@ impl GpuNetworkExecutor {
                 padding0: 0,
                 padding1: 0,
             };
-            self.params_data_cache.push(params);
+            state.params_data_cache.push(params);
             current_input_size = layer.output_size;
         }
 
-        // 预创建绑定组（使用Ping-Pong策略）
-        let bind_groups = self.create_ping_pong_bind_groups(layers);
-        self.cached_bind_groups = Some(bind_groups);
+        let bind_groups = Self::create_ping_pong_bind_groups(
+            &self.device, &self.params_buffer,
+            &self.common_bind_group_layout, &self.lstm_bind_group_layout,
+            &self.attention_bind_group_layout, &self.residual_bind_group_layout,
+            &self.concat_bind_group_layout, &state, layers,
+        );
+        state.cached_bind_groups = Some(bind_groups);
     }
 
-    // 执行整个网络的GPU前向传播（极致优化版本）
-    pub fn execute_network_forward(&self,
-                                   input_data: &[f32],
-                                   layers: &[NetworkLayerGPU],
-                                   output_size: usize) -> Vec<f32> {
+    fn required_capacity_for_layers(layers: &[NetworkLayerGPU], input_len: usize) -> usize {
+        let mut max_elem: usize = input_len;
+        let mut total_weights = 0usize;
+        let mut total_biases = 0usize;
+        let mut prev_output = 0usize;
+        for layer in layers {
+            let input_for_layer = if prev_output == 0 { input_len } else { prev_output };
+            max_elem = max_elem.max(input_for_layer).max(layer.output_size);
+            total_weights = total_weights.saturating_add(layer.weights_flattened.len());
+            total_biases = total_biases.saturating_add(layer.biases.len());
+            prev_output = layer.output_size;
+        }
+        max_elem.max(total_weights).max(total_biases).max(1)
+    }
 
-        // 上传输入数据到buffer_a
-        self.queue.write_buffer(&self.buffer_a, 0, bytemuck::cast_slice(input_data));
+    pub fn execute_network_forward(&self, input_data: &[f32], layers: &[NetworkLayerGPU], output_size: usize) -> Vec<f32> {
+        let mut state = self.state.lock().unwrap();
 
-        // 使用缓存的绑定组执行层计算
-        if let Some(bind_groups) = &self.cached_bind_groups {
-            self.execute_layers_optimized(layers, bind_groups);
-        } else {
-            // 如果没有缓存，使用原始方法
-            let bind_groups = self.create_ping_pong_bind_groups(layers);
-            self.execute_layers_optimized(layers, &bind_groups);
+        let required = Self::required_capacity_for_layers(layers, input_data.len())
+            .max(output_size);
+        if required > state.buffer_capacity {
+            let new_capacity = required.max(state.buffer_capacity * 2);
+            Self::grow_buffers(&self.device, &mut state, new_capacity);
         }
 
-        // 最终结果下载（从最后一层的输出buffer）
-        let last_buffer = if layers.len() % 2 == 1 { &self.buffer_b } else { &self.buffer_a };
+        if !state.weights_uploaded {
+            Self::upload_all_weights_and_biases(&self.queue, &state, layers);
+            state.weights_uploaded = true;
+        }
+
+        self.queue.write_buffer(&state.buffer_a, 0, bytemuck::cast_slice(input_data));
+
+        if state.cached_bind_groups.is_none() {
+            let bind_groups = Self::create_ping_pong_bind_groups(
+                &self.device, &self.params_buffer,
+                &self.common_bind_group_layout, &self.lstm_bind_group_layout,
+                &self.attention_bind_group_layout, &self.residual_bind_group_layout,
+                &self.concat_bind_group_layout, &state, layers,
+            );
+            state.cached_bind_groups = Some(bind_groups);
+        }
+
+        let bind_groups = state.cached_bind_groups.as_ref().unwrap();
+        Self::execute_layers_optimized(
+            &self.device, &self.queue, &self.params_buffer,
+            &self.dense_pipeline, &self.lstm_pipeline, &self.attention_pipeline,
+            &self.residual_pipeline, &self.concat_pipeline,
+            &state, layers, bind_groups,
+        );
+
+        let last_buffer = if layers.len() % 2 == 1 {
+            &state.buffer_b
+        } else {
+            &state.buffer_a
+        };
         self.download_result_optimized(last_buffer, output_size)
     }
 
-    // 创建Ping-Pong绑定组
-    fn create_ping_pong_bind_groups(&self, layers: &[NetworkLayerGPU]) -> Vec<wgpu::BindGroup> {
+    fn create_ping_pong_bind_groups(
+        device: &wgpu::Device,
+        params_buffer: &wgpu::Buffer,
+        common_layout: &wgpu::BindGroupLayout,
+        lstm_layout: &wgpu::BindGroupLayout,
+        attention_layout: &wgpu::BindGroupLayout,
+        residual_layout: &wgpu::BindGroupLayout,
+        concat_layout: &wgpu::BindGroupLayout,
+        state: &ExecutorMutableState,
+        layers: &[NetworkLayerGPU],
+    ) -> Vec<wgpu::BindGroup> {
         let mut bind_groups = Vec::with_capacity(layers.len());
 
         for (i, layer) in layers.iter().enumerate() {
-            // Ping-Pong策略：奇数层从B读取写入A，偶数层从A读取写入B
             let (input_buf, output_buf) = if i % 2 == 0 {
-                (&self.buffer_a, &self.buffer_b)
+                (&state.buffer_a, &state.buffer_b)
             } else {
-                (&self.buffer_b, &self.buffer_a)
+                (&state.buffer_b, &state.buffer_a)
             };
 
             let layout = match layer.layer_type {
-                LayerTypeGPU::Dense => &self.common_bind_group_layout,
-                LayerTypeGPU::LSTM => &self.lstm_bind_group_layout,
-                LayerTypeGPU::Attention => &self.attention_bind_group_layout,
-                LayerTypeGPU::Residual => &self.residual_bind_group_layout,
-                LayerTypeGPU::Concat => &self.concat_bind_group_layout,
+                LayerTypeGPU::Dense => common_layout,
+                LayerTypeGPU::LSTM => lstm_layout,
+                LayerTypeGPU::Attention => attention_layout,
+                LayerTypeGPU::Residual => residual_layout,
+                LayerTypeGPU::Concat => concat_layout,
             };
 
             let bind_group = match layer.layer_type {
                 LayerTypeGPU::Dense => {
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout,
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: self.params_buffer.as_entire_binding(),
+                                resource: params_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
@@ -594,18 +689,18 @@ impl GpuNetworkExecutor {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
-                                resource: self.weights_buffer.as_entire_binding(),
+                                resource: state.weights_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 4,
-                                resource: self.biases_buffer.as_entire_binding(),
+                                resource: state.biases_buffer.as_entire_binding(),
                             },
                         ],
                         label: Some(&format!("Layer {} Dense Bind Group", i)),
                     })
                 },
                 LayerTypeGPU::LSTM => {
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout,
                         entries: &[
                             wgpu::BindGroupEntry {
@@ -614,7 +709,7 @@ impl GpuNetworkExecutor {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: self.weights_buffer.as_entire_binding(),
+                                resource: state.weights_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
@@ -622,37 +717,37 @@ impl GpuNetworkExecutor {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
-                                resource: self.biases_buffer.as_entire_binding(),
+                                resource: state.biases_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 4,
-                                resource: self.hidden_states_buffer.as_entire_binding(),
+                                resource: state.hidden_states_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 5,
-                                resource: self.cell_states_buffer.as_entire_binding(),
+                                resource: state.cell_states_buffer.as_entire_binding(),
                             },
                             // binding 6: 合并的 uniform 缓冲区 (params + dispatch)
                             wgpu::BindGroupEntry {
                                 binding: 6,
-                                resource: self.params_buffer.as_entire_binding(),
+                                resource: params_buffer.as_entire_binding(),
                             },
                             // binding 7: 合并的 storage 缓冲区 (initial_hidden + initial_cell)
                             wgpu::BindGroupEntry {
                                 binding: 7,
-                                resource: self.initial_hidden_buffer.as_entire_binding(),
+                                resource: state.initial_hidden_buffer.as_entire_binding(),
                             },
                         ],
                         label: Some(&format!("Layer {} LSTM Bind Group", i)),
                     })
                 },
                 LayerTypeGPU::Attention => {
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout,
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: self.params_buffer.as_entire_binding(),
+                                resource: params_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
@@ -660,15 +755,15 @@ impl GpuNetworkExecutor {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
-                                resource: self.weights_buffer.as_entire_binding(),
+                                resource: state.weights_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
-                                resource: self.weights_buffer.as_entire_binding(),
+                                resource: state.weights_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 4,
-                                resource: self.weights_buffer.as_entire_binding(),
+                                resource: state.weights_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 5,
@@ -679,7 +774,7 @@ impl GpuNetworkExecutor {
                     })
                 },
                 LayerTypeGPU::Residual => {
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout,
                         entries: &[
                             wgpu::BindGroupEntry {
@@ -688,7 +783,7 @@ impl GpuNetworkExecutor {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: self.weights_buffer.as_entire_binding(),
+                                resource: state.weights_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
@@ -696,7 +791,7 @@ impl GpuNetworkExecutor {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
-                                resource: self.biases_buffer.as_entire_binding(),
+                                resource: state.biases_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 4,
@@ -704,19 +799,19 @@ impl GpuNetworkExecutor {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 5,
-                                resource: self.params_buffer.as_entire_binding(),
+                                resource: params_buffer.as_entire_binding(),
                             },
                         ],
                         label: Some(&format!("Layer {} Residual Bind Group", i)),
                     })
                 },
                 LayerTypeGPU::Concat => {
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
                         layout,
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: self.params_buffer.as_entire_binding(),
+                                resource: params_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
@@ -738,15 +833,24 @@ impl GpuNetworkExecutor {
         bind_groups
     }
 
-    // 优化的层执行：减少CPU-GPU同步，批量更新参数
-    fn execute_layers_optimized(&self, layers: &[NetworkLayerGPU], bind_groups: &[wgpu::BindGroup]) {
-        // 首先准备所有层的参数
+    fn execute_layers_optimized(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params_buffer: &wgpu::Buffer,
+        dense_pipeline: &wgpu::ComputePipeline,
+        lstm_pipeline: &wgpu::ComputePipeline,
+        attention_pipeline: &wgpu::ComputePipeline,
+        residual_pipeline: &wgpu::ComputePipeline,
+        concat_pipeline: &wgpu::ComputePipeline,
+        state: &ExecutorMutableState,
+        layers: &[NetworkLayerGPU],
+        bind_groups: &[wgpu::BindGroup],
+    ) {
         let mut all_params: Vec<NetworkParams> = Vec::with_capacity(layers.len());
         for (i, layer) in layers.iter().enumerate() {
-            let params = if i < self.params_data_cache.len() {
-                self.params_data_cache[i]
+            let params = if i < state.params_data_cache.len() {
+                state.params_data_cache[i]
             } else {
-                // 回退方案
                 NetworkParams {
                     input_size: if i == 0 { 0 } else { layers[i-1].output_size as u32 },
                     output_size: layer.output_size as u32,
@@ -767,8 +871,7 @@ impl GpuNetworkExecutor {
             all_params.push(params);
         }
 
-        // 创建单个命令编码器和一个compute pass来执行所有层
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Optimized Compute Encoder"),
         });
 
@@ -779,16 +882,15 @@ impl GpuNetworkExecutor {
             });
 
             for (i, layer) in layers.iter().enumerate() {
-                // 参数已在pass外准备好，直接写入
-                self.queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&all_params[i]));
+                queue.write_buffer(params_buffer, 0, bytemuck::bytes_of(&all_params[i]));
 
                 // 选择管线
                 let pipeline = match layer.layer_type {
-                    LayerTypeGPU::Dense => &self.dense_pipeline,
-                    LayerTypeGPU::LSTM => &self.lstm_pipeline,
-                    LayerTypeGPU::Attention => &self.attention_pipeline,
-                    LayerTypeGPU::Residual => &self.residual_pipeline,
-                    LayerTypeGPU::Concat => &self.concat_pipeline,
+                    LayerTypeGPU::Dense => dense_pipeline,
+                    LayerTypeGPU::LSTM => lstm_pipeline,
+                    LayerTypeGPU::Attention => attention_pipeline,
+                    LayerTypeGPU::Residual => residual_pipeline,
+                    LayerTypeGPU::Concat => concat_pipeline,
                 };
 
                 cpass.set_pipeline(pipeline);
@@ -800,10 +902,9 @@ impl GpuNetworkExecutor {
             }
         }
 
-        self.queue.submit(Some(encoder.finish()));
+        queue.submit(Some(encoder.finish()));
     }
 
-    // 计算最优的工作组调度
     #[inline]
     fn calculate_optimal_dispatch(total_items: u32) -> (u32, u32, u32) {
         const WORKGROUP_SIZE: u32 = 256;
@@ -826,7 +927,11 @@ impl GpuNetworkExecutor {
         }
     }
 
-    fn upload_all_weights_and_biases(&self, layers: &[NetworkLayerGPU]) {
+    fn upload_all_weights_and_biases(
+        queue: &wgpu::Queue,
+        state: &ExecutorMutableState,
+        layers: &[NetworkLayerGPU],
+    ) {
         let mut all_weights = Vec::new();
         let mut all_biases = Vec::new();
 
@@ -836,15 +941,14 @@ impl GpuNetworkExecutor {
         }
 
         if !all_weights.is_empty() {
-            self.queue.write_buffer(&self.weights_buffer, 0, bytemuck::cast_slice(&all_weights));
+            queue.write_buffer(&state.weights_buffer, 0, bytemuck::cast_slice(&all_weights));
         }
 
         if !all_biases.is_empty() {
-            self.queue.write_buffer(&self.biases_buffer, 0, bytemuck::cast_slice(&all_biases));
+            queue.write_buffer(&state.biases_buffer, 0, bytemuck::cast_slice(&all_biases));
         }
     }
 
-    // 优化的结果下载：减少等待时间
     fn download_result_optimized(&self, source_buffer: &wgpu::Buffer, output_size: usize) -> Vec<f32> {
         let result_size = (output_size * std::mem::size_of::<f32>()) as u64;
 
@@ -877,7 +981,6 @@ impl GpuNetworkExecutor {
     }
 }
 
-// 为GPU优化创建简化的层结构
 #[derive(Debug, Clone)]
 pub struct NetworkLayerGPU {
     pub weights_flattened: Vec<f32>,
@@ -897,7 +1000,6 @@ pub enum LayerTypeGPU {
     Concat,
 }
 
-// 管线创建辅助函数
 fn create_dense_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout

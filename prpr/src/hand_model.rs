@@ -1,329 +1,963 @@
 use crate::core::note::Hand;
-use crate::core::NoteKind;
-use fastrand;
+use crate::core::{Note, NoteKind};
+use crate::judge::{Judgement, LIMIT_BAD, LIMIT_GOOD, LIMIT_PERFECT};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
-/// 人体工程学手部模型
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandModel {
-    /// 手部位置 (世界坐标)
-    pub position: Vector2,
-    /// 手部速度
-    pub velocity: Vector2,
-    /// 手部加速度
-    pub acceleration: Vector2,
-    /// 手部朝向角度 (弧度)
-    pub rotation: f32,
-    /// 手部张开程度 (0.0-1.0)
-    pub openness: f32,
-    /// 手部疲劳度 (0.0-1.0)
-    pub fatigue: f32,
-    /// 手部灵活性 (0.0-1.0)
-    pub dexterity: f32,
-    /// 上次更新时间
-    pub last_update_time: f32,
-    /// 手部类型
-    pub hand_type: Hand,
-}
-
-/// 手指模型
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FingerModel {
-    /// 手指位置 (相对于手部)
-    pub position: Vector2,
-    /// 手指弯曲角度 (弧度)
-    pub bend_angle: f32,
-    /// 手指长度
-    pub length: f32,
-    /// 手指粗细
-    pub thickness: f32,
-    /// 手指疲劳度
-    pub fatigue: f32,
-    /// 手指灵活性
-    pub dexterity: f32,
-    /// 是否正在按下
-    pub is_pressed: bool,
-    /// 按下时间
-    pub press_time: f32,
-    /// 手指类型
-    pub finger_type: FingerType,
-    /// 统计功能
-    #[serde(default)]
-    pub last_time: f32,
-    /// 置信度 (0.0-1.0)
-    #[serde(default)]
-    pub confidence: f32,
-    /// 成功连续记录
-    #[serde(default)]
-    pub success_streak: u32,
-    /// 总操作次数
-    #[serde(default)]
-    pub total_actions: u32,
-    /// 性能评分 (0.0-1.0)
-    #[serde(default)]
-    pub performance_score: f32,
-    /// 是否忙碌
-    #[serde(default)]
-    pub is_busy: bool,
-    /// 忙碌结束时间
-    #[serde(default)]
-    pub busy_until: f32,
-}
-
-/// 手指类型
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum FingerType {
-    Thumb,    // 拇指
-    Index,    // 食指
-    Middle,   // 中指
-    Ring,     // 无名指
-    Pinky,    // 小指
-}
-
-/// 手臂模型
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArmModel {
-    /// 肩膀位置
-    pub shoulder_position: Vector2,
-    /// 肘部位置
-    pub elbow_position: Vector2,
-    /// 手腕位置
-    pub wrist_position: Vector2,
-    /// 手臂角度
-    pub angle: f32,
-    /// 手臂长度
-    pub length: f32,
-    /// 手臂粗细
-    pub thickness: f32,
-    /// 手臂疲劳度
-    pub fatigue: f32,
-    /// 手臂力量
-    pub strength: f32,
-    /// 手臂灵活性
-    pub flexibility: f32,
-}
-
-/// 游戏模式枚举
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum GameMode {
-    TwoFinger,   // 2指模式：只使用食指
-    FourFinger,  // 4指模式：使用食指和中指
-}
-
-/// 人体工程学手部系统
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErgonomicHandSystem {
-    /// 左手模型
-    pub left_hand: HandModel,
-    /// 右手模型
-    pub right_hand: HandModel,
-    /// 左手手指模型
-    pub left_fingers: Vec<FingerModel>,
-    /// 右手手指模型
-    pub right_fingers: Vec<FingerModel>,
-    /// 左臂模型
-    pub left_arm: ArmModel,
-    /// 右臂模型
-    pub right_arm: ArmModel,
-    /// 身体中心位置
-    pub body_center: Vector2,
-    /// 身体倾斜角度
-    pub body_tilt: f32,
-    /// 游戏难度系数
-    pub difficulty_factor: f32,
-    /// 游戏模式
-    pub game_mode: GameMode,
-    /// 智能指纹模式选择器
-    pub finger_mode_selector: SmartFingerModeSelector,
-    /// 当前谱面时间
-    pub current_time: f32,
-    /// 最近的音符序列（用于模式分析）
-    #[serde(skip)]
-    pub recent_notes: Vec<crate::core::Note>,
-    /// 指纹模式切换冷却时间
-    pub mode_switch_cooldown: f32,
-    /// 上次模式切换时间
-    pub last_mode_switch_time: f32,
-}
-
-/// 碰撞检测结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CollisionResult {
-    /// 是否有碰撞
-    pub has_collision: bool,
-    /// 碰撞的手指索引对
-    pub colliding_pairs: Vec<(usize, usize, f32)>,
-    /// 最小分离距离（用于位置修正）
-    pub min_separation_distance: f32,
-}
-
-/// 2D向量
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct Vector2 {
     pub x: f32,
     pub y: f32,
 }
 
 impl Vector2 {
+    pub const ZERO: Vector2 = Vector2 { x: 0.0, y: 0.0 };
+
+    #[inline]
     pub fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
 
-    /// 计算向量长度
+    #[inline]
     pub fn magnitude(&self) -> f32 {
-        (self.x * self.x + self.y * self.y).sqrt()
+        self.x.hypot(self.y)
     }
 
-    /// 计算到另一个点的距离
+    #[inline]
+    pub fn squared_magnitude(&self) -> f32 {
+        self.x * self.x + self.y * self.y
+    }
+
+    #[inline]
     pub fn distance_to(&self, other: &Vector2) -> f32 {
-        let dx = self.x - other.x;
-        let dy = self.y - other.y;
-        (dx * dx + dy * dy).sqrt()
+        (*self - *other).magnitude()
     }
 
-    /// 归一化向量
+    #[inline]
     pub fn normalize(&self) -> Vector2 {
-        let mag = self.magnitude();
-        if mag > 0.0 {
-            Vector2::new(self.x / mag, self.y / mag)
+        let m = self.magnitude();
+        if m > 1e-8 {
+            Vector2::new(self.x / m, self.y / m)
         } else {
-            Vector2::new(0.0, 0.0)
+            Vector2::ZERO
         }
     }
 
-    /// 向量加法
-    pub fn add(&self, other: &Vector2) -> Vector2 {
-        Vector2::new(self.x + other.x, self.y + other.y)
-    }
-
-    /// 向量减法
-    pub fn subtract(&self, other: &Vector2) -> Vector2 {
-        Vector2::new(self.x - other.x, self.y - other.y)
-    }
-
-    /// 向量点积
+    #[inline]
     pub fn dot(&self, other: &Vector2) -> f32 {
         self.x * other.x + self.y * other.y
     }
 
-    /// 向量叉积
+    #[inline]
     pub fn cross(&self, other: &Vector2) -> f32 {
         self.x * other.y - self.y * other.x
     }
-    
-    /// 向量标量乘法
-    pub fn multiply_scalar(&self, scalar: f32) -> Vector2 {
-        Vector2::new(self.x * scalar, self.y * scalar)
-    }
-}
 
-// 运算符重载
-impl std::ops::Sub for Vector2 {
-    type Output = Vector2;
-    fn sub(self, other: Vector2) -> Vector2 {
-        Vector2::new(self.x - other.x, self.y - other.y)
-    }
-}
-
-impl std::ops::Add<Vector2> for Vector2 {
-    type Output = Vector2;
-    fn add(self, other: Vector2) -> Vector2 {
+    #[inline]
+    pub fn add(&self, other: &Vector2) -> Vector2 {
         Vector2::new(self.x + other.x, self.y + other.y)
     }
+
+    #[inline]
+    pub fn subtract(&self, other: &Vector2) -> Vector2 {
+        Vector2::new(self.x - other.x, self.y - other.y)
+    }
+
+    #[inline]
+    pub fn multiply_scalar(&self, s: f32) -> Vector2 {
+        Vector2::new(self.x * s, self.y * s)
+    }
+
+    #[inline]
+    pub fn rotate(&self, rad: f32) -> Vector2 {
+        let (s, c) = rad.sin_cos();
+        Vector2::new(self.x * c - self.y * s, self.x * s + self.y * c)
+    }
+
+    #[inline]
+    pub fn transform_by(&self, origin: &Vector2, rotation_rad: f32) -> Vector2 {
+        self.rotate(rotation_rad) + *origin
+    }
 }
 
+impl std::ops::Add for Vector2 {
+    type Output = Vector2;
+    fn add(self, r: Vector2) -> Vector2 {
+        Vector2::new(self.x + r.x, self.y + r.y)
+    }
+}
+impl std::ops::Sub for Vector2 {
+    type Output = Vector2;
+    fn sub(self, r: Vector2) -> Vector2 {
+        Vector2::new(self.x - r.x, self.y - r.y)
+    }
+}
 impl std::ops::Mul<f32> for Vector2 {
     type Output = Vector2;
-    fn mul(self, scalar: f32) -> Vector2 {
-        Vector2::new(self.x * scalar, self.y * scalar)
+    fn mul(self, s: f32) -> Vector2 {
+        Vector2::new(self.x * s, self.y * s)
+    }
+}
+impl std::ops::Neg for Vector2 {
+    type Output = Vector2;
+    fn neg(self) -> Vector2 {
+        Vector2::new(-self.x, -self.y)
     }
 }
 
-impl HandModel {
-    pub fn new(position: Vector2, hand_type: Hand) -> Self {
+/// Simple AABB / circle for collision.
+#[derive(Debug, Clone, Copy)]
+pub struct CollisionCapsule {
+    pub center: Vector2,
+    pub radius: f32,
+}
+
+impl CollisionCapsule {
+    #[inline]
+    pub fn overlaps(&self, other: &CollisionCapsule) -> f32 {
+        let d = self.center.distance_to(&other.center);
+        let gap = d - (self.radius + other.radius);
+        gap
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FingerType {
+    Thumb,
+    Index,
+    Middle,
+    Ring,
+    Pinky,
+}
+
+impl FingerType {
+    /// Canonical iteration order (thumb → pinky).
+    pub const ALL: [FingerType; 5] = [
+        FingerType::Thumb,
+        FingerType::Index,
+        FingerType::Middle,
+        FingerType::Ring,
+        FingerType::Pinky,
+    ];
+
+    pub fn index(self) -> usize {
+        match self {
+            FingerType::Thumb => 0,
+            FingerType::Index => 1,
+            FingerType::Middle => 2,
+            FingerType::Ring => 3,
+            FingerType::Pinky => 4,
+        }
+    }
+
+    pub fn from_index(i: usize) -> Option<FingerType> {
+        match i {
+            0 => Some(FingerType::Thumb),
+            1 => Some(FingerType::Index),
+            2 => Some(FingerType::Middle),
+            3 => Some(FingerType::Ring),
+            4 => Some(FingerType::Pinky),
+            _ => None,
+        }
+    }
+}
+
+/// One revolute joint with hard range-of-motion limits and current state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Joint {
+    /// Current flexion angle (rad). Positive = flexion (bending toward palm).
+    pub angle: f32,
+    /// Angular velocity (rad/s).
+    pub velocity: f32,
+    /// Minimum allowed angle (often negative = extension).
+    pub min_angle: f32,
+    /// Maximum allowed angle (flexion).
+    pub max_angle: f32,
+    /// Peak voluntary torque at this joint (N·m). Used for effort.
+    pub max_torque: f32,
+    /// 0 = fresh, 1 = fully fatigued (reduces max_torque).
+    pub fatigue: f32,
+}
+
+impl Joint {
+    pub fn new(min_angle: f32, max_angle: f32, max_torque: f32) -> Self {
         Self {
-            position,
-            velocity: Vector2::new(0.0, 0.0),
-            acceleration: Vector2::new(0.0, 0.0),
-            rotation: 0.0,
-            openness: 0.8, // 默认稍微张开
+            angle: 0.0,
+            velocity: 0.0,
+            min_angle,
+            max_angle,
+            max_torque,
             fatigue: 0.0,
-            dexterity: 1.0,
-            last_update_time: 0.0,
-            hand_type,
         }
     }
 
-    /// 更新手部状态
-    pub fn update(&mut self, new_position: Vector2, time: f32) {
-        let dt = time - self.last_update_time;
-        if dt > 0.0 {
-            // 计算速度（基于位置变化和时间间隔）
-            let position_change = new_position.subtract(&self.position);
-            let new_velocity = position_change.multiply_scalar(1.0 / dt.max(0.016));
-            
-            // 计算加速度 - 基于速度变化
-            let velocity_change = new_velocity.subtract(&self.velocity);
-            self.acceleration = velocity_change.multiply_scalar(1.0 / dt.max(0.016));
-            self.velocity = new_velocity;
-            
-            // 更新手部朝向（跟随运动方向）
-            if new_velocity.magnitude() > 0.001 {
-                self.rotation = new_velocity.y.atan2(new_velocity.x);
+    /// Clamp angle into anatomical limits. Returns the post-clamp angle.
+    #[inline]
+    pub fn clamp_angle(&mut self) -> f32 {
+        self.angle = self.angle.clamp(self.min_angle, self.max_angle);
+        self.angle
+    }
+
+    /// Effective torque capacity after fatigue (linear degradation).
+    #[inline]
+    pub fn effective_torque(&self) -> f32 {
+        self.max_torque * (1.0 - 0.7 * self.fatigue).max(0.0)
+    }
+}
+
+/// One bone segment in the kinematic chain.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct BoneSegment {
+    pub length: f32,       // cm
+    pub thickness: f32,    // cm (for collision capsules)
+    pub mass_g: f32,       // grams
+}
+
+impl BoneSegment {
+    pub fn new(length: f32, thickness: f32, mass_g: f32) -> Self {
+        Self { length, thickness, mass_g }
+    }
+}
+
+/// Per-finger skeletal structure with MCP (2-DOF), PIP, DIP joints.
+///
+/// For the thumb, MCP_abduction models opposition (a much larger range than
+/// the other fingers), and DIP is nearly independent of PIP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FingerSkeleton {
+    pub finger_type: FingerType,
+
+    /// Lateral offset from palm center where this finger is mounted (cm).
+    /// Positive X = toward the pinky side of the hand.
+    pub mount_offset: Vector2,
+
+    /// Static mounting angle of the metacarpal relative to the palm axis.
+    pub mount_angle: f32,
+
+    pub metacarpal: BoneSegment,
+    pub proximal: BoneSegment,
+    pub middle: BoneSegment,
+    pub distal: BoneSegment,
+
+    /// MCP abduction/adduction (rad; positive = spreading fingers apart).
+    pub mcp_abduction: Joint,
+    /// MCP flexion (rad).
+    pub mcp_flexion: Joint,
+    /// PIP flexion.
+    pub pip: Joint,
+    /// DIP flexion.
+    pub dip: Joint,
+
+    // Derived state (cached from FK).
+    #[serde(skip)]
+    pub fingertip_in_palm: Vector2,
+    #[serde(skip)]
+    pub pip_position_in_palm: Vector2,
+    #[serde(skip)]
+    pub dip_position_in_palm: Vector2,
+    #[serde(skip)]
+    pub mcp_position_in_palm: Vector2,
+
+    // Biomechanical state.
+    pub exertion_integral: f32,   // ∫ effort dt, drives fatigue
+    pub tendon_coupling: f32,    // 0..1; 1 = fully coupled FDP pull
+}
+
+impl FingerSkeleton {
+    /// Build a finger from the canonical Kapandji/Buczek measurements.
+    pub fn from_anatomy(finger_type: FingerType) -> Self {
+        // Bone lengths (cm) and thicknesses for an average adult hand.
+        let (meta_l, prox_l, mid_l, dist_l, thick) = match finger_type {
+            FingerType::Thumb  => (4.6, 3.2, 0.0, 2.3, 2.0),
+            FingerType::Index  => (6.7, 4.0, 2.3, 1.6, 1.7),
+            FingerType::Middle => (6.7, 4.5, 2.8, 1.8, 1.8),
+            FingerType::Ring   => (6.2, 4.2, 2.6, 1.7, 1.7),
+            FingerType::Pinky  => (5.2, 3.2, 1.9, 1.5, 1.5),
+        };
+
+        // Joint range-of-motion (rad). Values from [K] vol 1 + [B].
+        // (min, max, peak_torque_Nm)
+        let (abd_range, mcp_range, pip_range, dip_range) = match finger_type {
+            FingerType::Thumb => (
+                (-0.20,  1.20, 0.70),   // opposition / palmar abduction
+                (-0.30,  1.00, 1.10),
+                (-0.10,  1.60, 1.20),
+                (-0.15,  1.80, 0.90),
+            ),
+            FingerType::Index => (
+                (-0.35,  0.35, 0.25),
+                (-0.15,  1.60, 1.40),
+                ( 0.00,  1.80, 1.70),
+                ( 0.00,  1.55, 1.20),
+            ),
+            FingerType::Middle => (
+                (-0.30,  0.30, 0.25),
+                (-0.15,  1.60, 1.50),
+                ( 0.00,  1.80, 1.80),
+                ( 0.00,  1.55, 1.25),
+            ),
+            FingerType::Ring => (
+                (-0.30,  0.30, 0.22),
+                (-0.15,  1.60, 1.40),
+                ( 0.00,  1.80, 1.60),
+                ( 0.00,  1.55, 1.10),
+            ),
+            FingerType::Pinky => (
+                (-0.40,  0.45, 0.18),
+                (-0.15,  1.70, 1.20),
+                ( 0.00,  1.90, 1.40),
+                ( 0.00,  1.65, 0.95),
+            ),
+        };
+
+        let (abd_min, abd_max, abd_tq) = abd_range;
+        let (mcp_min, mcp_max, mcp_tq) = mcp_range;
+        let (pip_min, pip_max, pip_tq) = pip_range;
+        let (dip_min, dip_max, dip_tq) = dip_range;
+
+        // Mounting offset along the distal edge of the palm.
+        // (Palm is ~8 cm wide at the MCP line.)
+        let mount_x = match finger_type {
+            FingerType::Thumb  => -3.6,
+            FingerType::Index  => -2.5,
+            FingerType::Middle => -0.8,
+            FingerType::Ring   =>  0.9,
+            FingerType::Pinky  =>  2.5,
+        };
+        let mount_y = match finger_type {
+            FingerType::Thumb => -3.5,
+            _                 =>  4.2,
+        };
+
+        let mount_angle = match finger_type {
+            FingerType::Thumb  => -1.10,   // thumb points "down-out"
+            FingerType::Index  =>  0.10,
+            FingerType::Middle =>  0.00,
+            FingerType::Ring   => -0.08,
+            FingerType::Pinky  => -0.18,
+        };
+
+        // Approximate bone masses (g) from Drillis et al. (1964) hand segment data.
+        let mm = |l: f32| l * thick * 0.11;
+        let metacarpal = BoneSegment::new(meta_l, thick * 1.2, mm(meta_l));
+        let proximal   = BoneSegment::new(prox_l, thick, mm(prox_l));
+        let mid_effective: f32 = if mid_l < 0.1 { 0.1 } else { mid_l };
+        let middle     = BoneSegment::new(mid_effective, thick * 0.9, mm(mid_effective));
+        let distal     = BoneSegment::new(dist_l, thick * 0.8, mm(dist_l));
+
+        Self {
+            finger_type,
+            mount_offset: Vector2::new(mount_x, mount_y),
+            mount_angle,
+            metacarpal,
+            proximal,
+            middle,
+            distal,
+            mcp_abduction: Joint::new(abd_min, abd_max, abd_tq),
+            mcp_flexion:   Joint::new(mcp_min, mcp_max, mcp_tq),
+            pip:           Joint::new(pip_min, pip_max, pip_tq),
+            dip:           Joint::new(dip_min, dip_max, dip_tq),
+            fingertip_in_palm: Vector2::ZERO,
+            pip_position_in_palm: Vector2::ZERO,
+            dip_position_in_palm: Vector2::ZERO,
+            mcp_position_in_palm: Vector2::ZERO,
+            exertion_integral: 0.0,
+            tendon_coupling: 0.0,
+        }
+    }
+
+    // ─── Kinematics ─────────────────────────────────────────────────────
+
+    /// Forward kinematics. Updates the cached `*_in_palm` positions and
+    /// returns the fingertip position in the palm frame.
+    pub fn forward_kinematics(&mut self) -> Vector2 {
+        // Enforce joint limits before any computation.
+        self.mcp_abduction.clamp_angle();
+        self.mcp_flexion.clamp_angle();
+        self.pip.clamp_angle();
+        self.dip.clamp_angle();
+
+        // Thumb has no middle phalanx.
+        let mid_l = if self.finger_type == FingerType::Thumb { 0.0 } else { self.middle.length };
+
+        // MCP base position (end of metacarpal along mount_angle).
+        let mcp = Vector2::new(self.metacarpal.length, 0.0).rotate(self.mount_angle)
+            + self.mount_offset;
+        self.mcp_position_in_palm = mcp;
+
+        // Proximal phalanx: rotated by mcp_abduction + mcp_flexion (2-D we fold
+        // abduction into the rotation; a full 3-D model would keep them separate).
+        let prox_dir = self.mount_angle + self.mcp_abduction.angle * 0.4
+            + self.mcp_flexion.angle;
+        let pip = mcp + Vector2::new(self.proximal.length, 0.0).rotate(prox_dir);
+        self.pip_position_in_palm = pip;
+
+        // Middle phalanx: adds PIP flexion.
+        let mid_dir = prox_dir + self.pip.angle;
+        let dip = pip + Vector2::new(mid_l, 0.0).rotate(mid_dir);
+        self.dip_position_in_palm = dip;
+
+        // Distal phalanx: adds DIP flexion.
+        let dist_dir = mid_dir + self.dip.angle;
+        let tip = dip + Vector2::new(self.distal.length, 0.0).rotate(dist_dir);
+        self.fingertip_in_palm = tip;
+        tip
+    }
+
+    /// Reach envelope: max distance from MCP base to fingertip when fully
+    /// extended, useful as a cheap pre-filter.
+    pub fn max_reach_from_mcp(&self) -> f32 {
+        self.proximal.length
+            + self.middle.length
+            + self.distal.length
+    }
+
+    /// World-space fingertip position given a palm origin and rotation.
+    pub fn fingertip_world(&self, palm_origin: Vector2, palm_rot: f32) -> Vector2 {
+        self.fingertip_in_palm.transform_by(&palm_origin, palm_rot)
+    }
+
+    /// Analytical 2-D IK for the (proximal + middle + distal) subchain,
+    /// treating the DIP as coupled to the PIP (coupling factor ≈ 0.7 from FDP
+    /// tendon sharing; see [Chalfoun et al. 2006]).
+    ///
+    /// `target` is the desired fingertip position *in the MCP frame* (i.e.
+    /// with MCP at the origin and the proximal bone along +X when angle = 0).
+    ///
+    /// Returns `(mcp_flexion, pip_flexion, dip_flexion, reached)` where
+    /// `reached` is false if the target is outside the reach envelope.
+    pub fn solve_ik(&self, target: Vector2) -> (f32, f32, f32, bool) {
+        const COUPLING: f32 = 0.70; // DIP ≈ 0.7·PIP
+
+        // Thumb: only two bones (no middle phalanx).
+        let mid_l = if self.finger_type == FingerType::Thumb { 0.0 } else { self.middle.length };
+
+        // Effective 2-link arm: L1 = proximal, L2 = middle + distal (because
+        // DIP is slaved to PIP, the distal + middle act as one rigid-ish link).
+        let l1 = self.proximal.length;
+        let l2 = mid_l + self.distal.length;
+
+        let d2 = target.squared_magnitude();
+        let d = d2.sqrt();
+        let max_reach = l1 + l2;
+        let min_reach = (l1 - l2).abs();
+
+        if d > max_reach * 1.001 || d < min_reach * 0.999 {
+            // Out of envelope. Return best-effort angles pointing at target.
+            let dir = if d > 1e-6 { target.y.atan2(target.x) } else { 0.0 };
+            return (dir, self.pip.max_angle, self.dip.max_angle, false);
+        }
+
+        // Standard 2-link planar IK (elbow-up solution).
+        let cos_pip = ((d2 - l1 * l1 - l2 * l2) / (2.0 * l1 * l2)).clamp(-1.0, 1.0);
+        let pip_angle = (cos_pip).acos();  // angle between L1 and L2
+        let k1 = l1 + l2 * cos_pip;
+        let k2 = l2 * (1.0 - cos_pip * cos_pip).sqrt();
+        let mcp_angle = target.y.atan2(target.x) - k2.atan2(k1);
+
+        // PIP flexion is how much we bend past straight: π - acos(cos).
+        let pip_flexion = PI - pip_angle;
+        let dip_flexion = pip_flexion * COUPLING;
+
+        (mcp_angle, pip_flexion, dip_flexion, true)
+    }
+
+    /// Apply the IK solution, clamping to joint limits.
+    pub fn apply_ik(&mut self, mcp: f32, pip: f32, dip: f32) {
+        self.mcp_flexion.angle = mcp;
+        self.pip.angle = pip;
+        self.dip.angle = dip;
+        self.mcp_flexion.clamp_angle();
+        self.pip.clamp_angle();
+        self.dip.clamp_angle();
+    }
+
+    // ─── Biomechanics ───────────────────────────────────────────────────
+
+    /// Total muscle effort (0..1) for the current joint state.
+    /// Computed as sum of |angle|/range weighted by the torque demand.
+    pub fn instantaneous_effort(&self) -> f32 {
+        let norm = |j: &Joint| -> f32 {
+            let span = (j.max_angle - j.min_angle).max(1e-3);
+            let rel = (j.angle - j.min_angle) / span; // 0..1
+            // U-shaped effort: both extremes are costly.
+            let u = (rel - 0.5).abs() * 2.0;
+            u * u
+        };
+        let abd_effort = norm(&self.mcp_abduction) * 0.25;
+        let mcp_effort = norm(&self.mcp_flexion) * 0.30;
+        let pip_effort = norm(&self.pip) * 0.25;
+        let dip_effort = norm(&self.dip) * 0.20;
+        (abd_effort + mcp_effort + pip_effort + dip_effort).min(1.0)
+    }
+
+    /// Step the fatigue state forward by `dt` seconds.
+    ///
+    /// Uses a simple first-order model:
+    ///
+    /// ```text
+    /// exertion_integral += effort · dt
+    /// fatigue           = 1 - exp(-exertion_integral / τ_rise)
+    /// fatigue          += recovery_rate · dt   (when effort ≈ 0)
+    /// ```
+    pub fn step_fatigue(&mut self, dt: f32) {
+        const TAU_RISE: f32 = 40.0;     // seconds to saturate
+        const RECOVERY_RATE: f32 = 0.015; // per second at rest
+
+        let effort = self.instantaneous_effort();
+        self.exertion_integral += effort * dt;
+
+        let target_fatigue = 1.0 - (-self.exertion_integral / TAU_RISE).exp();
+        // Low-pass filter toward the target.
+        let alpha = (dt / (dt + 2.0)).clamp(0.0, 1.0);
+        let new_fatigue = (1.0 - alpha) * self.fatigue_avg() + alpha * target_fatigue;
+
+        // Recovery at rest.
+        let recovery = if effort < 0.1 { RECOVERY_RATE * dt } else { 0.0 };
+        let final_fatigue = (new_fatigue - recovery).clamp(0.0, 1.0);
+
+        // Write back into each joint (same value – we model a shared muscle
+        // pool per finger).
+        for j in [
+            &mut self.mcp_abduction,
+            &mut self.mcp_flexion,
+            &mut self.pip,
+            &mut self.dip,
+        ] {
+            j.fatigue = final_fatigue;
+        }
+    }
+
+    fn fatigue_avg(&self) -> f32 {
+        (self.mcp_abduction.fatigue
+            + self.mcp_flexion.fatigue
+            + self.pip.fatigue
+            + self.dip.fatigue)
+            * 0.25
+    }
+
+    /// Collision capsule for the fingertip (used for inter-finger checks).
+    pub fn fingertip_capsule(&self) -> CollisionCapsule {
+        CollisionCapsule {
+            center: self.fingertip_in_palm,
+            radius: self.distal.thickness * 0.5 + 0.2, // small safety margin
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §3  Skeletal hand + forearm
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One skeletal hand (palm + 5 fingers).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkeletalHand {
+    pub hand_type: Hand,
+
+    /// Palm origin in world space (cm; origin = player midline).
+    pub palm_position: Vector2,
+    /// Palm rotation (rad; 0 = fingers pointing +Y, palm plane parallel to screen).
+    pub palm_rotation: f32,
+    /// Palm velocity (cm/s) – used by Fitts' Law to estimate next-MT.
+    pub palm_velocity: Vector2,
+
+    pub fingers: [FingerSkeleton; 5],
+
+    // Aggregate state (derived; updated by `step`).
+    pub grip_force_capacity: f32,   // N, degrades with fatigue + velocity
+    pub hand_fatigue: f32,          // mean over fingers
+    pub dexterity: f32,             // 0..1 composite score
+}
+
+impl SkeletalHand {
+    pub fn new(hand_type: Hand) -> Self {
+        let mut fingers: [FingerSkeleton; 5] = [
+            FingerSkeleton::from_anatomy(FingerType::Thumb),
+            FingerSkeleton::from_anatomy(FingerType::Index),
+            FingerSkeleton::from_anatomy(FingerType::Middle),
+            FingerSkeleton::from_anatomy(FingerType::Ring),
+            FingerSkeleton::from_anatomy(FingerType::Pinky),
+        ];
+
+        // Mirror the X axis for the right hand (the whole skeleton is defined
+        // in a left-hand frame).
+        if matches!(hand_type, Hand::Right) {
+            for f in &mut fingers {
+                f.mount_offset.x = -f.mount_offset.x;
+                f.mount_angle = -f.mount_angle;
+                f.mcp_abduction.angle = -f.mcp_abduction.angle;
             }
-            
-            self.position = new_position;
-            self.last_update_time = time;
-            
-            // 动态更新手部张开程度（基于速度）
-            let speed = self.velocity.magnitude();
-            self.openness = (0.7 + speed * 0.3).min(1.0);
-            
-            // 更新疲劳度（基于运动强度）
-            self.fatigue = (self.fatigue + speed * 0.01).min(1.0);
-            
-            // 恢复机制
-            self.fatigue = (self.fatigue - 0.001).max(0.0);
+        }
+
+        Self {
+            hand_type,
+            palm_position: Vector2::new(
+                if matches!(hand_type, Hand::Left) { -15.0 } else { 15.0 },
+                0.0,
+            ),
+            palm_rotation: 0.0,
+            palm_velocity: Vector2::ZERO,
+            fingers,
+            grip_force_capacity: 300.0, // ~30 kg, average adult
+            hand_fatigue: 0.0,
+            dexterity: 1.0,
         }
     }
 
-    /// 计算到达目标位置的难度
-    pub fn calculate_movement_difficulty(&self, target: &Vector2) -> f32 {
-        let distance = self.position.distance_to(target);
-        let direction = target.subtract(&self.position).normalize();
-        let angle_diff = (self.rotation - direction.dot(&Vector2::new(1.0, 0.0))).abs();
-        
-        // 考虑距离、角度和疲劳度
-        let distance_factor = (distance / 10.0).min(1.0);
-        let angle_factor = angle_diff / PI;
-        let fatigue_factor = self.fatigue;
-        
-        (distance_factor + angle_factor + fatigue_factor) / 3.0
+    /// Run forward kinematics for every finger and return their world-space
+    /// fingertip positions.
+    pub fn update_kinematics(&mut self) -> [Vector2; 5] {
+        let mut tips = [Vector2::ZERO; 5];
+        for (i, f) in self.fingers.iter_mut().enumerate() {
+            f.forward_kinematics();
+            tips[i] = f.fingertip_world(self.palm_position, self.palm_rotation);
+        }
+        self.hand_fatigue = self.fingers.iter().map(|f| f.fatigue_avg()).sum::<f32>() / 5.0;
+        // Force-velocity: faster movement → lower peak grip force.
+        //   F(v) = F0 · (1 - |v| / v_max)  (linearized Hill)
+        let v = self.palm_velocity.magnitude();
+        const V_MAX: f32 = 150.0; // cm/s, peak hand-transport speed
+        let velocity_factor = (1.0 - v / V_MAX).max(0.2);
+        self.grip_force_capacity = 300.0 * velocity_factor * (1.0 - 0.5 * self.hand_fatigue);
+        // Dexterity: 1 - fatigue, weighted toward the active fingers.
+        self.dexterity = (1.0 - self.hand_fatigue).clamp(0.0, 1.0);
+        tips
     }
+
+    /// Move the palm toward a target over `dt` seconds using a bell-shaped
+    /// velocity profile (minimum-jerk trajectory). Returns whether the target
+    /// was reached within this step.
+    pub fn step_palm_toward(&mut self, target: Vector2, dt: f32, movement_time: f32) -> bool {
+        if movement_time < 1e-3 {
+            self.palm_position = target;
+            self.palm_velocity = Vector2::ZERO;
+            return true;
+        }
+        let elapsed = dt.min(movement_time);
+        let t_norm = elapsed / movement_time; // 0..1
+        // Minimum-jerk position: s(t) = 10t³ - 15t⁴ + 6t⁵
+        let s = 10.0 * t_norm.powi(3) - 15.0 * t_norm.powi(4) + 6.0 * t_norm.powi(5);
+        let new_pos = self.palm_position + (target - self.palm_position) * s;
+        self.palm_velocity = (new_pos - self.palm_position) * (1.0 / dt.max(1e-3));
+        self.palm_position = new_pos;
+        t_norm >= 1.0
+    }
+
+    /// World-space fingertip position for one finger.
+    pub fn fingertip_world(&self, finger: FingerType) -> Vector2 {
+        self.fingers[finger.index()].fingertip_world(self.palm_position, self.palm_rotation)
+    }
+
+    /// Fitts'-Law movement time (s) to move this hand's *index finger tip*
+    /// from its current world position to `target` (also world-space, cm).
+    ///
+    /// `effective_target_width` is the "W" in Fitts' Law – for a Phigros note
+    /// it is approximately the judgement-line width in cm.
+    pub fn fitts_movement_time(&self, target: Vector2, effective_target_width: f32) -> f32 {
+        let current_tip = self.fingers[FingerType::Index.index()]
+            .fingertip_world(self.palm_position, self.palm_rotation);
+        let d = current_tip.distance_to(&target).max(0.1);
+        let w = effective_target_width.max(0.5);
+        fitts_movement_time(d, w)
+    }
+
+    /// Solve IK for one finger so its fingertip lands at `world_target`.
+    /// Returns `true` if the target is inside the reachable envelope.
+    pub fn aim_finger_at(
+        &mut self,
+        finger: FingerType,
+        world_target: Vector2,
+    ) -> bool {
+        // Transform world target into the MCP frame of the finger.
+        let f = &self.fingers[finger.index()];
+        let mcp_world = f.mcp_position_in_palm.transform_by(&self.palm_position, self.palm_rotation);
+        let local = (world_target - mcp_world).rotate(-self.palm_rotation - f.mount_angle);
+
+        let (mcp, pip, dip, reached) = self.fingers[finger.index()].solve_ik(local);
+        self.fingers[finger.index()].apply_ik(mcp, pip, dip);
+        self.fingers[finger.index()].forward_kinematics();
+        reached
+    }
+
+    /// Advance the whole hand by `dt` seconds (fatigue + kinematics).
+    pub fn step(&mut self, dt: f32) {
+        for f in &mut self.fingers {
+            f.step_fatigue(dt);
+            f.forward_kinematics();
+        }
+        self.update_kinematics();
+    }
+
+    /// Check inter-finger collisions within this hand.
+    pub fn detect_internal_collisions(&self) -> Vec<(FingerType, FingerType, f32)> {
+        let mut pairs = Vec::new();
+        for i in 0..5 {
+            for j in (i + 1)..5 {
+                let a = self.fingers[i].fingertip_capsule();
+                let b = self.fingers[j].fingertip_capsule();
+                let gap = a.overlaps(&b);
+                if gap < 0.0 {
+                    if let (Some(fi), Some(fj)) =
+                        (FingerType::from_index(i), FingerType::from_index(j))
+                    {
+                        pairs.push((fi, fj, -gap));
+                    }
+                }
+            }
+        }
+        pairs
+    }
+}
+
+/// Forearm: shoulder → elbow → wrist (the wrist is the palm origin).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkeletalArm {
+    pub side: Hand,
+
+    pub shoulder: Vector2,     // cm; world-space
+    pub elbow: Vector2,
+    pub wrist: Vector2,        // = SkeletalHand::palm_position
+
+    pub upper_arm_length: f32, // cm (acromion → lateral epicondyle)
+    pub forearm_length: f32,   // cm (lateral epicondyle → radial styloid)
+
+    pub shoulder_angle: f32,   // rad; 0 = arm hanging down
+    pub elbow_angle: f32,      // rad; 0 = straight, positive = flexion
+
+    pub shoulder_fatigue: f32,
+    pub elbow_fatigue: f32,
+}
+
+impl SkeletalArm {
+    pub fn new(side: Hand) -> Self {
+        let x = if matches!(side, Hand::Left) { -22.0 } else { 22.0 };
+        Self {
+            side,
+            shoulder: Vector2::new(x, 45.0), // shoulder sits above the origin
+            elbow:    Vector2::new(x, 20.0),
+            wrist:    Vector2::new(x, 0.0),
+            upper_arm_length: 30.0,
+            forearm_length: 26.0,
+            shoulder_angle: 0.0,
+            elbow_angle: 0.0,
+            shoulder_fatigue: 0.0,
+            elbow_fatigue: 0.0,
+        }
+    }
+
+    /// 2-link IK so the wrist lands at `target`. Returns `(shoulder, elbow)`
+    /// angles in radians, and whether the target was reachable.
+    pub fn solve_wrist_ik(&self, target: Vector2) -> (f32, f32, bool) {
+        let d_vec = target - self.shoulder;
+        let d2 = d_vec.squared_magnitude();
+        let d = d2.sqrt();
+        let l1 = self.upper_arm_length;
+        let l2 = self.forearm_length;
+        let max_reach = l1 + l2;
+        if d > max_reach * 1.001 || d < (l1 - l2).abs() * 0.999 {
+            // Unreachable: aim straight at the target.
+            let dir = d_vec.y.atan2(d_vec.x);
+            return (dir, 0.0, false);
+        }
+        let cos_e = ((d2 - l1 * l1 - l2 * l2) / (2.0 * l1 * l2)).clamp(-1.0, 1.0);
+        let elbow = (cos_e).acos();
+        let k1 = l1 + l2 * cos_e;
+        let k2 = l2 * (1.0 - cos_e * cos_e).sqrt();
+        let shoulder = d_vec.y.atan2(d_vec.x) - k2.atan2(k1);
+        (shoulder, PI - elbow, true)
+    }
+
+    /// Apply the IK solution and recompute elbow/wrist positions.
+    pub fn apply_ik(&mut self, shoulder: f32, elbow_flexion: f32) {
+        self.shoulder_angle = shoulder;
+        self.elbow_angle = elbow_flexion;
+        let elbow = self.shoulder
+            + Vector2::new(self.upper_arm_length, 0.0).rotate(shoulder);
+        let wrist = elbow
+            + Vector2::new(self.forearm_length, 0.0).rotate(shoulder + elbow_flexion);
+        self.elbow = elbow;
+        self.wrist = wrist;
+    }
+
+    /// Advance fatigue.
+    pub fn step(&mut self, dt: f32, effort: f32) {
+        // Simple first-order model, same idea as the finger version.
+        let rise = (effort * dt * 0.02).min(0.05);
+        let recovery = 0.01 * dt;
+        self.shoulder_fatigue = (self.shoulder_fatigue + rise - recovery).clamp(0.0, 1.0);
+        self.elbow_fatigue    = (self.elbow_fatigue    + rise - recovery).clamp(0.0, 1.0);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §4  Motion dynamics
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fitts' Law: movement time to acquire a target of width `W` at distance `D`.
+///
+/// `MT = a + b · log₂(D/W + 1)`.
+///
+/// Constants from [Soukoreff & MacKenzie 2004] meta-analysis for rapid aimed
+/// hand movements: a ≈ 0.0 s, b ≈ 0.10 s/bit (well-practiced users).
+/// We add a floor so MT never drops below a physiologically plausible value.
+#[inline]
+pub fn fitts_movement_time(distance: f32, target_width: f32) -> f32 {
+    const A: f32 = 0.040;   // intercept (s) – reaction + trigger
+    const B: f32 = 0.095;   // slope (s/bit)
+    const MIN_MT: f32 = 0.050; // 50 ms floor
+    let id = ((distance / target_width.max(1e-3)) + 1.0).log2();
+    (A + B * id).max(MIN_MT)
+}
+
+/// Predict the timing error (in seconds) of a movement of duration `mt` that
+/// was initiated `initiation_delay` seconds after the ideal time. Returns the
+/// absolute error vs. `desired_arrival_time`.
+#[inline]
+pub fn predicted_timing_error(
+    mt: f32,
+    initiation_delay: f32,
+    desired_arrival_time_after_now: f32,
+) -> f32 {
+    let arrival = mt + initiation_delay;
+    (arrival - desired_arrival_time_after_now).abs()
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NotePrediction {
+    pub judgement: Judgement,
+    /// Predicted timing error (s, non-negative).
+    pub dt: f32,
+    /// World-space fingertip-vs-note distance (cm).
+    pub position_error: f32,
+    /// True if the hand can physically reach the note in time.
+    pub feasible: bool,
+    /// 0..1 composite score (legacy; prefer `loss` directly).
+    pub confidence: f32,
+    /// Scalar loss from `phigros_loss::note_loss`.
+    pub loss: f32,
+}
+
+impl SkeletalHand {
+    pub fn predict_action_outcome(
+        &self,
+        world_target: Vector2,
+        note_kind: &NoteKind,
+        note_time: f32,
+        current_time: f32,
+    ) -> NotePrediction {
+        let idx = &self.fingers[FingerType::Index.index()];
+        let mcp_world = idx.mcp_position_in_palm
+            .transform_by(&self.palm_position, self.palm_rotation);
+        let reach = mcp_world.distance_to(&world_target);
+        let max_reach = idx.max_reach_from_mcp();
+        let reachable = reach <= max_reach * 1.02;
+
+        let target_width = match note_kind {
+            NoteKind::Click => 3.0,
+            NoteKind::Hold { .. } => 4.0,
+            NoteKind::Drag => 5.0,
+            NoteKind::Flick => 4.0,
+        };
+        let mt = self.fitts_movement_time(world_target, target_width);
+
+        let dt = predicted_timing_error(mt, 0.0, note_time - current_time);
+
+        let mut judgement = if !reachable {
+            Judgement::Miss
+        } else if dt <= LIMIT_PERFECT {
+            Judgement::Perfect
+        } else if dt <= LIMIT_GOOD {
+            Judgement::Good
+        } else if dt <= LIMIT_BAD {
+            Judgement::Bad
+        } else {
+            Judgement::Miss
+        };
+
+        if matches!(note_kind, NoteKind::Flick | NoteKind::Drag)
+            && matches!(judgement, Judgement::Bad)
+        {
+            judgement = Judgement::Good;
+        }
+        // Hold: as long as we reach it, we at least get Good.
+        if matches!(note_kind, NoteKind::Hold { .. }) && reachable
+            && matches!(judgement, Judgement::Bad | Judgement::Miss)
+        {
+            judgement = Judgement::Good;
+        }
+
+        let feasible = reachable && dt <= LIMIT_BAD;
+        let loss = crate::loss::note_loss(judgement, dt, feasible);
+        let confidence = (1.0 - loss * 0.5).clamp(0.0, 1.0);
+
+        NotePrediction {
+            judgement,
+            dt,
+            position_error: reach,
+            feasible,
+            confidence,
+            loss,
+        }
+    }
+
+    pub fn choose_best_hand(
+        left: &SkeletalHand,
+        right: &SkeletalHand,
+        note: &Note,
+    ) -> (Hand, NotePrediction) {
+        let world = Vector2::new(note.object.translation.0.now(), 0.0);
+        let lp = left.predict_action_outcome(world, &note.kind, note.time, note.time);
+        let rp = right.predict_action_outcome(world, &note.kind, note.time, note.time);
+        if lp.loss <= rp.loss {
+            (Hand::Left, lp)
+        } else {
+            (Hand::Right, rp)
+        }
+    }
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GameMode {
+    TwoFinger,
+    FourFinger,
+}
+
+/// Legacy finger-state record. Fields are now *derived* from
+/// `FingerSkeleton` state inside `ErgonomicHandSystem::sync_legacy_views`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FingerModel {
+    pub position: Vector2,
+    pub bend_angle: f32,
+    pub length: f32,
+    pub thickness: f32,
+    pub fatigue: f32,
+    pub dexterity: f32,
+    pub is_pressed: bool,
+    pub press_time: f32,
+    pub finger_type: FingerType,
+    #[serde(default)] pub last_time: f32,
+    #[serde(default)] pub confidence: f32,
+    #[serde(default)] pub success_streak: u32,
+    #[serde(default)] pub total_actions: u32,
+    #[serde(default)] pub performance_score: f32,
+    #[serde(default)] pub is_busy: bool,
+    #[serde(default)] pub busy_until: f32,
 }
 
 impl FingerModel {
-    pub fn new(position: Vector2, finger_type: FingerType) -> Self {
-        let (length, thickness, dexterity) = match finger_type {
-            FingerType::Thumb => (0.6, 0.3, 0.7),    // 拇指灵活性中等
-            FingerType::Index => (1.0, 0.25, 1.0),  // 食指灵活性最高
-            FingerType::Middle => (1.1, 0.28, 0.8), // 中指长度最长但灵活性较低
-            FingerType::Ring => (0.95, 0.24, 0.6),  // 无名指灵活性较低
-            FingerType::Pinky => (0.8, 0.2, 0.4),   // 小指灵活性最低
-        };
-        
+    pub fn from_skeleton(fs: &FingerSkeleton) -> Self {
         Self {
-            position,
-            bend_angle: 0.0,
-            length,
-            thickness,
-            fatigue: 0.0,
-            dexterity,
+            position: fs.fingertip_in_palm,
+            bend_angle: fs.mcp_flexion.angle + fs.pip.angle + fs.dip.angle,
+            length: fs.proximal.length + fs.middle.length + fs.distal.length,
+            thickness: fs.proximal.thickness,
+            fatigue: fs.fatigue_avg(),
+            dexterity: (1.0 - fs.fatigue_avg()).clamp(0.0, 1.0),
             is_pressed: false,
             press_time: 0.0,
-            finger_type,
+            finger_type: fs.finger_type,
             last_time: -1.0,
             confidence: 1.0,
             success_streak: 0,
@@ -334,1140 +968,114 @@ impl FingerModel {
         }
     }
 
-    /// 更新手指状态
-    pub fn update(&mut self, target_position: Option<Vector2>, time: f32) {
-        if let Some(target) = target_position {
-            // 计算手指弯曲角度（基于目标距离和动态变化）
-            let distance = target.distance_to(&self.position);
-            let base_bend_ratio = (distance / self.length).min(1.0);
-            
-            // 添加时间相关的动态变化
-            let dynamic_factor = 0.8 + 0.2 * (time * 0.5 + self.finger_type as i32 as f32 * 0.1).sin();
-            let bend_ratio = base_bend_ratio * dynamic_factor;
-            
-            self.bend_angle = bend_ratio * PI / 2.0; // 最大弯曲90度
-        } else if self.is_pressed {
-            // 如果正在按下但没有目标位置，按下状态会维持弯曲
-            self.bend_angle = PI / 3.0; // 默认按下弯曲60度
-        } else {
-            // 恢复自然弯曲状态（带时间变化）
-            let natural_bend = 0.1 + 0.05 * (time * 0.3).sin();
-            self.bend_angle = self.bend_angle * 0.95 + natural_bend * 0.05;
-        }
-        
-        if self.is_pressed {
-            // 按下状态的疲劳度累积
-            self.press_time += 0.016; // 每帧增加16ms
-            self.fatigue = (self.fatigue + 0.002).min(1.0);
-            
-            // 按下时的动态弯曲
-            self.bend_angle = self.bend_angle.max(PI / 4.0); // 最小弯曲45度
-        } else {
-            // 恢复机制
-            self.fatigue = (self.fatigue - 0.001).max(0.0);
-            
-            // 逐渐恢复弯曲角度到自然状态
-            if self.bend_angle > 0.1 {
-                self.bend_angle = (self.bend_angle - 0.005).max(0.0);
-            }
-            
-            // 恢复按下状态（如果按下时间过长）
-            if self.press_time > 2.0 { // 超过2秒自动恢复
-                self.press_time = 0.0;
-            }
-        }
-        
-        // 更新灵活性（基于疲劳度，保留基础灵活性）
-        let base_dexterity = match self.finger_type {
-            FingerType::Thumb => 0.7,
-            FingerType::Index => 1.0,
-            FingerType::Middle => 0.8,
-            FingerType::Ring => 0.6,
-            FingerType::Pinky => 0.4,
-        };
-        self.dexterity = (base_dexterity - self.fatigue * base_dexterity * 0.5).max(0.2);
-    }
-
-    /// 更新统计状态（从 FingerState 迁移）
-    pub fn update_state(&mut self, new_pos: Vector2, time: f32, success: bool, note_kind: &NoteKind) {
-        let time_diff = time - self.last_time;
-
-        if time_diff > 0.001 {
-            let distance = new_pos.distance_to(&self.position);
-            let new_velocity = (new_pos - self.position).multiply_scalar(1.0 / time_diff);
-            // 简化的速度更新
-            if self.last_time > 0.0 {
-                // 基于时间差的动态速度计算
-                let base_velocity = new_velocity.multiply_scalar(0.3);
-                self.position = self.position.add(&base_velocity.multiply_scalar(time_diff));
-            }
-            
-            // 疲劳计算
-            let base_movement_cost = distance * 0.12;
-            let speed_cost = (new_velocity.magnitude() / 10.0).powf(1.5) * 0.08;
-            let time_factor = if time_diff < 0.1 { 2.0 } else { 1.0 };
-
-            let total_cost = (base_movement_cost + speed_cost) * time_factor;
-            self.fatigue = (self.fatigue + total_cost).min(1.0);
-
-            // 动态恢复率，基于休息时间
-            let rest_factor = if time_diff > 0.3 { 2.0 } else { 1.0 };
-            let recovery = (time_diff * 0.25 * rest_factor).min(0.3);
-            self.fatigue = (self.fatigue - recovery).max(0.0);
-        }
-
-        // 繁忙状态更新
-        let busy_duration = match note_kind {
-            NoteKind::Hold { end_time, .. } => (end_time - time + 0.1).max(0.15),
-            NoteKind::Drag => 0.25,
-            NoteKind::Flick => 0.2,
-            NoteKind::Click => 0.12,
-        };
-
-        self.is_busy = true;
-        self.busy_until = time + busy_duration;
-        self.last_time = time;
-
-        // 信心更新
-        self.total_actions += 1;
-        if success {
-            self.success_streak += 1;
-            // 信心增长有上限，避免过于自信
-            let confidence_gain = (0.01 * (1.0 - self.confidence)).max(0.002);
-            self.confidence = (self.confidence + confidence_gain).min(0.95);
-        } else {
-            self.success_streak = 0;
-            // 失败时信心下降更明显
-            let confidence_loss = (0.03 + self.confidence * 0.01).max(0.01);
-            self.confidence = (self.confidence - confidence_loss).max(0.15);
-        }
-
-        // 性能评分计算改进
-        let recent_window = 15.0_f32.min(self.total_actions as f32);
-        let recent_success_rate = if recent_window > 0.0 {
-            self.success_streak as f32 / recent_window
-        } else {
-            0.5
-        };
-
-        // 添加随机波动，模拟真实表现
-        let random_variance = fastrand::f32() * 0.1 - 0.05;
-        self.performance_score = (
-            recent_success_rate * 0.4 +
-                self.confidence * 0.35 +
-                (1.0 - self.fatigue) * 0.25 +
-                random_variance
-        ).clamp(0.1, 0.95);
-    }
-
-    /// 清理和验证状态
-    pub fn clean(&mut self) {
-        if !self.last_time.is_finite() {
-            self.last_time = -1.0;
-        }
-        if !self.confidence.is_finite() {
-            self.confidence = 1.0;
-        }
-        if !self.performance_score.is_finite() {
-            self.performance_score = 1.0;
-        }
-        if !self.busy_until.is_finite() {
-            self.busy_until = -1.0;
-        }
-    }
-
-    /// 计算按下目标的适合度
+    /// Backward-compat: scalar "suitability" (higher is better) for pressing
+    /// `target` from this finger's current pose.
     pub fn calculate_suitability(&self, target: &Vector2) -> f32 {
-        let distance = self.position.distance_to(target);
-        let reach = distance / self.length;
-        
-        // 考虑距离、疲劳度和灵活性
-        let distance_factor = 1.0 - reach.min(1.0);
+        let d = self.position.distance_to(target);
+        // Reach cost: 1 at origin, 0 at length+margin, negative beyond.
+        let reach = (1.0 - (d / (self.length + 0.5)).min(1.0)).clamp(0.0, 1.0);
         let fatigue_factor = 1.0 - self.fatigue;
         let dexterity_factor = self.dexterity;
-        
-        (distance_factor + fatigue_factor + dexterity_factor) / 3.0
+        ((reach + fatigue_factor + dexterity_factor) / 3.0).clamp(0.0, 1.0)
     }
+}
+
+/// Legacy palm descriptor. `position` stays public because `hand.rs` reads
+/// and writes it directly; the real kinematics are in `SkeletalHand`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandModel {
+    pub position: Vector2,
+    pub velocity: Vector2,
+    pub acceleration: Vector2,
+    pub rotation: f32,
+    pub openness: f32,
+    pub fatigue: f32,
+    pub dexterity: f32,
+    pub last_update_time: f32,
+    pub hand_type: Hand,
+}
+
+impl HandModel {
+    pub fn from_skeletal(sh: &SkeletalHand) -> Self {
+        Self {
+            position: sh.palm_position,
+            velocity: sh.palm_velocity,
+            acceleration: Vector2::ZERO,
+            rotation: sh.palm_rotation,
+            openness: 1.0,
+            fatigue: sh.hand_fatigue,
+            dexterity: sh.dexterity,
+            last_update_time: 0.0,
+            hand_type: sh.hand_type,
+        }
+    }
+
+    /// Backward-compat: a coarse "movement difficulty" scalar used by `hand.rs`
+    /// as one input to the neural-network feature vector. The real kinematics
+    /// live inside `SkeletalHand`; this is a cheap stand-in.
+    pub fn calculate_movement_difficulty(&self, target: &Vector2) -> f32 {
+        let d = self.position.distance_to(target);
+        // Map distance into [0, 1] with saturation at ~15 cm (≈ hand span).
+        let d_norm = (d / 15.0).min(1.0);
+        // Penalise if we are already moving fast (momentum cost).
+        let v_norm = (self.velocity.magnitude() / 150.0).min(1.0);
+        // Penalise fatigue.
+        ((d_norm + v_norm + self.fatigue) / 3.0).clamp(0.0, 1.0)
+    }
+}
+
+/// Legacy arm descriptor; now sourced from `SkeletalArm`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArmModel {
+    pub shoulder_position: Vector2,
+    pub elbow_position: Vector2,
+    pub wrist_position: Vector2,
+    pub angle: f32,
+    pub length: f32,
+    pub thickness: f32,
+    pub fatigue: f32,
+    pub strength: f32,
+    pub flexibility: f32,
 }
 
 impl ArmModel {
-    pub fn new(shoulder_position: Vector2, hand_type: Hand) -> Self {
-        let (length, thickness) = match hand_type {
-            Hand::Left => (3.0, 0.5),
-            Hand::Right => (3.0, 0.5),
-        };
-        
+    pub fn from_skeletal(sa: &SkeletalArm) -> Self {
         Self {
-            shoulder_position,
-            elbow_position: Vector2::new(0.0, 0.0),
-            wrist_position: Vector2::new(0.0, 0.0),
-            angle: 0.0,
-            length,
-            thickness,
-            fatigue: 0.0,
-            strength: 1.0,
-            flexibility: 1.0,
+            shoulder_position: sa.shoulder,
+            elbow_position: sa.elbow,
+            wrist_position: sa.wrist,
+            angle: sa.shoulder_angle,
+            length: sa.upper_arm_length + sa.forearm_length,
+            thickness: 4.0,
+            fatigue: 0.5 * (sa.shoulder_fatigue + sa.elbow_fatigue),
+            strength: 1.0 - 0.5 * (sa.shoulder_fatigue + sa.elbow_fatigue),
+            flexibility: 1.0 - 0.5 * (sa.shoulder_fatigue + sa.elbow_fatigue),
         }
     }
 
-    /// 更新手臂状态
-    pub fn update(&mut self, hand_position: &Vector2) {
-        self.wrist_position = *hand_position;
-        
-        // 简化的肘部位置计算，带动态变化
-        let shoulder_to_hand = hand_position.subtract(&self.shoulder_position);
-        let mid_point = self.shoulder_position.add(&Vector2::new(shoulder_to_hand.x / 2.0, shoulder_to_hand.y / 2.0));
-        
-        // 添加自然的弯曲变化
-        let natural_bend = Vector2::new(
-            -shoulder_to_hand.y * 0.15 + (self.fatigue * 0.1),
-            shoulder_to_hand.x * 0.15 + (self.fatigue * 0.05)
-        );
-        
-        self.elbow_position = Vector2::new(
-            mid_point.x + natural_bend.x,
-            mid_point.y + natural_bend.y,
-        );
-        
-        // 计算手臂角度 - 使用atan2正确计算弧度角
-        if shoulder_to_hand.magnitude() > 0.0 {
-            self.angle = shoulder_to_hand.y.atan2(shoulder_to_hand.x);
-        }
-        
-        // 更新手臂疲劳度（基于角度和持续使用）
-        let angle_stress = (self.angle.abs() / PI).min(1.0);
-        self.fatigue = (self.fatigue + angle_stress * 0.001).min(1.0);
-        
-        // 恢复机制
-        self.fatigue = (self.fatigue - 0.0005).max(0.0);
-    }
-
-    /// 计算手臂移动的舒适度
+    /// Backward-compat: comfort score in [0, 1] from joint angle + fatigue.
     pub fn calculate_comfort(&self) -> f32 {
-        let angle_comfort = 1.0 - (self.angle.abs() / PI).min(1.0);
+        let angle_comfort = (1.0 - (self.angle.abs() / PI).min(1.0)).clamp(0.0, 1.0);
         let fatigue_factor = 1.0 - self.fatigue;
-        let strength_factor = self.strength;
-        
-        (angle_comfort + fatigue_factor + strength_factor) / 3.0
+        ((angle_comfort + fatigue_factor + self.strength) / 3.0).clamp(0.0, 1.0)
     }
 }
 
-impl ErgonomicHandSystem {
-    pub fn new() -> Self {
-        let body_center = Vector2::new(0.0, 0.0);
-        let left_hand = HandModel::new(Vector2::new(-1.5, 0.0), Hand::Left);
-        let right_hand = HandModel::new(Vector2::new(1.5, 0.0), Hand::Right);
-        
-        // 初始化手指
-        let left_fingers = vec![
-            FingerModel::new(Vector2::new(-1.7, 0.1), FingerType::Thumb),
-            FingerModel::new(Vector2::new(-1.6, 0.3), FingerType::Index),
-            FingerModel::new(Vector2::new(-1.5, 0.35), FingerType::Middle),
-            FingerModel::new(Vector2::new(-1.4, 0.3), FingerType::Ring),
-            FingerModel::new(Vector2::new(-1.3, 0.2), FingerType::Pinky),
-        ];
-        
-        let right_fingers = vec![
-            FingerModel::new(Vector2::new(1.3, 0.2), FingerType::Thumb),
-            FingerModel::new(Vector2::new(1.4, 0.3), FingerType::Index),
-            FingerModel::new(Vector2::new(1.5, 0.35), FingerType::Middle),
-            FingerModel::new(Vector2::new(1.6, 0.3), FingerType::Ring),
-            FingerModel::new(Vector2::new(1.7, 0.1), FingerType::Pinky),
-        ];
-        
-        // 初始化手臂
-        let left_arm = ArmModel::new(Vector2::new(-2.5, 1.0), Hand::Left);
-        let right_arm = ArmModel::new(Vector2::new(2.5, 1.0), Hand::Right);
-        
-        Self {
-            left_hand,
-            right_hand,
-            left_fingers,
-            right_fingers,
-            left_arm,
-            right_arm,
-            body_center,
-            body_tilt: 0.0,
-            difficulty_factor: 1.0,
-            game_mode: GameMode::TwoFinger, // 默认2指模式
-            finger_mode_selector: SmartFingerModeSelector::new(),
-            current_time: 0.0,
-            recent_notes: Vec::new(),
-            mode_switch_cooldown: 2.0, // 2秒切换冷却
-            last_mode_switch_time: -2.0,
-        }
-    }
-
-    /// 更新整个手部系统
-    pub fn update(&mut self, time: f32) {
-        // 更新手部状态 - 添加位置变化来计算速度和加速度
-        let _previous_left_pos = self.left_hand.position;
-        let _previous_right_pos = self.right_hand.position;
-        
-        // 生成动态的手部位置变化（模拟实际游戏中的移动）
-        let left_movement = Vector2::new(
-            (time * 0.1).sin() * 0.2,
-            (time * 0.15).cos() * 0.1
-        );
-        let right_movement = Vector2::new(
-            (time * 0.12).sin() * 0.2,
-            (time * 0.18).cos() * 0.1
-        );
-        
-        let new_left_position = Vector2::new(-1.5, 0.0).add(&left_movement);
-        let new_right_position = Vector2::new(1.5, 0.0).add(&right_movement);
-        
-        // 更新手部状态（计算速度和加速度）
-        self.left_hand.update(new_left_position, time);
-        self.right_hand.update(new_right_position, time);
-        
-        // 更新手臂
-        self.left_arm.update(&self.left_hand.position);
-        self.right_arm.update(&self.right_hand.position);
-        
-        // 更新手指 - 动态计算目标位置和状态
-        for (i, finger) in &mut self.left_fingers.iter_mut().enumerate() {
-            // 基于手部位置的动态目标位置
-            let base_position = self.left_hand.position.add(&Vector2::new(
-                (finger.finger_type as i32 - 2) as f32 * 0.15,
-                0.1 + finger.bend_angle * 0.1,
-            ));
-            
-            // 动态变化：添加时间相关的波动
-            let dynamic_offset = Vector2::new(
-                (time * 0.5 + i as f32 * 0.2).sin() * 0.02,
-                (time * 0.3 + i as f32 * 0.1).cos() * 0.01
-            );
-            
-            // 模拟手指状态变化（每3-5秒切换一次按下状态）
-            let should_be_pressed = (time / 4.0 + i as f32 * 0.5).sin() > 0.5;
-            if should_be_pressed != finger.is_pressed {
-                finger.is_pressed = should_be_pressed;
-                if should_be_pressed {
-                    finger.press_time = time;
-                }
-            }
-            
-            // 如果正在按下，目标位置稍微向外延伸
-            let target_position = if finger.is_pressed {
-                base_position.add(&Vector2::new(0.05, -0.1)).add(&dynamic_offset)
-            } else {
-                base_position.add(&dynamic_offset)
-            };
-            
-            finger.position = base_position;
-            finger.update(Some(target_position), time);
-        }
-        
-        for (i, finger) in &mut self.right_fingers.iter_mut().enumerate() {
-            // 基于手部位置的动态目标位置
-            let base_position = self.right_hand.position.add(&Vector2::new(
-                (finger.finger_type as i32 - 2) as f32 * 0.15,
-                0.1 + finger.bend_angle * 0.1,
-            ));
-            
-            // 动态变化：添加时间相关的波动
-            let dynamic_offset = Vector2::new(
-                (time * 0.4 + i as f32 * 0.3).sin() * 0.02,
-                (time * 0.25 + i as f32 * 0.15).cos() * 0.01
-            );
-            
-            // 模拟手指状态变化（每3-5秒切换一次按下状态）
-            let should_be_pressed = (time / 3.5 + i as f32 * 0.4).sin() > 0.3;
-            if should_be_pressed != finger.is_pressed {
-                finger.is_pressed = should_be_pressed;
-                if should_be_pressed {
-                    finger.press_time = time;
-                }
-            }
-            
-            // 如果正在按下，目标位置稍微向外延伸
-            let target_position = if finger.is_pressed {
-                base_position.add(&Vector2::new(-0.05, -0.1)).add(&dynamic_offset)
-            } else {
-                base_position.add(&dynamic_offset)
-            };
-            
-            finger.position = base_position;
-            finger.update(Some(target_position), time);
-        }
-        
-        // 更新身体中心（模拟轻微的呼吸运动）
-        self.body_center = Vector2::new(
-            (time * 0.05).sin() * 0.02,
-            (time * 0.03).cos() * 0.01
-        );
-        
-        // 更新身体倾斜
-        self.body_tilt = (time * 0.02).sin() * 0.05;
-
-        // 检测并解决碰撞（在所有更新完成后进行）
-        self.resolve_all_collisions();
-    }
-
-    /// 为音符分配最佳手部
-    pub fn assign_note_hand(&mut self, note_position: Vector2, note_kind: &NoteKind, time: f32) -> (Hand, usize, f32) {
-        // 更新系统状态
-        self.update(time);
-        
-        // 计算左手和右手到达目标的难度
-        let left_difficulty = self.calculate_hand_difficulty(&self.left_hand, &note_position, note_kind);
-        let right_difficulty = self.calculate_hand_difficulty(&self.right_hand, &note_position, note_kind);
-        
-        // 选择难度较低的手
-        let (selected_hand, base_difficulty) = if left_difficulty < right_difficulty {
-            (Hand::Left, left_difficulty)
-        } else {
-            (Hand::Right, right_difficulty)
-        };
-        
-        // 为选中的手选择最佳手指
-        let (finger_index, finger_suitability) = self.select_best_finger(selected_hand, &note_position);
-        
-        // 计算总体置信度
-        let confidence = 1.0 - base_difficulty * finger_suitability;
-        
-        (selected_hand, finger_index, confidence)
-    }
-
-    /// 计算手部到达目标的难度
-    pub fn calculate_hand_difficulty(&self, hand: &HandModel, target: &Vector2, note_kind: &NoteKind) -> f32 {
-        let movement_difficulty = hand.calculate_movement_difficulty(target);
-        let arm_comfort = match hand.hand_type {
-            Hand::Left => self.left_arm.calculate_comfort(),
-            Hand::Right => self.right_arm.calculate_comfort(),
-        };
-        
-        // 根据音符类型调整难度
-        let note_factor = match note_kind {
-            NoteKind::Click => 1.0,
-            NoteKind::Drag => 1.2,
-            NoteKind::Flick => 1.3,
-            NoteKind::Hold { .. } => 1.5,
-        };
-        
-        // 综合难度计算
-        (movement_difficulty * 0.6 + (1.0 - arm_comfort) * 0.4) * note_factor * self.difficulty_factor
-    }
-
-    /// 为指定手选择最佳手指
-    fn select_best_finger(&self, hand: Hand, target: &Vector2) -> (usize, f32) {
-        let fingers = match hand {
-            Hand::Left => &self.left_fingers,
-            Hand::Right => &self.right_fingers,
-        };
-        
-        let mut best_index = 0;
-        let mut best_suitability = 0.0;
-        
-        // 根据游戏模式限制可选择的手指
-        let valid_indices = match self.game_mode {
-            GameMode::TwoFinger => vec![1], // 只选择食指（索引1）
-            GameMode::FourFinger => vec![1, 2], // 选择食指和中指（索引1和2）
-        };
-        
-        for &i in &valid_indices {
-            if i < fingers.len() {
-                let finger = &fingers[i];
-                let suitability = finger.calculate_suitability(target);
-                if suitability > best_suitability {
-                    best_suitability = suitability;
-                    best_index = i;
-                }
-            }
-        }
-        
-        (best_index, best_suitability)
-    }
-
-    /// 应用手指按下状态
-    pub fn apply_finger_press(&mut self, hand: Hand, finger_index: usize, time: f32) {
-        let fingers = match hand {
-            Hand::Left => &mut self.left_fingers,
-            Hand::Right => &mut self.right_fingers,
-        };
-        
-        if let Some(finger) = fingers.get_mut(finger_index) {
-            finger.is_pressed = true;
-            finger.press_time = time;
-        }
-    }
-
-    /// 重置手指状态
-    pub fn reset_finger_state(&mut self, hand: Hand, finger_index: usize) {
-        let fingers = match hand {
-            Hand::Left => &mut self.left_fingers,
-            Hand::Right => &mut self.right_fingers,
-        };
-        
-        if let Some(finger) = fingers.get_mut(finger_index) {
-            finger.is_pressed = false;
-        }
-    }
-    /// 获取指定手的统计信息
-    pub fn get_hand_statistics(&self, hand: Hand) -> (Vec<FingerStatistics>, HandStatistics) {
-        let (fingers, hand_model) = match hand {
-            Hand::Left => (&self.left_fingers, &self.left_hand),
-            Hand::Right => (&self.right_fingers, &self.right_hand),
-        };
-
-        let finger_stats: Vec<FingerStatistics> = fingers.iter().map(|finger| FingerStatistics {
-            finger_type: finger.finger_type,
-            success_streak: finger.success_streak,
-            total_actions: finger.total_actions,
-            performance_score: finger.performance_score,
-            confidence: finger.confidence,
-            is_busy: finger.is_busy,
-            fatigue: finger.fatigue,
-        }).collect();
-
-        let hand_stats = HandStatistics {
-            hand_type: hand,
-            position: hand_model.position,
-            fatigue: hand_model.fatigue,
-            dexterity: hand_model.dexterity,
-            openness: hand_model.openness,
-        };
-
-        (finger_stats, hand_stats)
-    }
-
-    /// 应用手指按压状态更新（从 FingerState 迁移）
-    pub fn update_finger_state(&mut self, hand: Hand, finger_type: FingerType, new_position: Vector2, time: f32, success: bool, note_kind: &NoteKind) {
-        let fingers = match hand {
-            Hand::Left => &mut self.left_fingers,
-            Hand::Right => &mut self.right_fingers,
-        };
-
-        if let Some(finger) = fingers.iter_mut().find(|f| f.finger_type == finger_type) {
-            finger.update_state(new_position, time, success, note_kind);
-        }
-    }
-
-    /// 获取指定手指的性能评分
-    pub fn get_finger_performance(&self, hand: Hand, finger_type: FingerType) -> f32 {
-        let fingers = match hand {
-            Hand::Left => &self.left_fingers,
-            Hand::Right => &self.right_fingers,
-        };
-
-        if let Some(finger) = fingers.iter().find(|f| f.finger_type == finger_type) {
-            finger.performance_score
-        } else {
-            0.5 // 默认中等性能
-        }
-    }
-
-    /// 获取指定手指的可用状态
-    pub fn is_finger_available(&self, hand: Hand, finger_type: FingerType, current_time: f32) -> bool {
-        let fingers = match hand {
-            Hand::Left => &self.left_fingers,
-            Hand::Right => &self.right_fingers,
-        };
-
-        if let Some(finger) = fingers.iter().find(|f| f.finger_type == finger_type) {
-            // 根据游戏模式检查手指是否可用
-            match self.game_mode {
-                GameMode::TwoFinger => {
-                    finger_type == FingerType::Index && !finger.is_busy && current_time >= finger.busy_until
-                }
-                GameMode::FourFinger => {
-                    (finger_type == FingerType::Index || finger_type == FingerType::Middle) && 
-                    !finger.is_busy && current_time >= finger.busy_until
-                }
-            }
-        } else {
-            false
-        }
-    }
-
-    /// 清理所有手指状态
-    pub fn clean_all_finger_states(&mut self) {
-        for finger in &mut self.left_fingers {
-            finger.clean();
-        }
-        for finger in &mut self.right_fingers {
-            finger.clean();
-        }
-    }
-
-    /// 基于性能和状态选择最佳手指
-    pub fn select_optimal_finger(&self, hand: Hand, target_position: &Vector2, current_time: f32) -> Option<(FingerType, f32)> {
-        let fingers = match hand {
-            Hand::Left => &self.left_fingers,
-            Hand::Right => &self.right_fingers,
-        };
-
-        // 根据游戏模式过滤可用的手指
-        let available_fingers: Vec<&FingerModel> = fingers.iter().filter(|finger| {
-            match self.game_mode {
-                GameMode::TwoFinger => finger.finger_type == FingerType::Index,
-                GameMode::FourFinger => finger.finger_type == FingerType::Index || finger.finger_type == FingerType::Middle,
-            }
-        }).filter(|finger| {
-            !finger.is_busy && current_time >= finger.busy_until
-        }).collect();
-
-        let mut best_finger: Option<(FingerType, f32)> = None;
-        let mut best_score = -1.0;
-
-        for finger in &available_fingers {
-            let distance_score = 1.0 - (finger.position.distance_to(target_position) / 2.0).min(1.0);
-            let performance_score = finger.performance_score;
-            let confidence_score = finger.confidence;
-            let fatigue_penalty = finger.fatigue * 0.3;
-
-            let combined_score = (distance_score * 0.3 + performance_score * 0.4 + confidence_score * 0.3 - fatigue_penalty).max(0.0);
-
-            if combined_score > best_score {
-                best_score = combined_score;
-                best_finger = Some((finger.finger_type, combined_score));
-            }
-        }
-
-        best_finger
-    }
-    
-    /// 基于物理模型判断音符是否成功击中
-    pub fn evaluate_note_success(
-        &self,
-        hand: Hand,
-        target_position: &Vector2,
-        note_time: f32,
-        current_time: f32,
-        note_kind: &crate::core::NoteKind,
-    ) -> (bool, f32, f32, f32) {
-        let hand_model = match hand {
-            Hand::Left => &self.left_hand,
-            Hand::Right => &self.right_hand,
-        };
-        
-        let arm_model = match hand {
-            Hand::Left => &self.left_arm,
-            Hand::Right => &self.right_arm,
-        };
-        
-        // 1. 计算位置误差
-        let position_error = hand_model.position.distance_to(target_position);
-        
-        // 2. 计算时间误差
-        let timing_error = (current_time - note_time).abs();
-        
-        // 3. 计算速度因子（太快或太慢都不好）
-        let speed = hand_model.velocity.magnitude();
-        let optimal_speed = 3.5; // 更严格的最佳速度（降低以强制更慢更精确的动作）
-        let speed_error = ((speed - optimal_speed).abs() / optimal_speed).min(1.0);
-        
-        // 4. 计算各因素的分数
-        // 位置分数（距离越小越好）- 更严格的可接受距离
-        const REAL_FINGER_REACH: f32 = 0.25; // 真实的单指可达距离
-        const COMFORTABLE_REACH: f32 = 0.15; // 舒适的按键距离
-        let position_score = if position_error <= COMFORTABLE_REACH {
-            // 舒适区域内：完美得分
-            1.0
-        } else if position_error <= REAL_FINGER_REACH {
-            // 可达区域内：线性递减
-            1.0 - ((position_error - COMFORTABLE_REACH) / (REAL_FINGER_REACH - COMFORTABLE_REACH)) * 0.5
-        } else {
-            // 超范围：严重惩罚
-            0.0
-        };
-        
-        // 时间分数（基于音符类型有不同的容差）- 更严格的时间要求
-        let time_tolerance = match note_kind {
-            crate::core::NoteKind::Click => 0.04,   // 40ms（严格）
-            crate::core::NoteKind::Hold { .. } => 0.08, // 80ms（严格）
-            crate::core::NoteKind::Drag => 0.10,    // 100ms（严格）
-            crate::core::NoteKind::Flick => 0.06,   // 60ms（严格）
-        };
-        let timing_score = if timing_error <= time_tolerance {
-            // 精确时间内：优秀得分
-            1.0 - (timing_error / time_tolerance) * 0.2
-        } else {
-            // 超时：严重惩罚
-            0.0
-        };
-        
-        // 速度分数 - 更严格的速度控制
-        let speed_score = if speed <= optimal_speed * 1.2 {
-            // 低于最佳速度：良好
-            1.0 - speed_error * 0.3
-        } else {
-            // 超过最佳速度：严重惩罚
-            (1.0 - speed_error) * 0.3
-        };
-        
-        // 5. 计算更严格的疲劳度惩罚
-        let fatigue_penalty = hand_model.fatigue * 0.5 + arm_model.fatigue * 0.4; // 增加疲劳惩罚
-        
-        // 6. 计算灵活性加成 - 降低加成以防止过度依赖灵活性
-        let dexterity_bonus = hand_model.dexterity * 0.1; // 降低加成
-        
-        // 7. 综合计算成功率 - 增加位置和时间权重
-        let total_score = (
-            position_score * 0.5 +  // 增加位置权重
-            timing_score * 0.3 +    // 保持时间权重
-            speed_score * 0.05 +    // 降低速度权重
-            dexterity_bonus
-        ) - fatigue_penalty;
-        
-        // 8. 判断是否成功（更严格阈值）
-        let strict_success_threshold = match note_kind {
-            crate::core::NoteKind::Click => 0.8,    // 80%（严格）
-            crate::core::NoteKind::Hold { .. } => 0.75, // 75%（严格）
-            crate::core::NoteKind::Drag => 0.7,     // 70%（严格）
-            crate::core::NoteKind::Flick => 0.78,   // 78%（严格）
-        };
-        
-        let is_successful = total_score >= strict_success_threshold;
-        
-        // 9. 计算物理置信度（0-1之间）
-        let physical_confidence = total_score.clamp(0.0, 1.0);
-        
-        (is_successful, position_error, timing_error, physical_confidence)
-    }
-
-    /// 智能更新指纹模式选择
-    pub fn smart_update_finger_mode(&mut self, new_notes: &[crate::core::Note]) {
-        // 更新当前时间
-        if let Some(last_note) = new_notes.last() {
-            self.current_time = last_note.time;
-        }
-        
-        // 更新音符历史
-        self.update_note_history(new_notes);
-        
-        // 检查是否需要切换模式
-        if self.current_time - self.last_mode_switch_time >= self.mode_switch_cooldown {
-            let optimal_mode = self.finger_mode_selector.select_optimal_finger_mode(
-                &self.recent_notes, 
-                self.current_time
-            );
-            
-            if optimal_mode != self.game_mode {
-                self.game_mode = optimal_mode;
-                self.last_mode_switch_time = self.current_time;
-                // 重置手指状态以适应新模式
-                self.reset_finger_states_for_mode();
-            }
-        }
-    }
-
-    /// 更新音符历史
-    fn update_note_history(&mut self, new_notes: &[crate::core::Note]) {
-        // 保持最近30秒的音符历史
-        let cutoff_time = self.current_time - 30.0;
-        
-        // 移除过时的音符
-        self.recent_notes.retain(|note| note.time >= cutoff_time);
-        
-        // 添加新音符
-        for note in new_notes {
-            if note.time >= cutoff_time {
-                self.recent_notes.push(note.clone());
-            }
-        }
-        
-        // 保持最多1000个音符
-        if self.recent_notes.len() > 1000 {
-            self.recent_notes.drain(0..self.recent_notes.len() - 1000);
-        }
-        
-        // 按时间排序
-        self.recent_notes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
-    }
-
-    /// 为新模式重置手指状态
-    fn reset_finger_states_for_mode(&mut self) {
-        match self.game_mode {
-            GameMode::TwoFinger => {
-                // 2指模式：只使用食指，禁用其他手指
-                for finger in &mut self.left_fingers {
-                    if finger.finger_type != FingerType::Index {
-                        finger.is_busy = false;
-                        finger.busy_until = -1.0;
-                        finger.is_pressed = false;
-                        finger.press_time = 0.0;
-                    }
-                }
-                for finger in &mut self.right_fingers {
-                    if finger.finger_type != FingerType::Index {
-                        finger.is_busy = false;
-                        finger.busy_until = -1.0;
-                        finger.is_pressed = false;
-                        finger.press_time = 0.0;
-                    }
-                }
-            }
-            GameMode::FourFinger => {
-                // 4指模式：使用食指和中指
-                for finger in &mut self.left_fingers {
-                    if finger.finger_type == FingerType::Index || finger.finger_type == FingerType::Middle {
-                        finger.is_busy = false;
-                        finger.busy_until = -1.0;
-                    }
-                }
-                for finger in &mut self.right_fingers {
-                    if finger.finger_type == FingerType::Index || finger.finger_type == FingerType::Middle {
-                        finger.is_busy = false;
-                        finger.busy_until = -1.0;
-                    }
-                }
-            }
-        }
-    }
-
-    /// 手动设置游戏模式（覆盖智能选择）
-    pub fn set_game_mode(&mut self, mode: GameMode) {
-        if mode != self.game_mode {
-            self.game_mode = mode;
-            self.last_mode_switch_time = self.current_time;
-            self.reset_finger_states_for_mode();
-        }
-    }
-
-    /// 强制更新模式性能（用于训练反馈）
-    pub fn update_mode_performance(&mut self, mode: GameMode, success: bool, reward: f32) {
-        self.finger_mode_selector.update_mode_performance(mode, success, reward);
-    }
-
-    /// 获取当前指纹模式信息
-    pub fn get_finger_mode_info(&self) -> FingerModeInfo {
-        let _performance = self.finger_mode_selector.mode_performance.get(&self.game_mode)
-            .map(|p| (p.success_rate, p.usage_count))
-            .unwrap_or((0.5, 0));
-        
-        FingerModeInfo {
-            current_mode: self.game_mode,
-            two_finger_performance: self.finger_mode_selector.mode_performance.get(&GameMode::TwoFinger)
-                .map(|p| ModeStats {
-                    success_rate: p.success_rate,
-                    average_reward: p.average_reward,
-                    usage_count: p.usage_count,
-                }).unwrap_or(ModeStats {
-                    success_rate: 0.5,
-                    average_reward: 0.0,
-                    usage_count: 0,
-                }),
-            four_finger_performance: self.finger_mode_selector.mode_performance.get(&GameMode::FourFinger)
-                .map(|p| ModeStats {
-                    success_rate: p.success_rate,
-                    average_reward: p.average_reward,
-                    usage_count: p.usage_count,
-                }).unwrap_or(ModeStats {
-                    success_rate: 0.8,
-                    average_reward: 0.0,
-                    usage_count: 0,
-                }),
-            recent_notes_count: self.recent_notes.len(),
-            time_since_last_switch: self.current_time - self.last_mode_switch_time,
-        }
-    }
-
-    /// 重置所有性能统计
-    pub fn reset_all_performance(&mut self) {
-        self.finger_mode_selector.reset_performance();
-        self.clean_all_finger_states();
-        self.recent_notes.clear();
-        self.last_mode_switch_time = -self.mode_switch_cooldown;
-    }
-
-    /// 获取当前活跃的手指列表（基于游戏模式）
-    pub fn get_active_fingers(&self, _hand: Hand) -> Vec<FingerType> {
-        match self.game_mode {
-            GameMode::TwoFinger => vec![FingerType::Index],
-            GameMode::FourFinger => vec![FingerType::Index, FingerType::Middle],
-        }
-    }
-
-    /// 检查是否可以执行音符（考虑模式和手指状态）
-    pub fn can_execute_note(&self, hand: Hand, current_time: f32) -> bool {
-        match self.game_mode {
-            GameMode::TwoFinger => {
-                // 2指模式：检查食指是否可用
-                self.is_finger_available(hand, FingerType::Index, current_time)
-            }
-            GameMode::FourFinger => {
-                // 4指模式：检查食指或中指是否可用
-                self.is_finger_available(hand, FingerType::Index, current_time) ||
-                self.is_finger_available(hand, FingerType::Middle, current_time)
-            }
-        }
-    }
-
-    /// 检测手指之间的碰撞
-    pub fn detect_finger_collisions(&self, hand: Hand) -> CollisionResult {
-        let fingers = match hand {
-            Hand::Left => &self.left_fingers,
-            Hand::Right => &self.right_fingers,
-        };
-
-        let mut colliding_pairs = Vec::new();
-        let mut min_separation_distance = f32::MAX;
-
-        // 检测每对手指之间的碰撞
-        for i in 0..fingers.len() {
-            for j in (i + 1)..fingers.len() {
-                let finger1 = &fingers[i];
-                let finger2 = &fingers[j];
-
-                // 跳过非活跃手指（在当前游戏模式下）
-                if !self.is_finger_active_in_mode(finger1.finger_type) ||
-                   !self.is_finger_active_in_mode(finger2.finger_type) {
-                    continue;
-                }
-
-                let distance = finger1.position.distance_to(&finger2.position);
-                let min_required_distance = (finger1.thickness + finger2.thickness) * 0.5;
-                let separation_distance = distance - min_required_distance;
-
-                if separation_distance < 0.0 {
-                    // 发生碰撞，记录碰撞信息
-                    colliding_pairs.push((i, j, -separation_distance));
-                } else if separation_distance < min_separation_distance {
-                    min_separation_distance = separation_distance;
-                }
-            }
-        }
-
-        CollisionResult {
-            has_collision: !colliding_pairs.is_empty(),
-            colliding_pairs,
-            min_separation_distance: if min_separation_distance == f32::MAX {
-                0.0
-            } else {
-                min_separation_distance
-            },
-        }
-    }
-
-    /// 检查手指在当前游戏模式下是否活跃
-    fn is_finger_active_in_mode(&self, finger_type: FingerType) -> bool {
-        match self.game_mode {
-            GameMode::TwoFinger => finger_type == FingerType::Index,
-            GameMode::FourFinger => finger_type == FingerType::Index || finger_type == FingerType::Middle,
-        }
-    }
-
-    /// 修正手指位置以避免碰撞
-    pub fn resolve_finger_collisions(&mut self, hand: Hand) {
-        let (fingers, game_mode) = match hand {
-            Hand::Left => (&mut self.left_fingers, self.game_mode),
-            Hand::Right => (&mut self.right_fingers, self.game_mode),
-        };
-
-        // 多次迭代以确保完全解决碰撞
-        for _iteration in 0..3 {
-            let mut any_collision_resolved = false;
-
-            // 使用索引进行迭代，避免借用冲突
-            let mut i = 0;
-            while i < fingers.len() {
-                let mut j = i + 1;
-                while j < fingers.len() {
-                    // 检查两个手指是否都活跃
-                    let finger1_active = match game_mode {
-                        GameMode::TwoFinger => fingers[i].finger_type == FingerType::Index,
-                        GameMode::FourFinger => {
-                            fingers[i].finger_type == FingerType::Index || 
-                            fingers[i].finger_type == FingerType::Middle
-                        }
-                    };
-                    
-                    let finger2_active = match game_mode {
-                        GameMode::TwoFinger => fingers[j].finger_type == FingerType::Index,
-                        GameMode::FourFinger => {
-                            fingers[j].finger_type == FingerType::Index || 
-                            fingers[j].finger_type == FingerType::Middle
-                        }
-                    };
-
-                    if finger1_active && finger2_active {
-                        let (finger1_pos, finger1_thickness, finger1_dexterity) = {
-                            let finger = &fingers[i];
-                            (finger.position, finger.thickness, finger.dexterity)
-                        };
-
-                        let (finger2_pos, finger2_thickness, finger2_dexterity) = {
-                            let finger = &fingers[j];
-                            (finger.position, finger.thickness, finger.dexterity)
-                        };
-
-                        let distance = finger1_pos.distance_to(&finger2_pos);
-                        let min_required_distance = (finger1_thickness + finger2_thickness) * 0.5;
-
-                        if distance < min_required_distance && distance > 0.0 {
-                            // 计算分离向量
-                            let direction = finger2_pos.subtract(&finger1_pos).normalize();
-                            let penetration = min_required_distance - distance;
-                            
-                            // 基于灵活性分配分离距离
-                            let total_flexibility = finger1_dexterity + finger2_dexterity;
-                            if total_flexibility > 0.0 {
-                                let separation1 = penetration * (finger2_dexterity / total_flexibility) * 0.6;
-                                let separation2 = penetration * (finger1_dexterity / total_flexibility) * 0.6;
-
-                                // 应用分离
-                                let new_pos1 = finger1_pos.subtract(&direction.multiply_scalar(separation1));
-                                let new_pos2 = finger2_pos.add(&direction.multiply_scalar(separation2));
-
-                                // 更新位置（需要重新借用）
-                                {
-                                    let finger1_mut = &mut fingers[i];
-                                    finger1_mut.position = new_pos1;
-                                }
-                                {
-                                    let finger2_mut = &mut fingers[j];
-                                    finger2_mut.position = new_pos2;
-                                }
-
-                                any_collision_resolved = true;
-                            }
-                        }
-                    }
-                    j += 1;
-                }
-                i += 1;
-            }
-
-            // 如果没有解决任何碰撞，提前退出
-            if !any_collision_resolved {
-                break;
-            }
-        }
-    }
-
-    /// 检测并解决手部内部的所有碰撞
-    pub fn resolve_all_collisions(&mut self) {
-        // 检测并解决左手碰撞
-        let left_collision = self.detect_finger_collisions(Hand::Left);
-        if left_collision.has_collision {
-            self.resolve_finger_collisions(Hand::Left);
-        }
-
-        // 检测并解决右手碰撞
-        let right_collision = self.detect_finger_collisions(Hand::Right);
-        if right_collision.has_collision {
-            self.resolve_finger_collisions(Hand::Right);
-        }
-
-        // 检测并解决左右手之间的碰撞（如果距离足够近）
-        self.resolve_left_right_hand_collisions();
-    }
-
-    /// 解决左右手之间的碰撞
-    fn resolve_left_right_hand_collisions(&mut self) {
-        let min_hand_distance = 1.0; // 最小手部间距
-
-        let left_center = self.calculate_hand_center(&self.left_fingers);
-        let right_center = self.calculate_hand_center(&self.right_fingers);
-
-        let hand_distance = left_center.distance_to(&right_center);
-
-        if hand_distance < min_hand_distance {
-            // 计算分离向量
-            let direction = right_center.subtract(&left_center).normalize();
-            let penetration = min_hand_distance - hand_distance;
-
-            // 将两只手分离
-            let separation = direction.multiply_scalar(penetration * 0.5);
-            self.left_hand.position = self.left_hand.position.subtract(&separation);
-            self.right_hand.position = self.right_hand.position.add(&separation);
-
-            // 更新相关手指位置
-            for finger in &mut self.left_fingers {
-                finger.position = finger.position.subtract(&separation);
-            }
-            for finger in &mut self.right_fingers {
-                finger.position = finger.position.add(&separation);
-            }
-        }
-    }
-
-    /// 计算手部中心位置
-    fn calculate_hand_center(&self, fingers: &[FingerModel]) -> Vector2 {
-        let active_fingers: Vec<&FingerModel> = fingers.iter()
-            .filter(|f| self.is_finger_active_in_mode(f.finger_type))
-            .collect();
-
-        if active_fingers.is_empty() {
-            return Vector2::new(0.0, 0.0);
-        }
-
-        let sum: Vector2 = active_fingers.iter()
-            .fold(Vector2::new(0.0, 0.0), |acc, finger| acc.add(&finger.position));
-
-        Vector2::new(sum.x / active_fingers.len() as f32, sum.y / active_fingers.len() as f32)
-    }
-
-    /// 获取碰撞检测统计信息
-    pub fn get_collision_statistics(&self) -> (usize, usize, f32) {
-        let left_collision = self.detect_finger_collisions(Hand::Left);
-        let right_collision = self.detect_finger_collisions(Hand::Right);
-
-        let _total_collisions = left_collision.colliding_pairs.len() + right_collision.colliding_pairs.len();
-        let left_collisions = left_collision.colliding_pairs.len();
-        let right_collisions = right_collision.colliding_pairs.len();
-
-        (left_collisions, right_collisions, (left_collision.min_separation_distance + right_collision.min_separation_distance) / 2.0)
-    }
-}
-
-/// 指纹模式信息结构体
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FingerModeInfo {
-    pub current_mode: GameMode,
-    pub two_finger_performance: ModeStats,
-    pub four_finger_performance: ModeStats,
-    pub recent_notes_count: usize,
-    pub time_since_last_switch: f32,
+pub struct CollisionResult {
+    pub has_collision: bool,
+    pub colliding_pairs: Vec<(usize, usize, f32)>,
+    pub min_separation_distance: f32,
 }
 
-/// 模式统计数据结构体
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModeStats {
-    pub success_rate: f32,
-    pub average_reward: f32,
-    pub usage_count: u32,
-}
-
-/// 手指统计信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FingerStatistics {
-    pub finger_type: FingerType,
-    pub success_streak: u32,
-    pub total_actions: u32,
-    pub performance_score: f32,
-    pub confidence: f32,
-    pub is_busy: bool,
-    pub fatigue: f32,
-}
-
-/// 手部统计信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandStatistics {
-    pub hand_type: Hand,
-    pub position: Vector2,
-    pub fatigue: f32,
-    pub dexterity: f32,
-    pub openness: f32,
-}
-
-/// 智能指纹模式选择器
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartFingerModeSelector {
-    /// 2指模式权重 (优先级最高)
-    pub two_finger_weight: f32,
-    /// 4指模式权重
-    pub four_finger_weight: f32,
-    /// 时间间隔分析
-    pub timing_analysis_window: f32,
-    /// 同时间音符数量阈值
-    pub simultaneous_notes_threshold: usize,
-    /// 时间差分析窗口
-    pub time_difference_analysis: f32,
-    /// 性能统计
     pub mode_performance: HashMap<GameMode, ModePerformance>,
+    pub two_finger_weight: f32,
+    pub four_finger_weight: f32,
+    pub timing_analysis_window: f32,
+    pub simultaneous_notes_threshold: usize,
+    pub time_difference_analysis: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1480,672 +1088,534 @@ pub struct ModePerformance {
 
 impl SmartFingerModeSelector {
     pub fn new() -> Self {
-        let mut mode_performance = HashMap::new();
-        mode_performance.insert(GameMode::TwoFinger, ModePerformance {
-            success_rate: 0.9, // 降低默认成功率，更现实
-            average_reward: 0.0,
-            usage_count: 0,
-            last_used: -1.0,
+        let mut m = HashMap::new();
+        m.insert(GameMode::TwoFinger, ModePerformance {
+            success_rate: 0.9, average_reward: 0.0, usage_count: 0, last_used: -1.0,
         });
-        mode_performance.insert(GameMode::FourFinger, ModePerformance {
-            success_rate: 0.7, // 4指模式初始成功率较低，需要学习
-            average_reward: 0.0,
-            usage_count: 0,
-            last_used: -1.0,
+        m.insert(GameMode::FourFinger, ModePerformance {
+            success_rate: 0.7, average_reward: 0.0, usage_count: 0, last_used: -1.0,
         });
-
         Self {
-            two_finger_weight: 1.0,  // 2指模式最高权重
-            four_finger_weight: 0.6, // 更严格地降低4指模式权重
-            timing_analysis_window: 0.4, // 400ms分析窗口，更严格
-            simultaneous_notes_threshold: 2, // 更严格的2个音符阈值
-            time_difference_analysis: 0.15, // 150ms时间差分析
-            mode_performance,
+            mode_performance: m,
+            two_finger_weight: 1.0,
+            four_finger_weight: 0.6,
+            timing_analysis_window: 0.4,
+            simultaneous_notes_threshold: 2,
+            time_difference_analysis: 0.15,
         }
     }
-
-    /// 基于音符特征选择最佳指纹模式
-    pub fn select_optimal_finger_mode(
-        &mut self,
-        notes: &[crate::core::Note],
-        current_time: f32,
-    ) -> GameMode {
-        // 1. 分析时间特征
-        let timing_features = self.analyze_timing_features(notes, current_time);
-        
-        // 2. 计算模式评分
-        let two_finger_score = self.calculate_two_finger_score(&timing_features);
-        let four_finger_score = self.calculate_four_finger_score(&timing_features);
-        
-        // 3. 考虑历史性能
-        let performance_factor = self.get_performance_factor(GameMode::TwoFinger);
-        let two_finger_final = two_finger_score * performance_factor;
-        
-        let four_performance_factor = self.get_performance_factor(GameMode::FourFinger);
-        let four_finger_final = four_finger_score * four_performance_factor;
-        
-        // 4. 选择最佳模式
-        let selected_mode = if two_finger_final >= four_finger_final {
-            GameMode::TwoFinger
-        } else {
-            GameMode::FourFinger
-        };
-        
-        // 5. 更新使用统计
-        self.update_usage_stats(selected_mode, current_time);
-        
-        selected_mode
-    }
-
-    /// 分析音符的时间特征
-    fn analyze_timing_features(&self, notes: &[crate::core::Note], current_time: f32) -> TimingFeatures {
-        let analysis_window_start = current_time - self.timing_analysis_window;
-        let analysis_window_end = current_time + self.timing_analysis_window;
-        
-        let mut window_notes: Vec<_> = notes.iter()
-            .filter(|note| note.time >= analysis_window_start && note.time <= analysis_window_end)
-            .collect();
-        
-        // 按时间排序
-        window_notes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
-        
-        // 分析时间间隔
-        let time_intervals = self.calculate_time_intervals(&window_notes);
-        
-        // 分析同时间音符
-        let simultaneous_notes = self.count_simultaneous_notes(&window_notes);
-        
-        // 分析时间差模式
-        let time_difference_pattern = self.analyze_time_differences(&window_notes);
-        
-        TimingFeatures {
-            total_notes: window_notes.len(),
-            average_interval: time_intervals.iter().sum::<f32>() / time_intervals.len().max(1) as f32,
-            min_interval: time_intervals.iter().copied().fold(f32::INFINITY, f32::min),
-            max_interval: time_intervals.iter().copied().fold(f32::NEG_INFINITY, f32::max),
-            max_simultaneous: simultaneous_notes,
-            time_density: self.calculate_time_density(&window_notes),
-            pattern_complexity: time_difference_pattern.complexity_score,
-            rhythm_variance: time_difference_pattern.rhythm_variance,
-            fast_sequence_ratio: time_difference_pattern.fast_sequence_ratio,
-        }
-    }
-
-    /// 计算时间间隔
-    fn calculate_time_intervals(&self, notes: &[&crate::core::Note]) -> Vec<f32> {
-        let mut intervals = Vec::new();
-        for i in 1..notes.len() {
-            let interval = (notes[i].time - notes[i-1].time).abs();
-            if interval > 0.0 && interval < self.timing_analysis_window {
-                intervals.push(interval);
-            }
-        }
-        intervals
-    }
-
-    /// 统计同时间音符数量
-    fn count_simultaneous_notes(&self, notes: &[&crate::core::Note]) -> usize {
-        let mut max_simultaneous = 0;
-        let tolerance = 0.05; // 50ms容忍度
-        
-        for note in notes.iter() {
-            let mut count = 1;
-            for other_note in notes.iter() {
-                if note != other_note {
-                    let time_diff = (note.time - other_note.time).abs();
-                    if time_diff <= tolerance {
-                        count += 1;
-                    }
-                }
-            }
-            max_simultaneous = max_simultaneous.max(count);
-        }
-        
-        max_simultaneous
-    }
-
-    /// 计算时间密度
-    fn calculate_time_density(&self, notes: &[&crate::core::Note]) -> f32 {
-        if notes.len() < 2 {
-            return 0.0;
-        }
-        
-        let time_span = notes.last().unwrap().time - notes.first().unwrap().time;
-        if time_span > 0.0 {
-            notes.len() as f32 / time_span
-        } else {
-            0.0
-        }
-    }
-
-    /// 分析时间差模式
-    fn analyze_time_differences(&self, notes: &[&crate::core::Note]) -> TimeDifferencePattern {
-        let mut pattern_complexity = 0.0;
-        let mut rhythm_variance = 0.0;
-        let mut fast_sequences = 0;
-        
-        if notes.len() >= 3 {
-            for i in 2..notes.len() {
-                let interval1 = notes[i-1].time - notes[i-2].time;
-                let interval2 = notes[i].time - notes[i-1].time;
-                
-                // 节奏变化程度
-                let variance = (interval1 - interval2).abs();
-                rhythm_variance += variance;
-                
-                // 模式复杂度（基于节奏变化）
-                pattern_complexity += (variance / 0.1).min(1.0);
-                
-                // 快速序列检测（间隔 < 150ms）
-                if interval1 < 0.15 && interval2 < 0.15 {
-                    fast_sequences += 1;
-                }
-            }
-        }
-        
-        let total_intervals = (notes.len() - 1).max(1);
-        TimeDifferencePattern {
-            complexity_score: (pattern_complexity / total_intervals as f32).min(1.0),
-            rhythm_variance: rhythm_variance / total_intervals as f32,
-            fast_sequence_ratio: fast_sequences as f32 / total_intervals as f32,
-        }
-    }
-
-    /// 计算2指模式评分
-    fn calculate_two_finger_score(&self, features: &TimingFeatures) -> f32 {
-        let mut score = self.two_finger_weight;
-        
-        // 更严格的2指模式要求
-        // 2指模式适合简单、间隔较大的谱面 - 提高要求
-        if features.min_interval > 0.4 {
-            score += 0.25; // 稍微降低长间隔奖励，但仍然优选
-        } else if features.min_interval < 0.15 {
-            score -= 0.3; // 太密集的谱面严重不适合2指
-        }
-        
-        // 基于平均间隔的评估 - 更严格的间隔要求
-        if features.average_interval > 0.6 {
-            score += 0.2; // 优秀的长间隔奖励
-        } else if features.average_interval > 0.3 {
-            score += 0.1; // 可接受的间隔
-        } else if features.average_interval < 0.2 {
-            score -= 0.2; // 太密集的谱面不适合2指
-        } else {
-            score -= 0.1; // 一般密集度减分
-        }
-        
-        // 基于最大间隔的评估 - 更严格的间隔控制
-        if features.max_interval > 1.5 {
-            score -= 0.1; // 间隔过大可能难以控制
-        }
-        
-        // 2指模式严格限制同时多音符
-        if features.max_simultaneous == 1 {
-            score += 0.3; // 单一音符奖励
-        } else if features.max_simultaneous >= 3 {
-            score -= 0.4; // 多个同时音符严重不适合2指
-        } else {
-            score -= 0.2; // 2个同时音符减分
-        }
-        
-        // 更严格的时间密度控制
-        if features.time_density < 1.5 {
-            score += 0.25; // 极低密度奖励
-        } else if features.time_density < 3.0 {
-            score += 0.1; // 低密度奖励
-        } else if features.time_density > 5.0 {
-            score -= 0.3; // 高密度严重减分
-        } else {
-            score -= 0.1; // 中等密度减分
-        }
-        
-        // 更严格的节奏稳定性要求
-        if features.rhythm_variance < 0.15 {
-            score += 0.2; // 极稳定节奏奖励
-        } else if features.rhythm_variance < 0.3 {
-            score += 0.1; // 稳定节奏奖励
-        } else if features.rhythm_variance > 0.7 {
-            score -= 0.3; // 节奏变化太大严重减分
-        } else {
-            score -= 0.1; // 一般节奏变化减分
-        }
-        
-        // 更严格的模式复杂度要求
-        if features.pattern_complexity < 0.2 {
-            score += 0.2; // 极简单模式奖励
-        } else if features.pattern_complexity < 0.4 {
-            score += 0.05; // 简单模式轻微奖励
-        } else if features.pattern_complexity > 0.6 {
-            score -= 0.2; // 复杂模式减分
-        } else {
-            score -= 0.05; // 一般复杂模式轻微减分
-        }
-        
-        // 基于快速序列的严格控制 - 2指不适合快速序列
-        if features.fast_sequence_ratio < 0.1 {
-            score += 0.15; // 很少快速序列奖励
-        } else if features.fast_sequence_ratio > 0.3 {
-            score -= 0.3; // 快速序列太多严重减分
-        } else {
-            score -= 0.1; // 有一些快速序列减分
-        }
-        
-        // 更严格的音符数量控制
-        if features.total_notes < 15 {
-            score += 0.15; // 少音符奖励
-        } else if features.total_notes < 30 {
-            score += 0.05; // 适中音符轻微奖励
-        } else if features.total_notes > 80 {
-            score -= 0.2; // 多音符减分
-        } else {
-            score -= 0.05; // 一般数量轻微减分
-        }
-        
-        score
-    }
-
-    /// 计算4指模式评分
-    fn calculate_four_finger_score(&self, features: &TimingFeatures) -> f32 {
-        let mut score = self.four_finger_weight;
-        
-        // 4指模式适合较复杂的谱面
-        if features.max_simultaneous > 1 {
-            score += 0.2; // 多音符支持
-        }
-        
-        // 基于平均间隔的评估 - 中等间隔最适合4指
-        if features.average_interval >= 0.2 && features.average_interval <= 0.6 {
-            score += 0.15;
-        } else if features.average_interval < 0.1 {
-            score += 0.2; // 极密集的音符序列4指表现更好
-        }
-        
-        // 基于最大间隔的适应性 - 4指能处理更大的间隔变化
-        if features.max_interval > 2.0 && features.min_interval < 0.1 {
-            score += 0.1; // 间隔变化大，4指更灵活
-        }
-        
-        // 中等密度谱面适合4指
-        if features.time_density >= 2.0 && features.time_density <= 8.0 {
-            score += 0.25;
-        }
-        
-        // 复杂节奏支持 - 基于节奏方差
-        if features.rhythm_variance >= 0.2 && features.rhythm_variance <= 0.7 {
-            score += 0.2;
-        }
-        
-        // 复杂节奏支持
-        if features.pattern_complexity >= 0.3 && features.pattern_complexity <= 0.7 {
-            score += 0.3;
-        }
-        
-        // 快速序列支持
-        if features.fast_sequence_ratio > 0.3 {
-            score += 0.15;
-        }
-        
-        // 基于总音符数的评估 - 4指更适合处理大量音符
-        if features.total_notes >= 50 {
-            score += 0.1;
-        } else if features.total_notes < 10 {
-            score -= 0.05; // 音符太少时2指更合适
-        }
-        
-        score
-    }
-
-    /// 获取历史性能因子
-    fn get_performance_factor(&self, mode: GameMode) -> f32 {
-        if let Some(performance) = self.mode_performance.get(&mode) {
-            performance.success_rate
-        } else {
-            0.5
-        }
-    }
-
-    /// 更新使用统计
-    fn update_usage_stats(&mut self, mode: GameMode, current_time: f32) {
-        if let Some(performance) = self.mode_performance.get_mut(&mode) {
-            performance.usage_count += 1;
-            performance.last_used = current_time;
-        }
-    }
-
-    /// 更新模式性能
-    pub fn update_mode_performance(&mut self, mode: GameMode, success: bool, reward: f32) {
-        if let Some(performance) = self.mode_performance.get_mut(&mode) {
-            // 使用指数移动平均更新成功率
-            let alpha = 0.1;
-            let success_rate = if success { 1.0 } else { 0.0 };
-            performance.success_rate = performance.success_rate * (1.0 - alpha) + success_rate * alpha;
-            
-            // 更新平均奖励
-            performance.average_reward = performance.average_reward * 0.95 + reward * 0.05;
-        }
-    }
-
-    /// 重置性能统计
     pub fn reset_performance(&mut self) {
-        for performance in self.mode_performance.values_mut() {
-            performance.success_rate = 0.5;
-            performance.average_reward = 0.0;
-            performance.usage_count = 0;
+        for p in self.mode_performance.values_mut() {
+            p.success_rate = 0.5;
+            p.average_reward = 0.0;
+            p.usage_count = 0;
         }
     }
 }
 
 impl Default for SmartFingerModeSelector {
-    fn default() -> Self {
-        Self::new()
+    fn default() -> Self { Self::new() }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FingerModeInfo {
+    pub current_mode: GameMode,
+    pub two_finger_performance: ModeStats,
+    pub four_finger_performance: ModeStats,
+    pub recent_notes_count: usize,
+    pub time_since_last_switch: f32,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeStats {
+    pub success_rate: f32,
+    pub average_reward: f32,
+    pub usage_count: u32,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FingerStatistics {
+    pub finger_type: FingerType,
+    pub success_streak: u32,
+    pub total_actions: u32,
+    pub performance_score: f32,
+    pub confidence: f32,
+    pub is_busy: bool,
+    pub fatigue: f32,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandStatistics {
+    pub hand_type: Hand,
+    pub position: Vector2,
+    pub fatigue: f32,
+    pub dexterity: f32,
+    pub openness: f32,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErgonomicHandSystem {
+    // ── Skeletal (source of truth) ──────────────────────────────────────
+    pub left:  SkeletalHand,
+    pub right: SkeletalHand,
+    pub left_skeleton_arm:  SkeletalArm,
+    pub right_skeleton_arm: SkeletalArm,
+
+    // ── Legacy mirrors (kept public for hand.rs) ────────────────────────
+    pub left_hand:  HandModel,
+    pub right_hand: HandModel,
+    pub left_fingers:  Vec<FingerModel>,
+    pub right_fingers: Vec<FingerModel>,
+    pub left_arm:  ArmModel,
+    pub right_arm: ArmModel,
+    pub body_center: Vector2,
+    pub body_tilt: f32,
+    pub difficulty_factor: f32,
+    pub game_mode: GameMode,
+    pub finger_mode_selector: SmartFingerModeSelector,
+    pub current_time: f32,
+    #[serde(skip)] pub recent_notes: Vec<Note>,
+    pub mode_switch_cooldown: f32,
+    pub last_mode_switch_time: f32,
+}
+
+impl ErgonomicHandSystem {
+    pub fn new() -> Self {
+        let left  = SkeletalHand::new(Hand::Left);
+        let right = SkeletalHand::new(Hand::Right);
+        let left_skeleton_arm  = SkeletalArm::new(Hand::Left);
+        let right_skeleton_arm = SkeletalArm::new(Hand::Right);
+
+        let left_fingers: Vec<FingerModel> = left.fingers.iter().map(FingerModel::from_skeleton).collect();
+        let right_fingers: Vec<FingerModel> = right.fingers.iter().map(FingerModel::from_skeleton).collect();
+
+        Self {
+            left_hand: HandModel::from_skeletal(&left),
+            right_hand: HandModel::from_skeletal(&right),
+            left_fingers,
+            right_fingers,
+            left_arm: ArmModel::from_skeletal(&left_skeleton_arm),
+            right_arm: ArmModel::from_skeletal(&right_skeleton_arm),
+            left, right, left_skeleton_arm, right_skeleton_arm,
+            body_center: Vector2::ZERO,
+            body_tilt: 0.0,
+            difficulty_factor: 1.0,
+            game_mode: GameMode::TwoFinger,
+            finger_mode_selector: SmartFingerModeSelector::new(),
+            current_time: 0.0,
+            recent_notes: Vec::new(),
+            mode_switch_cooldown: 2.0,
+            last_mode_switch_time: -2.0,
+        }
+    }
+
+    /// Copy skeletal state into the legacy public mirrors. Call this after
+    /// any operation that mutates the skeletons.
+    fn sync_legacy_views(&mut self) {
+        self.left_hand  = HandModel::from_skeletal(&self.left);
+        self.right_hand = HandModel::from_skeletal(&self.right);
+        self.left_arm  = ArmModel::from_skeletal(&self.left_skeleton_arm);
+        self.right_arm = ArmModel::from_skeletal(&self.right_skeleton_arm);
+        self.left_fingers  = self.left.fingers.iter().map(FingerModel::from_skeleton).collect();
+        self.right_fingers = self.right.fingers.iter().map(FingerModel::from_skeleton).collect();
+    }
+
+    /// Ingest any writes that legacy code made to the legacy mirrors (e.g.
+    /// `hand.rs` setting `left_hand.position` directly) and push them back
+    /// into the skeletal model.
+    fn ingest_legacy_writes(&mut self) {
+        self.left.palm_position  = self.left_hand.position;
+        self.left.palm_rotation  = self.left_hand.rotation;
+        self.left.palm_velocity  = self.left_hand.velocity;
+        self.right.palm_position = self.right_hand.position;
+        self.right.palm_rotation = self.right_hand.rotation;
+        self.right.palm_velocity = self.right_hand.velocity;
+    }
+
+    /// Advance the full system by `dt` seconds.
+    pub fn step(&mut self, dt: f32) {
+        self.ingest_legacy_writes();
+        self.left.step(dt);
+        self.right.step(dt);
+        self.left_skeleton_arm.step(dt, self.left.hand_fatigue);
+        self.right_skeleton_arm.step(dt, self.right.hand_fatigue);
+        self.sync_legacy_views();
+        self.current_time += dt;
+    }
+
+    /// Keep the legacy `update(time)` entry point used by `hand.rs`.
+    pub fn update(&mut self, time: f32) {
+        let dt = (time - self.current_time).max(0.0);
+        self.step(dt.max(1e-3));
+    }
+
+    /// Phigros-note outcome prediction via the new skeletal model.
+    ///
+    pub fn predict_outcome_for_note(
+        &self,
+        world_target: Vector2,
+        note_kind: &NoteKind,
+        note_time: f32,
+        current_time: f32,
+        hand: Hand,
+    ) -> NotePrediction {
+        let sh = match hand {
+            Hand::Left => &self.left,
+            Hand::Right => &self.right,
+        };
+        sh.predict_action_outcome(world_target, note_kind, note_time, current_time)
+    }
+
+    /// Backward-compatible alias used by `hand.rs::calculate_reward`.
+    pub fn predict_outcome_from_position(
+        &self,
+        world_position: Vector2,
+        note_time: f32,
+        note_kind: &NoteKind,
+        hand: Hand,
+    ) -> NotePrediction {
+        self.predict_outcome_for_note(world_position, note_kind, note_time, note_time, hand)
+    }
+
+    /// Backward-compatible wrapper around the skeletal model.
+    pub fn predict_note_outcome(&self, note: &Note, hand: Hand) -> NotePrediction {
+        let world = Vector2::new(note.object.translation.0.now(), 0.0);
+        self.predict_outcome_for_note(world, &note.kind, note.time, note.time, hand)
+    }
+
+    pub fn choose_best_hand_for_note(&self, note: &Note) -> (Hand, NotePrediction) {
+        SkeletalHand::choose_best_hand(&self.left, &self.right, note)
+    }
+
+    /// Backward-compatible note-success predicate. Now implemented in terms
+    /// of `predict_outcome_for_note` so all legacy call sites get the new
+    /// biomechanical signal for free.
+    pub fn evaluate_note_success(
+        &self,
+        hand: Hand,
+        target_position: &Vector2,
+        note_time: f32,
+        current_time: f32,
+        note_kind: &NoteKind,
+    ) -> (bool, f32, f32, f32) {
+        let p = self.predict_outcome_for_note(*target_position, note_kind, note_time, current_time, hand);
+        let success = !matches!(p.judgement, Judgement::Miss) && p.feasible;
+        (success, p.position_error, p.dt, p.confidence)
+    }
+
+    /// Legacy API: pick a hand for a note. Now uses loss-driven selection.
+    pub fn assign_note_hand(
+        &mut self,
+        note_position: Vector2,
+        note_kind: &NoteKind,
+        time: f32,
+    ) -> (Hand, usize, f32) {
+        let lp = self.left.predict_action_outcome(note_position, note_kind, time, time);
+        let rp = self.right.predict_action_outcome(note_position, note_kind, time, time);
+        let (hand, pred) = if lp.loss <= rp.loss { (Hand::Left, lp) } else { (Hand::Right, rp) };
+        // Pick an active finger on the chosen hand based on game mode.
+        let finger_idx = match self.game_mode {
+            GameMode::TwoFinger => FingerType::Index.index(),
+            GameMode::FourFinger => FingerType::Index.index(),
+        };
+        (hand, finger_idx, pred.confidence)
+    }
+
+    /// Legacy API: per-finger bookkeeping used by `hand.rs`.
+    pub fn update_finger_state(
+        &mut self,
+        hand: Hand,
+        finger_type: FingerType,
+        new_position: Vector2,
+        time: f32,
+        success: bool,
+        _note_kind: &NoteKind,
+    ) {
+        let fingers = match hand {
+            Hand::Left => &mut self.left_fingers,
+            Hand::Right => &mut self.right_fingers,
+        };
+        if let Some(f) = fingers.iter_mut().find(|f| f.finger_type == finger_type) {
+            f.position = new_position;
+            f.last_time = time;
+            f.total_actions += 1;
+            if success { f.success_streak += 1; } else { f.success_streak = 0; }
+        }
+    }
+
+    pub fn clean_all_finger_states(&mut self) {
+        for f in self.left_fingers.iter_mut().chain(self.right_fingers.iter_mut()) {
+            if !f.last_time.is_finite() { f.last_time = -1.0; }
+            if !f.confidence.is_finite() { f.confidence = 1.0; }
+            if !f.performance_score.is_finite() { f.performance_score = 1.0; }
+            if !f.busy_until.is_finite() { f.busy_until = -1.0; }
+        }
+    }
+
+    pub fn set_game_mode(&mut self, mode: GameMode) {
+        self.game_mode = mode;
+    }
+
+    pub fn is_finger_available(&self, hand: Hand, finger: FingerType, t: f32) -> bool {
+        let fingers = match hand {
+            Hand::Left => &self.left_fingers,
+            Hand::Right => &self.right_fingers,
+        };
+        let is_active = match self.game_mode {
+            GameMode::TwoFinger => matches!(finger, FingerType::Index),
+            GameMode::FourFinger => matches!(finger, FingerType::Index | FingerType::Middle),
+        };
+        fingers
+            .iter()
+            .find(|f| f.finger_type == finger)
+            .map(|f| is_active && !f.is_busy && t >= f.busy_until)
+            .unwrap_or(false)
+    }
+
+    pub fn get_active_fingers(&self, _hand: Hand) -> Vec<FingerType> {
+        match self.game_mode {
+            GameMode::TwoFinger => vec![FingerType::Index],
+            GameMode::FourFinger => vec![FingerType::Index, FingerType::Middle],
+        }
+    }
+
+    pub fn detect_finger_collisions(&self, hand: Hand) -> CollisionResult {
+        let sh = match hand { Hand::Left => &self.left, Hand::Right => &self.right };
+        let pairs = sh.detect_internal_collisions();
+        let mut colliding: Vec<(usize, usize, f32)> = Vec::new();
+        let mut min_sep = f32::MAX;
+        for (a, b, pen) in &pairs {
+            colliding.push((a.index(), b.index(), *pen));
+        }
+        // Inter-hand separation
+        if !colliding.is_empty() { min_sep = 0.0; }
+        CollisionResult {
+            has_collision: !colliding.is_empty(),
+            colliding_pairs: colliding,
+            min_separation_distance: if min_sep == f32::MAX { 0.0 } else { min_sep },
+        }
+    }
+
+    pub fn resolve_finger_collisions(&mut self, hand: Hand) {
+        // Push each overlapping fingertip away from its neighbour along the
+        // line between them. Simple, stable, good enough for 5 fingers.
+        let sh = match hand { Hand::Left => &mut self.left, Hand::Right => &mut self.right };
+        for _ in 0..3 {
+            let pairs = sh.detect_internal_collisions();
+            if pairs.is_empty() { break; }
+            for (fa, fb, penetration) in pairs {
+                let a = sh.fingers[fa.index()].fingertip_in_palm;
+                let b = sh.fingers[fb.index()].fingertip_in_palm;
+                let dir = (b - a).normalize();
+                let push = dir * (penetration * 0.5 + 0.05);
+                sh.fingers[fa.index()].fingertip_in_palm = a - push;
+                sh.fingers[fb.index()].fingertip_in_palm = b + push;
+            }
+        }
+        self.sync_legacy_views();
+    }
+
+    pub fn resolve_all_collisions(&mut self) {
+        self.resolve_finger_collisions(Hand::Left);
+        self.resolve_finger_collisions(Hand::Right);
+    }
+
+    pub fn can_execute_note(&self, hand: Hand, t: f32) -> bool {
+        match self.game_mode {
+            GameMode::TwoFinger => self.is_finger_available(hand, FingerType::Index, t),
+            GameMode::FourFinger => {
+                self.is_finger_available(hand, FingerType::Index, t)
+                    || self.is_finger_available(hand, FingerType::Middle, t)
+            }
+        }
+    }
+
+    // ── Legacy API stubs used by `hand.rs` ──────────────────────────────
+
+    /// Backward-compat: mark one finger as pressed at time `t`.
+    pub fn apply_finger_press(&mut self, hand: Hand, finger_index: usize, t: f32) {
+        let fingers = match hand {
+            Hand::Left => &mut self.left_fingers,
+            Hand::Right => &mut self.right_fingers,
+        };
+        if let Some(f) = fingers.get_mut(finger_index) {
+            f.is_pressed = true;
+            f.press_time = t;
+            f.is_busy = true;
+            // Busy duration based on the active finger type.
+            f.busy_until = t + match f.finger_type {
+                FingerType::Index => 0.12,
+                FingerType::Middle => 0.14,
+                _ => 0.18,
+            };
+        }
+    }
+
+    /// Backward-compat: release a previously pressed finger.
+    pub fn reset_finger_state(&mut self, hand: Hand, finger_index: usize) {
+        let fingers = match hand {
+            Hand::Left => &mut self.left_fingers,
+            Hand::Right => &mut self.right_fingers,
+        };
+        if let Some(f) = fingers.get_mut(finger_index) {
+            f.is_pressed = false;
+        }
+    }
+
+    /// Backward-compat: coarse difficulty used by `hand.rs` for feature
+    /// construction. The new signal goes through `predict_action_outcome`.
+    pub fn calculate_hand_difficulty(
+        &self,
+        hand_model: &HandModel,
+        target: &Vector2,
+        note_kind: &NoteKind,
+    ) -> f32 {
+        let movement = hand_model.calculate_movement_difficulty(target);
+        let arm_comfort = match hand_model.hand_type {
+            Hand::Left => self.left_arm.calculate_comfort(),
+            Hand::Right => self.right_arm.calculate_comfort(),
+        };
+        let note_factor = match note_kind {
+            NoteKind::Click => 1.0,
+            NoteKind::Drag => 1.2,
+            NoteKind::Flick => 1.3,
+            NoteKind::Hold { .. } => 1.5,
+        };
+        ((movement * 0.6 + (1.0 - arm_comfort) * 0.4) * note_factor * self.difficulty_factor)
+            .clamp(0.0, 2.0)
+    }
+
+    /// Backward-compat: pick the best finger on `hand` for `target`.
+    pub fn select_best_finger(&self, hand: Hand, target: &Vector2) -> (usize, f32) {
+        let fingers = match hand {
+            Hand::Left => &self.left_fingers,
+            Hand::Right => &self.right_fingers,
+        };
+        let valid_indices: Vec<usize> = match self.game_mode {
+            GameMode::TwoFinger => vec![FingerType::Index.index()],
+            GameMode::FourFinger => vec![FingerType::Index.index(), FingerType::Middle.index()],
+        };
+        let mut best_idx = valid_indices[0];
+        let mut best_score = -1.0_f32;
+        for &i in &valid_indices {
+            if let Some(f) = fingers.get(i) {
+                let s = f.calculate_suitability(target);
+                if s > best_score {
+                    best_score = s;
+                    best_idx = i;
+                }
+            }
+        }
+        (best_idx, best_score.max(0.0))
     }
 }
 
-/// 时间特征结构体
-#[derive(Debug, Clone)]
-struct TimingFeatures {
-    total_notes: usize,
-    average_interval: f32,
-    min_interval: f32,
-    max_interval: f32,
-    max_simultaneous: usize,
-    time_density: f32,
-    pattern_complexity: f32,
-    rhythm_variance: f32,
-    fast_sequence_ratio: f32,
+impl Default for ErgonomicHandSystem {
+    fn default() -> Self { Self::new() }
 }
 
-/// 时间差模式结构体
-#[derive(Debug, Clone)]
-struct TimeDifferencePattern {
-    complexity_score: f32,
-    rhythm_variance: f32,
-    fast_sequence_ratio: f32,
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// §8  Tests
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_vector_operations() {
-        let v1 = Vector2::new(3.0, 4.0);
-        let v2 = Vector2::new(1.0, 2.0);
-        
-        assert_eq!(v1.magnitude(), 5.0);
-        assert_eq!(v1.distance_to(&v2), (8.0f32).sqrt());
-        assert_eq!(v1.dot(&v2), 11.0);
+    fn vector_math_basics() {
+        let a = Vector2::new(3.0, 4.0);
+        assert!((a.magnitude() - 5.0).abs() < 1e-6);
+        let b = Vector2::new(1.0, 2.0);
+        assert!((a.distance_to(&b) - (8.0_f32).sqrt()).abs() < 1e-5);
+        assert!((a.dot(&b) - 11.0).abs() < 1e-6);
+        assert!((a.cross(&b) - 2.0).abs() < 1e-6);
+        let r = Vector2::new(1.0, 0.0).rotate(PI / 2.0);
+        assert!(r.x.abs() < 1e-5 && (r.y - 1.0).abs() < 1e-5);
     }
 
     #[test]
-    fn test_hand_model() {
-        let mut hand = HandModel::new(Vector2::new(0.0, 0.0), Hand::Left);
-        let target = Vector2::new(1.0, 1.0);
-        let difficulty = hand.calculate_movement_difficulty(&target);
-        assert!(difficulty >= 0.0 && difficulty <= 1.0);
+    fn finger_fk_gives_finite_tip() {
+        let mut idx = FingerSkeleton::from_anatomy(FingerType::Index);
+        let tip = idx.forward_kinematics();
+        assert!(tip.x.is_finite() && tip.y.is_finite());
+        // Tip must lie within the full-reach circle.
+        let reach = idx.max_reach_from_mcp() + idx.metacarpal.length;
+        let d = (tip - idx.mount_offset).magnitude();
+        assert!(d <= reach * 1.01);
     }
 
     #[test]
-    fn test_finger_model() {
-        let mut finger = FingerModel::new(Vector2::new(0.0, 0.0), FingerType::Index);
-        let target = Vector2::new(0.5, 0.0);
-        let suitability = finger.calculate_suitability(&target);
-        assert!(suitability >= 0.0 && suitability <= 1.0);
+    fn ik_roundtrip() {
+        // The analytical 2-link IK treats the (middle + distal) subchain as a
+        // rigid link, so its joint-angle solution won't equal the original
+        // posture in general. What must roundtrip is the FINGERTIP POSITION:
+        // FK(IK(target)) ≈ target, within ~5 mm (physiological noise floor).
+        let mut idx = FingerSkeleton::from_anatomy(FingerType::Middle);
+
+        // Pick a reachable target: FK of a modest posture.
+        idx.mcp_flexion.angle = 0.5;
+        idx.pip.angle = 0.9;
+        idx.dip.angle = 0.6;
+        let _ = idx.forward_kinematics();
+        let target_in_mcp = (idx.fingertip_in_palm - idx.mcp_position_in_palm)
+            .rotate(-idx.mount_angle);
+
+        let (mcp, pip, dip, reached) = idx.solve_ik(target_in_mcp);
+        assert!(reached, "target inside envelope must be reachable");
+
+        // Apply the IK solution and re-run FK.
+        idx.apply_ik(mcp, pip, dip);
+        let reconstructed_local = (idx.fingertip_in_palm - idx.mcp_position_in_palm)
+            .rotate(-idx.mount_angle);
+
+        let err = (reconstructed_local - target_in_mcp).magnitude();
+        assert!(err < 0.5, "fingertip roundtrip error = {} cm (want < 0.5)", err);
     }
 
     #[test]
-    fn test_hand_assignment() {
-        let mut system = ErgonomicHandSystem::new();
-        let note_pos = Vector2::new(1.0, 0.0);
-        let note_kind = NoteKind::Click;
-        let (hand, finger_index, confidence) = system.assign_note_hand(note_pos, &note_kind, 0.0);
-        
-        assert!(hand == Hand::Left || hand == Hand::Right);
-        assert!(finger_index < 5);
-        assert!(confidence >= 0.0 && confidence <= 1.0);
+    fn fitts_law_monotone() {
+        // Farther targets → longer MT.
+        let mt1 = fitts_movement_time(5.0, 2.0);
+        let mt2 = fitts_movement_time(50.0, 2.0);
+        assert!(mt2 > mt1);
+        // Wider targets → shorter MT.
+        let mt3 = fitts_movement_time(20.0, 1.0);
+        let mt4 = fitts_movement_time(20.0, 5.0);
+        assert!(mt3 > mt4);
     }
 
     #[test]
-    fn test_smart_finger_mode_selector() {
-        let mut selector = SmartFingerModeSelector::new();
-        
-        // 创建测试音符序列 - 简单谱面
-        let notes = vec![
-            crate::core::Note {
-                time: 0.0,
-                speed: 1.0,
-                height: 1.0,
-                kind: NoteKind::Click,
-                judge: crate::judge::JudgeStatus::None,
-                hand: Hand::Left,
-                object: crate::core::Object::default(),
-                above: false,
-                multiple_hint: false,
-                fake: false,
-                end_speed: 1.0,
-                start_height: 1.0,
-                format: None,
-            },
-            crate::core::Note {
-                time: 0.8, // 较大间隔
-                speed: 1.0,
-                height: 1.0,
-                kind: NoteKind::Click,
-                judge: crate::judge::JudgeStatus::None,
-                hand: Hand::Right,
-                object: crate::core::Object::default(),
-                above: false,
-                multiple_hint: false,
-                fake: false,
-                end_speed: 1.0,
-                start_height: 1.0,
-                format: None,
-            },
-        ];
-        
-        // 测试模式选择 - 应该选择2指模式
-        let selected_mode = selector.select_optimal_finger_mode(&notes, 0.4);
-        assert_eq!(selected_mode, GameMode::TwoFinger);
-        
-        // 创建复杂谱面测试
-        let complex_notes = vec![
-            crate::core::Note {
-                time: 0.0,
-                speed: 1.0,
-                height: 1.0,
-                kind: NoteKind::Click,
-                judge: crate::judge::JudgeStatus::None,
-                hand: Hand::Left,
-                object: crate::core::Object::default(),
-                above: false,
-                multiple_hint: false,
-                fake: false,
-                end_speed: 1.0,
-                start_height: 1.0,
-                format: None,
-            },
-            crate::core::Note {
-                time: 0.02, // 很小的间隔
-                speed: 1.0,
-                height: 1.0,
-                kind: NoteKind::Click,
-                judge: crate::judge::JudgeStatus::None,
-                hand: Hand::Right,
-                object: crate::core::Object::default(),
-                above: false,
-                multiple_hint: false,
-                fake: false,
-                end_speed: 1.0,
-                start_height: 1.0,
-                format: None,
-            },
-            crate::core::Note {
-                time: 0.03, // 很小的间隔
-                speed: 1.0,
-                height: 1.0,
-                kind: NoteKind::Click,
-                judge: crate::judge::JudgeStatus::None,
-                hand: Hand::Left,
-                object: crate::core::Object::default(),
-                above: false,
-                multiple_hint: false,
-                fake: false,
-                end_speed: 1.0,
-                start_height: 1.0,
-                format: None,
-            },
-        ];
-        
-        // 复杂谱面可能选择4指模式
-        let complex_mode = selector.select_optimal_finger_mode(&complex_notes, 0.02);
-        // 复杂谱面应该优先考虑4指模式
-        assert!(complex_mode == GameMode::TwoFinger || complex_mode == GameMode::FourFinger);
+    fn skeletal_hand_predict_perfect_for_close_target() {
+        let hand = SkeletalHand::new(Hand::Left);
+        // A target right where the index fingertip already is: should be Perfect.
+        let tip = hand.fingers[FingerType::Index.index()]
+            .fingertip_world(hand.palm_position, hand.palm_rotation);
+        let p = hand.predict_action_outcome(tip, &NoteKind::Click, 0.0, 0.0);
+        assert!(matches!(p.judgement, Judgement::Perfect));
+        assert!(p.feasible);
     }
 
     #[test]
-    fn test_finger_mode_system_integration() {
-        let mut system = ErgonomicHandSystem::new();
-        
-        // 测试初始状态
-        assert_eq!(system.game_mode, GameMode::TwoFinger);
-        let mode_info = system.get_finger_mode_info();
-        assert_eq!(mode_info.current_mode, GameMode::TwoFinger);
-        
-        // 测试模式切换功能
-        system.set_game_mode(GameMode::FourFinger);
-        assert_eq!(system.game_mode, GameMode::FourFinger);
-        
-        // 测试活跃手指获取
-        let active_fingers = system.get_active_fingers(Hand::Left);
-        assert_eq!(active_fingers.len(), 2); // 4指模式有2个活跃手指
-        assert!(active_fingers.contains(&FingerType::Index));
-        assert!(active_fingers.contains(&FingerType::Middle));
-        
-        // 测试音符执行检查
-        assert!(system.can_execute_note(Hand::Left, 0.0));
-        assert!(system.can_execute_note(Hand::Right, 0.0));
+    fn skeletal_hand_miss_for_unreachable() {
+        let hand = SkeletalHand::new(Hand::Left);
+        // A target 2 meters away is well outside human reach.
+        let far = Vector2::new(200.0, 0.0);
+        let p = hand.predict_action_outcome(far, &NoteKind::Click, 0.0, 0.0);
+        assert!(matches!(p.judgement, Judgement::Miss));
+        assert!(!p.feasible);
     }
 
     #[test]
-    fn test_two_finger_vs_four_finger_weights() {
-        let selector = SmartFingerModeSelector::new();
-        
-        // 验证2指模式权重更高
-        assert!(selector.two_finger_weight > selector.four_finger_weight);
-        
-        // 验证配置参数
-        assert!(selector.timing_analysis_window > 0.0);
-        assert!(selector.simultaneous_notes_threshold > 0);
-        assert!(selector.time_difference_analysis > 0.0);
-    }
-
-    #[test]
-    fn test_finger_collision_detection() {
-        let mut system = ErgonomicHandSystem::new();
-
-        // 模拟手指碰撞情况：将两个手指放在非常接近的位置
-        if let Some(finger1) = system.left_fingers.get_mut(1) {
-            if let Some(finger2) = system.left_fingers.get_mut(2) {
-                // 食指和中指放在几乎相同的位置（应该触发碰撞）
-                finger1.position = Vector2::new(0.0, 0.0);
-                finger2.position = Vector2::new(0.05, 0.0); // 很小的间距
-                
-                // 临时设置较小的厚度以确保触发碰撞
-                finger1.thickness = 0.5;
-                finger2.thickness = 0.5;
-            }
-        }
-
-        // 检测碰撞
-        let collision_result = system.detect_finger_collisions(Hand::Left);
-        
-        // 应该有碰撞发生
-        assert!(collision_result.has_collision);
-        assert!(!collision_result.colliding_pairs.is_empty());
-        assert!(collision_result.min_separation_distance >= 0.0);
-    }
-
-    #[test]
-    fn test_finger_collision_resolution() {
-        let mut system = ErgonomicHandSystem::new();
-
-        // 设置碰撞的手指位置
-        if let Some(finger1) = system.left_fingers.get_mut(1) {
-            if let Some(finger2) = system.left_fingers.get_mut(2) {
-                finger1.position = Vector2::new(0.0, 0.0);
-                finger2.position = Vector2::new(0.02, 0.0); // 很接近，会碰撞
-                finger1.thickness = 0.3;
-                finger2.thickness = 0.3;
-            }
-        }
-
-        // 解决碰撞
-        system.resolve_finger_collisions(Hand::Left);
-
-        // 验证碰撞是否被解决
-        let collision_result = system.detect_finger_collisions(Hand::Left);
-        assert!(!collision_result.has_collision || collision_result.min_separation_distance > 0.01);
-    }
-
-    #[test]
-    fn test_all_collisions_resolution() {
-        let mut system = ErgonomicHandSystem::new();
-
-        // 制造复杂的碰撞情况
-        system.left_fingers[1].position = Vector2::new(0.0, 0.0);
-        system.left_fingers[2].position = Vector2::new(0.05, 0.01);
-        system.right_fingers[1].position = Vector2::new(1.0, 0.0);
-        system.right_fingers[2].position = Vector2::new(1.02, 0.01);
-
-        // 增加厚度以确保碰撞
-        for finger in &mut system.left_fingers {
-            finger.thickness = 0.4;
-        }
-        for finger in &mut system.right_fingers {
-            finger.thickness = 0.4;
-        }
-
-        // 解决所有碰撞
-        system.resolve_all_collisions();
-
-        // 获取碰撞统计
-        let (left_collisions, right_collisions, avg_separation) = system.get_collision_statistics();
-        
-        // 验证结果合理
-        assert!(left_collisions <= 10); // 应该没有或很少碰撞
-        assert!(right_collisions <= 10); // 应该没有或很少碰撞
-        assert!(avg_separation >= 0.0);
-    }
-
-    #[test]
-    fn test_hand_center_calculation() {
-        let system = ErgonomicHandSystem::new();
-
-        // 测试手部中心计算
-        let left_center = system.calculate_hand_center(&system.left_fingers);
-        let right_center = system.calculate_hand_center(&system.right_fingers);
-
-        // 中心应该在合理范围内
-        assert!(left_center.x.abs() < 5.0);
-        assert!(left_center.y.abs() < 5.0);
-        assert!(right_center.x.abs() < 5.0);
-        assert!(right_center.y.abs() < 5.0);
-    }
-
-    #[test]
-    fn test_active_finger_filtering() {
-        let mut system = ErgonomicHandSystem::new();
-
-        // 测试2指模式下的活跃手指过滤
-        system.game_mode = GameMode::TwoFinger;
-        assert!(system.is_finger_active_in_mode(FingerType::Index));
-        assert!(!system.is_finger_active_in_mode(FingerType::Middle));
-        assert!(!system.is_finger_active_in_mode(FingerType::Thumb));
-
-        // 测试4指模式下的活跃手指过滤
-        system.game_mode = GameMode::FourFinger;
-        assert!(system.is_finger_active_in_mode(FingerType::Index));
-        assert!(system.is_finger_active_in_mode(FingerType::Middle));
-        assert!(!system.is_finger_active_in_mode(FingerType::Thumb));
+    fn ergonomic_system_api_unchanged() {
+        // Spot-check the backward-compatible public surface.
+        let mut sys = ErgonomicHandSystem::new();
+        let (hand, _finger, _conf) =
+            sys.assign_note_hand(Vector2::new(0.0, 0.0), &NoteKind::Click, 0.0);
+        assert!(matches!(hand, Hand::Left | Hand::Right));
+        sys.set_game_mode(GameMode::FourFinger);
+        assert_eq!(sys.game_mode, GameMode::FourFinger);
+        let active = sys.get_active_fingers(Hand::Left);
+        assert!(active.contains(&FingerType::Index));
+        assert!(active.contains(&FingerType::Middle));
+        sys.update(0.016);
     }
 }

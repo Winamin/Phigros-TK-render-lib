@@ -5185,7 +5185,6 @@ impl PhiTKAdvancedAI {
             next_state: input.clone(),
             done: false,
             timestamp: fastrand::f32() * 1000.0, // 使用随机时间戳
-            // PPO新增字段
             log_prob: 0.0,
             value: target[2],
             next_value: 0.0,
@@ -5193,13 +5192,11 @@ impl PhiTKAdvancedAI {
             return_: 0.0,
             // 未来音符信息（空）
             future_notes: vec![0.0; 16], // 4个未来音符 * 4个特征
-            // 反思相关字段
-            reflection_score: note.confidence,
+            reflection_score: 0.0,
             decision_history: vec![original_hand as usize],
             outcome_success: true,
             reflection_features: vec![0.0; 8],
-            // 智慧AI相关字段
-            hand_system_interface: 0.5,
+            hand_system_interface: 0.0,
         };
         
         self.experience_replay.push(experience);
@@ -6012,11 +6009,12 @@ impl PhiTKAdvancedAI {
                 advantage: advantage.clamp(-10.0, 10.0),
                 return_: td_target.clamp(-10.0, 10.0),
                 future_notes,
-                reflection_score: confidence, // 使用置信度作为初始反思得分
+                // 以下"反思/智慧"字段已弃用：唯一的奖励信号来自 calculate_reward()
+                reflection_score: 0.0,
                 decision_history: Vec::new(),
                 outcome_success: network_correct,
                 reflection_features: Vec::new(),
-                hand_system_interface: (self.ergonomic_hand_system.left_hand.dexterity + self.ergonomic_hand_system.right_hand.dexterity) / 2.0,
+                hand_system_interface: 0.0,
             };
         
         // 数据质量检查
@@ -6041,15 +6039,22 @@ impl PhiTKAdvancedAI {
     }
 
     fn calculate_reward(&mut self, note: &ProcessedNote, chosen_hand: Hand, _confidence: f32) -> f32 {
-        // 使用人体工程学手部系统评估分配的合理性
-        let note_position = crate::hand_model::Vector2::new(note.position.x, note.position.y);
-        let (optimal_hand, _, _) = self.ergonomic_hand_system.assign_note_hand(
-            note_position,
-            &note.kind,
+        // reward = -note_loss(judgement, dt, feasible)
+        //
+        //   Perfect & 手模型认为可行 → 接近 0 的小惩罚 → reward ≈ 0
+        //   Good                   → 小惩罚            → reward ≈ -0.35
+        //   Bad                    → 大惩罚            → reward ≈ -1
+        //   Miss 或手模型认为打不到 → 巨大惩罚          → reward ≈ -2 或更低
+        //
+        //PPO最大化 reward 等价于最小化loss。
+        let pos = crate::hand_model::Vector2::new(note.position.x, note.position.y);
+        let prediction = self.ergonomic_hand_system.predict_outcome_from_position(
+            pos,
             note.time,
+            &note.kind,
+            chosen_hand,
         );
-        // 简化奖励：只根据人体工程学系统判断的最优手与实际选择手的匹配程度
-        if chosen_hand == optimal_hand { 0.5 } else { -0.3 }
+        -prediction.loss
     }
     fn count_consecutive_same_hand(&self, current_hand: Hand) -> usize {
         let mut count = 0;
@@ -7190,11 +7195,12 @@ impl PhiTKAdvancedAI {
             advantage: 0.2, // 正优势鼓励变化
             return_: 0.8,
             future_notes: vec![0.0; 16],
-            reflection_score: 0.8,
+            // 合成经验同样不再使用反思/智慧信号
+            reflection_score: 0.0,
             decision_history: vec![if current_hand_preference > 0.5 { 0 } else { 1 }],
             outcome_success: true,
-            reflection_features: vec![0.8; 8],
-            hand_system_interface: 0.7,
+            reflection_features: vec![0.0; 8],
+            hand_system_interface: 0.0,
         })
     }
     

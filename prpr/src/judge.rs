@@ -239,6 +239,15 @@ pub struct Judge {
 
     pub(crate) inner: JudgeInner,
     pub judgements: RefCell<Vec<(f32, u32, u32, Result<Judgement, bool>)>>,
+
+    // ── AI-Player: runs the physical skeletal model to generate fake
+    //    touches that flow through the *real* judgement pipeline, so closing
+    //    the official `autoplay` flag still leaves an AI that "plays" the
+    //    chart with human-like timing.
+    ai_hand_system: crate::hand_model::ErgonomicHandSystem,
+    /// Per-line set of real note ids (into `chart.lines[i].notes`) that the
+    /// AI has already emitted a touch for. Prevents re-triggering.
+    ai_triggered: Vec<std::collections::HashSet<u32>>,
 }
 
 static SUBSCRIBER_ID: Lazy<usize> = Lazy::new(register_input_subscriber);
@@ -266,6 +275,9 @@ impl Judge {
 
             inner: JudgeInner::new(chart.lines.iter().map(|it| it.notes.iter().filter(|it| !it.fake).count() as u32).sum()),
             judgements: RefCell::new(Vec::new()),
+
+            ai_hand_system: crate::hand_model::ErgonomicHandSystem::new(),
+            ai_triggered: chart.lines.iter().map(|_| std::collections::HashSet::new()).collect(),
         }
     }
 
@@ -274,11 +286,167 @@ impl Judge {
         self.trackers.clear();
         self.inner.reset();
         self.judgements.borrow_mut().clear();
+        // Reset the AI player: drop memory of triggered notes and build a
+        // fresh hand system so the next run starts from a neutral posture.
+        self.ai_triggered.iter_mut().for_each(|s| s.clear());
+        self.ai_hand_system = crate::hand_model::ErgonomicHandSystem::new();
     }
 
     pub fn commit(&mut self, t: f32, what: Judgement, line_id: u32, note_id: u32, diff: f32) {
         self.judgements.borrow_mut().push((t, line_id, note_id, Ok(what)));
         self.inner.commit(what, diff);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // AI-Player: physical simulation → fake touches → real judgement pipeline
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // Called once per frame (while autoplay is OFF) before the normal touch
+    // loop consumes the `touches` HashMap. For every note that:
+    //   1. is not yet judged / triggered,
+    //   2. has its `note.time` within [t - LIMIT_BAD, t + LIMIT_BAD + ε],
+    //   3. is assigned to Left or Right by `PhiTKAdvancedAI::analyze_and_assign`,
+    // we query `SkeletalHand::predict_action_outcome`. If the prediction is
+    // physically feasible, we schedule a Started touch at `t + dt` (where
+    // `dt` is the predicted timing error from Fitts' Law). The touch's
+    // position is the note's local-frame x transformed into screen space via
+    // the line's current transform, so the normal judgement loop treats it
+    // exactly like a real human tap.
+    //
+    // Notes the skeletal model deems unreachable simply aren't triggered and
+    // fall through to the normal miss-detection path – that's how the AI
+    // realistically gets Bad/Miss on notes it can't physically play.
+    fn inject_ai_touches(
+        &mut self,
+        t: f32,
+        spd: f32,
+        chart: &Chart,
+        res: &Resource,
+        touches: &mut HashMap<u64, Touch>,
+    ) {
+        use crate::core::note::Hand;
+        use crate::core::NoteKind;
+        use crate::hand_model::Vector2 as HMVec;
+
+        // Advance the skeletal simulation by one frame.
+        let dt_frame = (t - self.last_time).max(0.0);
+        self.ai_hand_system.step(dt_frame);
+
+        const ANTICIPATION: f32 = 0.05; // up to 50 ms "early" tap
+        let window_lo = t - LIMIT_BAD;
+        let window_hi = t + LIMIT_BAD + ANTICIPATION;
+
+        let mut active_holds = 0u32;
+
+        for (line_idx, (idx, _st)) in self.notes.iter().enumerate() {
+            let Some(line) = chart.lines.get(line_idx) else { continue };
+            let line_tr = line.now_transform(res, &chart.lines);
+
+            for &note_id in idx.iter() {
+                if !self.ai_triggered[line_idx].insert(note_id) {
+                    // Was already triggered on a previous frame; check if it
+                    // is still an active hold so we can sustain it.
+                    let note = &line.notes[note_id as usize];
+                    if matches!(note.kind, NoteKind::Hold { .. })
+                        && matches!(note.judge, JudgeStatus::Hold(..))
+                    {
+                        active_holds += 1;
+                    }
+                    continue;
+                }
+
+                let note = &line.notes[note_id as usize];
+
+                if note.fake {
+                    continue;
+                }
+                if !matches!(note.judge, JudgeStatus::NotJudged | JudgeStatus::PreJudge) {
+                    continue;
+                }
+                if note.time < window_lo || note.time > window_hi {
+                    // Outside the window – remove from the triggered set so
+                    // we can retry on a later frame (e.g. after a seek).
+                    self.ai_triggered[line_idx].remove(&note_id);
+                    continue;
+                }
+
+                // Physical prediction via the skeletal model. Use the full
+                // local (x, y) so rotated / inclined judge lines still map
+                // to the right world position.
+                let local_x = note.object.translation.0.now();
+                let local_y = note.object.translation.1.now();
+                let local_pt = Point::new(local_x, local_y);
+                let world_pt = line_tr.transform_point(&local_pt);
+                let world_pos = HMVec::new(world_pt.x, world_pt.y);
+                let hand: Hand = note.hand;
+                let prediction = self.ai_hand_system.predict_outcome_for_note(
+                    world_pos,
+                    &note.kind,
+                    note.time,
+                    t,
+                    hand,
+                );
+
+                if !prediction.feasible {
+                    // Don't fire – let the miss-detection path below
+                    // mark this note as Miss. That's how the AI gets
+                    // realistic "I can't reach that" failures.
+                    continue;
+                }
+
+                // The raw Fitts-derived dt is often > LIMIT_BAD (e.g. 0.25s
+                // for a far-away note), which would push the touch past
+                // the judge window and cause a Miss. Scale it down so the
+                // AI's tap always lands inside LIMIT_GOOD: small dt →
+                // Perfect, medium dt → Good, and the residual position
+                // error can still push it to Bad on rotated / fast lines.
+                //
+                // `k < 1` keeps the AI from being mechanically perfect:
+                // 0.4 means "the AI fires at 40% of the movement time it
+                // actually needs", so the judgement pipeline sees real
+                // early / on-time / late variation.
+                const DT_SCALE: f32 = 0.4;
+                let capped_dt = (prediction.dt * DT_SCALE).min(LIMIT_GOOD * 0.95);
+                // Signed jitter so the AI isn't always early: map the
+                // confidence (1 = sure, 0 = unsure) to a small offset in
+                // [-0.02, +0.02] s.
+                let jitter = (0.5 - prediction.confidence) * 0.04;
+                let trigger_time = t + capped_dt + jitter;
+
+                // Screen-space touch position, matching touch_transform's
+                // inverse so the judge's inv_line_tr brings us back onto
+                // the note.
+                let vp = get_viewport();
+                let aspect = vp.2 as f32 / vp.3 as f32;
+                let sx = (world_pt.x + 1.0) * 0.5 * vp.2 as f32 + vp.0 as f32;
+                let sy = screen_height()
+                    - ((world_pt.y * aspect + 1.0) * 0.5 * vp.3 as f32 + vp.1 as f32);
+
+                // Stable per-note touch id: 0x4149_ ("AI") | line | note_id.
+                let ai_touch_id: u64 =
+                    0x4149_0000_0000_0000 | ((line_idx as u64) << 24) | (note_id as u64);
+
+                touches.insert(
+                    ai_touch_id,
+                    Touch {
+                        id: ai_touch_id,
+                        phase: TouchPhase::Started,
+                        position: vec2(sx, sy),
+                        time: (trigger_time as f64).into(),
+                    },
+                );
+
+                if matches!(note.kind, NoteKind::Hold { .. }) {
+                    active_holds += 1;
+                }
+            }
+        }
+
+        // While the AI is sustaining holds, pretend at least one keyboard
+        // key is down so the existing hold-maintenance path in update()
+        // keeps those notes alive without us having to emit continuous
+        // Moved touches.
+        self.key_down_count = self.key_down_count.max(active_holds);
     }
 
     #[inline]
@@ -336,7 +504,17 @@ impl Judge {
     }
 
     pub fn update(&mut self, res: &mut Resource, chart: &mut Chart, bad_notes: &mut Vec<BadNote>, skip_sfx: bool) {
-        if res.config.autoplay() {
+        // The skeletal AI is the *only* auto-play mechanism when
+        // `hand_split` is ON: it generates fake touches that flow through
+        // the real judgement pipeline, so the AI is graded with human
+        // rules (Perfect / Good / Bad / Miss based on reach + Fitts'
+        // Law timing).
+        //
+        // The official `auto_play_update` (which marks every note as
+        // Perfect without going through the judgement pipeline) is only
+        // used when `hand_split` is OFF *and* the user asked for
+        // autoplay. This preserves the legacy "flawless demo mode".
+        if res.config.autoplay() && !res.config.hand_split {
             self.auto_play_update(res, chart, skip_sfx);
             return;
         }
@@ -433,6 +611,20 @@ impl Judge {
                     }
                 }
             }
+        }
+        // ── AI-Player hook ──────────────────────────────────────────────
+        // When `hand_split` is ON the skeletal AI plays the chart, period
+        // – it doesn't matter whether `autoplay` is ON or OFF. The AI
+        // injects one Started touch per reachable upcoming note into the
+        // live touches map; those touches then flow through the normal
+        // judgement loop below, so the AI is graded with the same rules
+        // as a human player.
+        //
+        // When `hand_split` is OFF the AI is *always* disabled – the user
+        // explicitly opted out of the hand-assignment model, so there is
+        // no per-note `hand` decision to play back.
+        if res.config.hand_split {
+            self.inject_ai_touches(t, spd, chart, res, &mut touches);
         }
         let touches: Vec<Touch> = touches
             .into_values()

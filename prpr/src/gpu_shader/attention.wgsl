@@ -17,24 +17,24 @@ struct AttentionParams {
 //   V偏置: [num_heads, head_dim]
 // 输出: [batch_size, seq_len, input_size]
 
-// 共享内存大小 = 2 * seq_len (用于Softmax的归约)
-const SHARED_MEM_SIZE: u32 = 128; // 支持最大seq_len=64
+// 共享内存大小 = 2 * seq_len
+const SHARED_MEM_SIZE: u32 = 128;
 var<workgroup> shared_mem: array<f32, SHARED_MEM_SIZE>;
 
 @group(0) @binding(0) var<storage, read> params: AttentionParams;
 @group(0) @binding(1) var<storage, read> input: array<f32>;
-@group(0) @binding(2) var<storage, read> q_weights: array<f32>; // Q权重和偏置
-@group(0) @binding(3) var<storage, read> k_weights: array<f32>; // K权重和偏置  
-@group(0) @binding(4) var<storage, read> v_weights: array<f32>; // V权重和偏置
+@group(0) @binding(2) var<storage, read> q_weights: array<f32>; // Q
+@group(0) @binding(3) var<storage, read> k_weights: array<f32>; // K
+@group(0) @binding(4) var<storage, read> v_weights: array<f32>; // V
 @group(0) @binding(5) var<storage, read_write> output: array<f32>;
 
-// 计算Q/K/V投影 - qkv_type: 0=Q, 1=K, 2=V
+// qkv_type: 0=Q, 1=K, 2=V
 fn compute_projection(
     batch_idx: u32,
     seq_idx: u32,
     head_idx: u32,
     qkv_type: u32
-) -> array<f32, 64> { // 返回head_dim维向量
+) -> array<f32, 64> {
     var result: array<f32, 64>;
     let base_input_idx = (batch_idx * params.seq_len + seq_idx) * params.input_size;
 
@@ -43,16 +43,11 @@ fn compute_projection(
 
     for (var d = 0u; d < params.head_dim; d++) {
         var sum = 0.0;
-        
-        // 根据qkv_type选择正确的权重缓冲区
+
         if (qkv_type == 0u) { // Q
-            // 读取Q偏置
+            // read Q
             let bias_idx = weights_size + head_idx * params.head_dim + d;
-            if (bias_idx < arrayLength(&q_weights)) {
-                sum = q_weights[bias_idx];
-            }
-            
-            // 读取Q权重并计算
+            if (bias_idx < arrayLength(&q_weights)) {sum = q_weights[bias_idx];}
             for (var i = 0u; i < params.input_size; i++) {
                 let weight_idx = head_idx * params.head_dim * params.input_size + d * params.input_size + i;
                 if (weight_idx < arrayLength(&q_weights)) {
@@ -60,13 +55,12 @@ fn compute_projection(
                 }
             }
         } else if (qkv_type == 1u) { // K  
-            // 读取K偏置
+            // read k
             let bias_idx = weights_size + head_idx * params.head_dim + d;
             if (bias_idx < arrayLength(&k_weights)) {
                 sum = k_weights[bias_idx];
             }
-            
-            // 读取K权重并计算
+
             for (var i = 0u; i < params.input_size; i++) {
                 let weight_idx = head_idx * params.head_dim * params.input_size + d * params.input_size + i;
                 if (weight_idx < arrayLength(&k_weights)) {
@@ -74,7 +68,7 @@ fn compute_projection(
                 }
             }
         } else { // V
-            // 读取V偏置
+            // read v
             let bias_idx = weights_size + head_idx * params.head_dim + d;
             if (bias_idx < arrayLength(&v_weights)) {
                 sum = v_weights[bias_idx];

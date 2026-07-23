@@ -403,6 +403,7 @@ pub struct Resource {
     pub dpi: u32,
     pub last_vp: (i32, i32, i32, i32),
     pub note_width: f32,
+    pub loading_progress: f32,
 
     pub alpha: f32,
     pub judge_line_color: Color,
@@ -561,6 +562,7 @@ impl Resource {
             note_buffer: RefCell::new(NoteBuffer::default()),
 
             model_stack: vec![Matrix::identity()],
+            loading_progress: 0.0,
         })
     }
 

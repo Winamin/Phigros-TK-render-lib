@@ -107,7 +107,6 @@ static PAINTER_CACHE: Lazy<Mutex<(RenderPass, Texture, (i32, i32, i32, i32))>> =
     Mutex::new((pass, tex, vp))
 });
 
-// 渲染优化常量懒加载
 static RENDER_CONSTANTS: Lazy<RenderConstants> = Lazy::new(|| RenderConstants {
     duration: 4.03,
     threshold: 0.2,
@@ -406,50 +405,35 @@ impl JudgeLine {
         
         let config = crate::config::Config::default();
         let rot = self.object.rotation.now();
-        
-        // Use the passed world_pos directly instead of calling now_transform
         let line_translation = world_pos;
         
-        let chart_ratio_inv = res.chart_ratio_inv; // 使用缓存的值
+        let chart_ratio_inv = res.chart_ratio_inv;
         let vw = 1.2 * chart_ratio_inv;
         let vh = chart_ratio_inv;
-        
-        // 复用线程本地缓冲区
+
         ENHANCED_NOTES_BUFFER.with(|buffer| {
             let mut enhanced_notes_data = buffer.borrow_mut();
             enhanced_notes_data.clear();
             enhanced_notes_data.reserve(self.notes.len());
             
             for note in &self.notes {
-                // 音符在判定线局部坐标系中的位置
                 let local_x = note.object.translation.0.now();
                 let local_y = note.object.translation.1.now();
-                
-                // 转换为标准化的世界坐标（不考虑判定线旋转）
                 let world_x_no_rotation = local_x * vw;
                 let world_y_no_rotation = local_y * vh;
-                
-                // 应用判定线的世界位置偏移
                 let world_x = world_x_no_rotation + line_translation.x;
                 let world_y = world_y_no_rotation + line_translation.y;
-                
-                // 现在将这个"主视角下的世界坐标"传递给手部分配函数
-                // 手部分配函数内部会处理旋转角度的影响
                 let true_world_pos = Vector::new(world_x, world_y);
-                let enhanced_pos = true_world_pos; // 直接使用真实世界坐标
+                let enhanced_pos = true_world_pos;
                 
                 enhanced_notes_data.push((true_world_pos, enhanced_pos));
             }
-            
-            // 创建增强版临时音符用于AI计算（复用缓冲区）
-            // 避免全量 clone，只复制必要字段
             AI_NOTES_BUFFER.with(|ai_buffer| {
                 let mut ai_notes = ai_buffer.borrow_mut();
                 ai_notes.clear();
                 ai_notes.reserve(self.notes.len());
                 
                 for (note, &(_true_world_pos, enhanced_pos)) in self.notes.iter().zip(enhanced_notes_data.iter()) {
-                    // 只复制手部分配需要的字段，避免克隆整个 Object
                     let ai_note = crate::core::Note {
                         time: note.time,
                         kind: note.kind.clone(),
@@ -475,11 +459,7 @@ impl JudgeLine {
                     };
                     ai_notes.push(ai_note);
                 }
-                
-                // 分配手（使用统一主视角数据）
                 crate::hand::assign_hands_unified_perspective(&mut ai_notes, &config, index, rot, bpm_list, &enhanced_notes_data);
-                
-                // 将分配结果复制回原始音符
                 for (orig_note, ai_note) in self.notes.iter_mut().zip(ai_notes.iter()) {
                     orig_note.hand = ai_note.hand;
                 }
@@ -507,16 +487,11 @@ impl JudgeLine {
     }
 
     pub fn render(&self, mut ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &BpmList, settings: &ChartSettings, id: usize) {
-
-        // 早期退出优化：预先计算 alpha
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
         let color = self.color.now_opt();
-
-        // 优化1: 提前计算常量，避免重复计算
         let final_alpha = alpha.max(0.0);
         let is_debug = res.config.chart_debug;
         let is_fade_out = res.config.has_mod(Mods::FADE_OUT);
-
         // Use cached world position if available (set by chart.rs update())
         // to avoid redundant fetch_pos recursive traversal
         let transform = match self.cached_world_pos {
@@ -526,43 +501,19 @@ impl JudgeLine {
         res.with_model(transform, |res| {
             res.with_model(self.object.now_scale(), |res| {
                 res.apply_model(|res| {
-                    // 优化3: 使用查找表代替 match，提高分支预测性能
                     match &self.kind {
                         JudgeLineKind::Normal => {
-                            if !res.config.ui_line {
-                                return;
-                            }
-
+                            if !res.config.ui_line { return; }
                             let mut line_color = color.unwrap_or(res.judge_line_color);
                             line_color.a *= final_alpha;
-
-                            // 早期退出：alpha 为 0 且非调试模式
-                            if line_color.a == 0.0 && !is_debug {
-                                return;
-                            }
-
-                            if is_debug {
-                                line_color.a = 0.10 + 0.90 * line_color.a;
-                            }
-
+                            if line_color.a == 0.0 && !is_debug { return; }
+                            if is_debug { line_color.a = 0.10 + 0.90 * line_color.a; }
                             let len = res.info.line_length;
-
                             if res.config.disable_loading {
                                 draw_line(-len, 0., len, 0., RENDER_CONSTANTS.line_width_normal, line_color);
                             } else {
-                                // 使用懒加载的渲染常量
-                                let t_norm = (res.time / RENDER_CONSTANTS.duration).min(1.0);
-
-                                // 优化5: 使用 FMA (Fused Multiply-Add) 友好的计算
-                                let exp_factor = if t_norm < RENDER_CONSTANTS.threshold {
-                                    let normalized = t_norm * RENDER_CONSTANTS.inv_threshold;
-                                    0.5 * normalized * normalized
-                                } else {
-                                    let normalized = (1.0 - t_norm) * RENDER_CONSTANTS.inv_one_minus_threshold;
-                                    0.5 + 0.5 * (1.0 - normalized * normalized)
-                                };
-
-                                let current_len = len * exp_factor;
+                                let t_norm = res.loading_progress;
+                                let current_len = len * t_norm;
                                 draw_line(-current_len, 0., current_len, 0., RENDER_CONSTANTS.line_width_loading, line_color);
                             }
                         }
@@ -581,11 +532,8 @@ impl JudgeLine {
                             } else {
                                 final_alpha
                             };
-
-                            // 优化6: 减少锁竞争 - 使用 RwLock 的 try_read 快速路径
                             let key = texture.get_tex() as *const Texture2D as usize;
                             let texture_2d = {
-                                // 快速读取路径
                                 if let Ok(cache) = TEXTURE_CACHE.try_read() {
                                     if let Some(tex) = cache.get(&key) {
                                         tex.clone()
@@ -597,7 +545,6 @@ impl JudgeLine {
                                             .clone()
                                     }
                                 } else {
-                                    // 降级到标准路径
                                     let cache = TEXTURE_CACHE.read().unwrap();
                                     cache.get(&key).cloned().unwrap_or_else(|| {
                                         drop(cache);
@@ -671,8 +618,6 @@ impl JudgeLine {
                     }
                 })
             });
-
-            // Paint 类型的后处理
             if let JudgeLineKind::Paint(_, state) = &self.kind {
                 let gl = unsafe { get_internal_gl() };
                 let ctx = gl.quad_context;
@@ -683,7 +628,7 @@ impl JudgeLine {
                 if ready {
                     if let Some(pass) = guard.0.as_ref() {
                         let tex = pass.texture(ctx);
-                        let top = res.inv_aspect_ratio; // 使用缓存的值
+                        let top = res.inv_aspect_ratio;
                         draw_texture_ex(
                             Texture2D::from_miniquad_texture(tex),
                             -1.,
@@ -711,12 +656,7 @@ impl JudgeLine {
                 incline_sin: self.incline.now_opt().map(|it| it.to_radians().sin()).unwrap_or_default(),
                 global_speed_factor: res.config.note_speed_factor,
             };
-
-            if is_fade_out {
-                config.invisible_time = LIMIT_BAD;
-            }
-
-            // 优化8: Alpha 扩展逻辑优化
+            if is_fade_out { config.invisible_time = LIMIT_BAD; }
             if alpha < 0.0 && settings.pe_alpha_extension {
                 let w = (-alpha).floor() as u32;
                 match w {
@@ -733,6 +673,9 @@ impl JudgeLine {
             let chart_ratio_inv = res.chart_ratio_inv; // 使用缓存的值
             let vw = 1.2 * chart_ratio_inv;
             let vh = chart_ratio_inv;
+            // 相机可见范围(最终世界坐标系),用于判断 note 是否在屏幕外(上/下/左/右)
+            let half_w = chart_ratio_inv;
+            let half_h = chart_ratio_inv * res.inv_aspect_ratio;
 
             // Use cached viewport corner world positions to avoid repeated matrix inverse calls.
             // The cache is invalidated when the viewport changes.
@@ -767,30 +710,20 @@ impl JudgeLine {
             let chart_format_matches = matches!(res.chart_format, ChartFormat::Pgr | ChartFormat::Rpe);
             let note_scale_positive = res.config.note_scale > 0.;
 
-            if !note_scale_positive {
-                return;
-            }
+            if !note_scale_positive { return; }
             // Use a lightweight view that borrows keyframes instead of cloning the entire AnimFloat
             let mut height = AnimFloatView::new(&self.height);
             let not_plain_count = self.cache.not_plain_count;
 
-            // 渲染上方音符（普通）
             for note in self.notes[..not_plain_count].iter().filter(|n| n.above) {
                 height.set_time(note.time.min(res.time));
                 let line_height_at_note = height.now();
                 let note_height = note.height - line_height_at_note + note.object.translation.1.now();
-
-                // 优化14: 使用短路评估减少分支
                 if agg && chart_format_matches {
                     let inv_speed = 1.0 / note.speed;
-                    if note_height < height_below * inv_speed {
-                        continue;
-                    }
-                    if note_height > height_above * inv_speed {
-                        break;
-                    }
+                    if note_height < height_below * inv_speed { continue; }
+                    if note_height > height_above * inv_speed { break; }
                 }
-
                 note.render(res, &mut config, bpm_list);
             }
 
@@ -801,25 +734,15 @@ impl JudgeLine {
                 let height_above_scaled = height_above * inv_speed;
 
                 for note in &self.notes[index..] {
-                    if !note.above || speed != note.speed {
-                        break;
-                    }
-
+                    if !note.above || speed != note.speed { break; }
                     let note_height = note.height - config.line_height + note.object.translation.1.now();
-
-                    if agg && note_height < height_below_scaled {
-                        continue;
-                    }
-                    if agg && note_height > height_above_scaled {
-                        break;
-                    }
-
+                    if agg && note_height < height_below_scaled { continue; }
+                    if agg && note_height > height_above_scaled { break; }
                     note.render(res, &mut config, bpm_list);
                 }
             }
 
             res.with_model(*FLIP_Y_MATRIX, |res| {
-                // 渲染下方音符（普通）
                 for note in self.notes[..not_plain_count].iter().filter(|n| !n.above) {
                     height.set_time(note.time.min(res.time));
                     let line_height_at_note = height.now();

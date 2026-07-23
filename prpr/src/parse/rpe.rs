@@ -290,30 +290,22 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
     let mut sani = AnimFloat::chain(anis);
     sani.map_value(|v| v * SPEED_RATIO);
     for i in 0..(pts.len() - 1) {
-        let now_time = *pts[i]; // 解引用为 f32
-        let end_time = *pts[i + 1]; // 解引用为 f32
+        let now_time = *pts[i];
+        let end_time = *pts[i + 1];
         sani.set_time(now_time);
         let start_speed = sani.now();
         sani.set_time(end_time - 1e-4);
         let end_speed = sani.now();
-
-        // 检查速度是否线性变化（加速度恒定）
         let duration = end_time - now_time;
         if duration > EPS && (start_speed - end_speed).abs() > EPS {
-            // 计算加速度 (a = Δv/Δt)
             let acceleration = (end_speed - start_speed) / duration;
-
-            // 如果加速度为0（匀速），不需要额外分割
             if acceleration.abs() > EPS {
-                // 计算速度过零点的时间（如果存在）
                 if start_speed.signum() != end_speed.signum() {
                     let zero_time = now_time - start_speed / acceleration;
                     if zero_time > now_time && zero_time < end_time {
                         pts.push(zero_time.not_nan());
                     }
                 }
-
-                // 在区间中点添加关键帧以获得更好的二次曲线近似
                 let mid_time = (now_time + end_time) / 2.0;
                 pts.push(mid_time.not_nan());
             }
@@ -324,30 +316,24 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
     let mut kfs = Vec::new();
     let mut height = 0.0;
 
-    // 确保时间0处有初始关键帧
     if *pts[0] > 0.0 {
         kfs.push(Keyframe::new(0.0, height, 2));
     }
 
     for i in 0..(pts.len() - 1) {
-        let now_time = *pts[i]; // 解引用为 f32
-        let end_time = *pts[i + 1]; // 解引用为 f32
+        let now_time = *pts[i];
+        let end_time = *pts[i + 1];
         let duration = end_time - now_time;
 
         sani.set_time(now_time);
         let start_speed = sani.now();
         sani.set_time(end_time - 1e-4);
         let end_speed = sani.now();
-
-        // 精确计算位移增量（使用积分公式）
         let delta_height = if duration < EPS {
             0.0
         } else if (start_speed - end_speed).abs() < EPS {
-            // 匀速运动：Δs = v * t
             start_speed * duration
         } else {
-            // 匀加速运动：Δs = (v0 + v1)/2 * t
-            // 使用精确的二次积分公式
             (start_speed + end_speed) * duration / 2.0
         };
 
@@ -363,7 +349,6 @@ fn parse_speed_events(r: &mut BpmList, rpe: &[RPEEventLayer], max_time: f32) -> 
 }
 
 fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Result<Vec<Note>> {
-    // 用于智能手部分配的追踪
     let mut previous_notes: Vec<(f32, f32, Hand)> = Vec::new();
 
     let notes = rpe.into_iter()
@@ -430,8 +415,6 @@ fn parse_notes(r: &mut BpmList, rpe: Vec<RPENote>, height: &mut AnimFloat) -> Re
             })
         })
         .collect::<Result<Vec<_>>>()?;
-
-    // 更新追踪列表
     for note in &notes {
         let pos = note.object.translation.0.now();
         previous_notes.push((note.time, pos, note.hand));
@@ -449,14 +432,11 @@ fn parse_ctrl_events(rpe: &[RPECtrlEvent], key: &str) -> AnimFloat {
     if rpe.is_empty() || (rpe.len() == 2 && rpe[0].easing == 1 && (vals[0] - 1.).abs() < 1e-4) {
         return AnimFloat::default();
     }
+    let mut kfs = Vec::new();
 
-    // 修复：声明并初始化 kfs 向量
-    let mut kfs = Vec::new(); // <-- 添加这行声明 kfs
 
-    // 修复：替换未定义的 default 变量
-    // 原代码中的 default 可能是想用第一个值作为默认值？
-    if let Some(&first_val) = vals.first() { // <-- 使用 vals 的第一个值
-        kfs.push(Keyframe::new(0.0, first_val, 0)); // 注意：这里使用的缓动类型0需要确认是否合适
+    if let Some(&first_val) = vals.first() {
+        kfs.push(Keyframe::new(0.0, first_val, 0));
     }
 
     // 添加其他关键帧

@@ -429,7 +429,7 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    const MAX_PARTICLES: usize = 800000;
+    const MAX_PARTICLES: usize = 10000;
 
     pub fn new(config: EmitterConfig) -> Emitter {
         let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
@@ -581,7 +581,6 @@ impl Emitter {
 
         fn random_initial_vector(dir: Vec2, spread: f32, velocity: f32) -> Vec2 {
             let angle = rand::gen_range(-spread / 2.0, spread / 2.0);
-
             let quat = glam::Quat::from_rotation_z(angle);
             let dir = quat * vec3(dir.x, dir.y, 0.0);
             let res = dir * velocity;

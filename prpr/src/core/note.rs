@@ -18,7 +18,6 @@ const FADEOUT_TIME: f32 = 0.16;
 const BAD_TIME: f32 = 0.5;
 const RPE_HEIGHT_SCALE: f32 = RPE_HEIGHT * (1.0 / 720.0);
 
-// 懒加载静态资源
 static INIT_POINTS: Lazy<[Point; 4]> = Lazy::new(|| [
     Point::new(0., 0.),
     Point::new(1., 0.),
@@ -47,7 +46,7 @@ fn get_texture_gl_id(texture: &Texture2D) -> GLuint {
     })
 }
 
-// 基础亮度常量
+
 const BASE_LUMINANCE: f32 = 0.9;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

@@ -47,20 +47,18 @@ struct InitialStates {
     // initial_cell 从 hidden 后面开始
 }
 
-// Buffer bindings (减少到 8 个)
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read> weights: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 @group(0) @binding(3) var<storage, read> biases: array<f32>;
 @group(0) @binding(4) var<storage, read_write> hidden_states: array<f32>;
 @group(0) @binding(5) var<storage, read_write> cell_states: array<f32>;
-@group(0) @binding(6) var<uniform> unified_params: UnifiedParams;  // 合并 params + dispatch
-@group(0) @binding(7) var<storage, read> initial_states: array<f32>;  // 合并 initial_hidden + initial_cell
+@group(0) @binding(6) var<uniform> unified_params: UnifiedParams;
+@group(0) @binding(7) var<storage, read> initial_states: array<f32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let global_id = id.x;
-    // 从统一缓冲区解码参数
     let input_size = unified_params.data[0].x;
     let hidden_size = unified_params.data[0].y;
     let seq_len = unified_params.data[0].z;
@@ -68,69 +66,43 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let bidirectional = unified_params.data[1].x;
     let t = unified_params.data[1].y;
     let direction = unified_params.data[1].z;
-
     let num_directions = select(1u, 2u, bidirectional != 0u);
-
-    // 更严格的边界检查
-    if (global_id >= batch_size ||
-        t >= seq_len ||
-        direction >= num_directions ||
-        hidden_size > 512u) {
-        return;
-    }
-
+    if (global_id >= batch_size ||t >= seq_len ||direction >= num_directions ||hidden_size > 512u) {return;}
     let batch_idx = global_id;
     let dir = direction;
     let is_backward = (dir == 1u);
-
-    // 计算实际时间步索引
     let actual_t = select(t, seq_len - 1u - t, is_backward);
-
-    // 1. 获取当前输入
     let x_base = batch_idx * seq_len * input_size + actual_t * input_size;
 
-    // 2. 获取前一时刻状态
-    var h_prev: array<f32, 512>; // 固定大小数组 (最大512)
+    var h_prev: array<f32, 512>;
     var c_prev: array<f32, 512>;
     let state_size = seq_len * num_directions * hidden_size;
     let batch_state_offset = batch_idx * state_size;
 
-    // 检查是否为序列起始点
     let is_sequence_start = (is_backward && (actual_t == seq_len - 1u))
                           || (!is_backward && (actual_t == 0u));
 
-    // 计算 initial_states 中的偏移量
     let max_hidden_size = 512u;
     let hidden_offset = dir * batch_size * max_hidden_size + batch_idx * max_hidden_size;
     let cell_offset = dir * batch_size * max_hidden_size + batch_idx * max_hidden_size + 512u * batch_size;
 
     if (is_sequence_start) {
-        // 使用较小的初始值以提高数值稳定性
         let init_base = dir * batch_size * hidden_size + batch_idx * hidden_size;
         for (var i: u32 = 0u; i < hidden_size; i++) {
-            // 使用较小的随机值初始化，而不是0
             let init_val = fract(sin(f32(i + batch_idx * 1000u)) * 43758.5453) * 0.01 - 0.005;
             h_prev[i] = initial_states[hidden_offset + i] + init_val;
             c_prev[i] = initial_states[cell_offset + i] + init_val * 0.1;
         }
     } else {
-        // 获取前一时间步的实际索引
         let prev_actual_t = select(actual_t - 1u, actual_t + 1u, is_backward);
-
-        // 读取前一状态，添加数值检查
-        let state_base = batch_state_offset +
-                        prev_actual_t * num_directions * hidden_size +
-                        dir * hidden_size;
-
-        for (var i: u32 = 0u; i < hidden_size; i++) {
+        let state_base = batch_state_offset +prev_actual_t * num_directions * hidden_size +dir * hidden_size;
+        for (var i: u32 = 0u; i < hidden_size; i++)
+        {
             let h_val = hidden_states[state_base + i];
             let c_val = cell_states[state_base + i];
-
-            // 使用自定义 is_finite 检查
             h_prev[i] = select(h_val, 0.0, !is_finite(h_val));
             c_prev[i] = select(c_val, 0.0, !is_finite(c_val));
 
-            // 额外的范围限制
             h_prev[i] = clamp(h_prev[i], -10.0, 10.0);
             c_prev[i] = clamp(c_prev[i], -10.0, 10.0);
         }
@@ -145,49 +117,35 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     for (var h_idx: u32 = 0u; h_idx < hidden_size; h_idx++) {
         var gates = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
-
-        // 计算四个门，对每个门进行数值检查
         for (var gate: u32 = 0u; gate < 4u; gate++) {
             var sum = biases[bias_dir_offset + gate * hidden_size + h_idx];
+            if (!is_finite(sum)) {sum = 0.0;}
 
-            // 检查偏置是否为有限值
-            if (!is_finite(sum)) {
-                sum = 0.0;
-            }
-
-            // W_ih * x_t 部分
+            // W_ih * x_t
             let w_ih_offset = weight_dir_offset + gate * hidden_size * input_size;
             for (var i: u32 = 0u; i < input_size; i++) {
                 let w_idx = w_ih_offset + h_idx * input_size + i;
                 let weight_val = weights[w_idx];
                 let input_val = input[x_base + i];
-
-                // 检查权重和输入值
                 if (is_finite(weight_val) && is_finite(input_val)) {
                     sum += weight_val * input_val;
                 }
             }
 
-            // W_hh * h_prev 部分
+            // W_hh * h_prev
             let w_hh_base = weight_dir_offset + 4u * hidden_size * input_size;
             let w_hh_offset = w_hh_base + gate * hidden_size * hidden_size;
             for (var j: u32 = 0u; j < hidden_size; j++) {
                 let w_idx = w_hh_offset + h_idx * hidden_size + j;
                 let weight_val = weights[w_idx];
                 let h_val = h_prev[j];
-
-                // 检查权重和隐藏状态值
                 if (is_finite(weight_val) && is_finite(h_val)) {
                     sum += weight_val * h_val;
                 }
             }
-
-            // 限制中间结果的范围
             sum = clamp(sum, -50.0, 50.0);
             gates[gate] = sum;
         }
-
-        // 应用激活函数
         let i_gate = sigmoid_stable(gates[0]);
         let f_gate = sigmoid_stable(gates[1]);
         let g_val  = tanh_stable(gates[2]);
