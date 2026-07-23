@@ -243,7 +243,6 @@ impl JudgementCounter {
         //dt/duration 表示本帧占比
         self.current_y += (target_y - self.current_y) * (dt / duration).min(1.0);
     }
-    // 统一更新
     fn update(&mut self, current_time: f64, dt: f32, target_y: f32) {
         self.update_position(current_time, dt);
         self.update_alpha(current_time, dt);
@@ -374,7 +373,6 @@ pub struct GameScene {
     // Score动画相关字段
     pub actual_score: u32,      // 实际分数（judge中的真实值，立即更新）
     pub display_score: u32,     // 显示分数（UI上显示的值，平滑过渡）
-    pub score_animation_speed: f32,
     pub current_speed: f32,
 
     //combo 动画相关字段
@@ -677,22 +675,6 @@ impl GameScene {
         ];
         let target_chart_ratio = config.chart_ratio;
 
-        // 动态计算分数动画速度，基于谱面信息
-        // 音符总数
-        let num_of_notes: u32 = chart.lines.iter()
-            .map(|line| line.notes.iter().filter(|note| !note.fake).count() as u32)
-            .sum();
-        // 谱面时长（秒）
-        let track_length = res.track_length;
-        // 基础速度：每秒处理基础分数量，与音符密度相关
-        // 音符密度 = num_of_notes / track_length
-        // 期望每个音符的分数动画在合理时间内完成
-        let base_score_per_note = 1_000_000.0 / num_of_notes.max(1) as f32;
-        let note_density = num_of_notes as f32 / track_length.max(1.0);
-        // 速度 = 基础分/音符 * 音符密度 * 系数
-        // 高密度谱面需要更快的处理速度
-        let score_animation_speed = base_score_per_note * note_density * 2.0;
-
         Ok(Self {
             should_exit: false,
             next_scene: None,
@@ -738,8 +720,6 @@ impl GameScene {
             // 初始化score动画字段
             actual_score: 0,
             display_score: 0,
-            // 动态计算的动画速度
-            score_animation_speed,
             current_speed: 0.0,
             // 初始化combo动画字段
             combo_pluse_anim: 0.0,
@@ -791,11 +771,13 @@ impl GameScene {
         let time = tm.now() as f32;
         let p = match self.state {
             State::Starting => {
+                self.res.loading_progress = 1. - (1. - time / Self::BEFORE_TIME).powi(3);
                 if time <= Self::BEFORE_TIME {
                     1. - (1. - time / Self::BEFORE_TIME).powi(3)
                 } else {
                     1.
                 }
+
             }
             State::BeforeMusic => 1.,
             State::Playing => 1.,
@@ -805,7 +787,6 @@ impl GameScene {
             }
         };
         let mut c = Color::new(1., 1., 1., self.res.alpha);
-        // 在Starting状态时，所有UI元素从0透明度渐变到1透明度
         if matches!(self.state, State::Starting) { c.a *= p; }
         if matches!(self.state, State::Ending) { c.a *= -p }
         let res = &mut self.res;
@@ -1594,7 +1575,6 @@ impl Scene for GameScene {
             }
         };
 
-        // 更新当前缩放比例（如果启用了加载动画）
         if !self.res.config.disable_loading {
             match self.state {
                 State::Starting => {
@@ -1606,12 +1586,10 @@ impl Scene for GameScene {
                     self.current_chart_ratio = self.target_chart_ratio + (1.0 - self.target_chart_ratio) * (1.0 - t);
                 }
                 _ => {
-                    // 其他状态使用目标值
                     self.current_chart_ratio = self.target_chart_ratio;
                 }
             }
         } else {
-            // 禁用加载动画时直接使用目标值
             self.current_chart_ratio = self.target_chart_ratio;
         }
         if matches!(self.state, State::Playing) {
@@ -1678,13 +1656,9 @@ impl Scene for GameScene {
                     for counter in self.judgement_counters.iter_mut() {
                         counter.reset(self.res.config.chart_ratio, 0.0);
                     }
-                    self.judgement_reset_done = true; // 标记为已重置
+                    self.judgement_reset_done = true;
                 }
-
-                // 计算 Ending 状态的时间
                 let t = time - self.res.track_length - WAIT_TIME;
-
-                // 如果 Ending 状态持续时间超过 AFTER_TIME + 0.3，则进入下一步逻辑
                 if t >= AFTER_TIME + 0.3 {
                     let mut record_data = None;
                     #[cfg(feature = "closed")]
@@ -1743,35 +1717,21 @@ impl Scene for GameScene {
             self.judge.update(&mut self.res, &mut self.chart, &mut self.bad_notes, self.is_fast_forwarding);
             self.gl.quad_gl.viewport(None);
         }
-
-        // 更新实际分数（从 judge 获取最新分数）
         self.actual_score = self.judge.score();
-
         self.process_judgements(tm);
 
-        // 更新判定条
         let dt = 0.016_f32;
         self.judgement_bar.update(dt, tm.now());
 
-        let dt = 0.016_f32;
-
+        //let dt = 0.016_f32;
         if self.display_score != self.actual_score {
             let diff = (self.actual_score as i32 - self.display_score as i32) as f32;
-            let base_speed = self.score_animation_speed;
             let diff_magnitude = diff.abs();
-            
-            // 纯指数增长：速度 = base * e^(diff / k)
-            // k 控制增长速率，差值每增加 k，速度翻 e 倍
-            let k = base_speed;  // 使用 base_speed 作为缩放因子
-            let exp_multiplier = (diff_magnitude / k).exp();
-            
-            let target_speed = base_speed * exp_multiplier;
-            
-            // 平滑过渡到目标速度
+            const SPEED_FACTOR: f32 = 1.004;
+            let target_speed = diff_magnitude * SPEED_FACTOR;
             let speed_diff = target_speed - self.current_speed.abs();
             self.current_speed += speed_diff.signum() * speed_diff.abs() * dt * 5.0;
-            // 最小速度为 base_speed，最大速度无硬编码限制
-            self.current_speed = self.current_speed.max(base_speed);
+            self.current_speed = self.current_speed.max(0.0);
 
             let step_f = self.current_speed * dt * diff.signum();
             let step = step_f.abs().ceil() as u32;
@@ -1782,12 +1742,9 @@ impl Scene for GameScene {
                 self.display_score = self.display_score.saturating_sub(step);
             }
         } else {
-            // 差值为0时，重置速度
             self.current_speed = 0.0;
         }
-
         {
-            // 先排序，获得目标位置
             let chart_ratio = self.current_chart_ratio;
             let base_spacing = 0.1;
             let spacing = base_spacing / chart_ratio;
@@ -1796,10 +1753,8 @@ impl Scene for GameScene {
 
             let mut counters = self.judgement_counters.clone();
             counters.sort_by(|a, b| a.last_update.partial_cmp(&b.last_update).unwrap());
-            // 遍历排序后的索引，为每个计数器计算目标垂直位置
             for (i, target_counter) in counters.iter().enumerate() {
                 let target_y = target_base_y - (i as f32 * spacing);
-                // 找到原始集合中对应的计数器并更新：
                 if let Some(counter) = self.judgement_counters.iter_mut().find(|c| c.note_type == target_counter.note_type) {
                     if counter.current_alpha > 0.01 {
                         counter.update(tm.now(), dt, target_y);
@@ -1951,6 +1906,7 @@ impl Scene for GameScene {
 
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
         draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+        res.chart_ratio_inv = 1.0 / self.current_chart_ratio;
         self.chart.render(ui, res);
 
         set_camera(&Camera2D {
