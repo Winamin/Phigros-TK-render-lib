@@ -711,15 +711,16 @@ impl Emitter {
                 cpu.fade_start_time = cpu.lived + fade_delay;
             }
 
-            let extra_scale = if cpu.fade_start_time >= 0.0 && cpu.lived > cpu.fade_start_time {
-                let fade_duration = self.config.lifetime * 0.3;
-                let fade_progress = ((cpu.lived - cpu.fade_start_time) / fade_duration).min(1.0);
-                1.0 - fade_progress
-            } else {
-                1.0
-            };
+            //let extra_scale = if cpu.fade_start_time >= 0.0 && cpu.lived > cpu.fade_start_time {
+            //    let fade_duration = self.config.lifetime * 0.3;
+            //    let fade_progress = ((cpu.lived - cpu.fade_start_time) / fade_duration).min(1.0);
+            //    1.0 - fade_progress
+            //} else {
+            //    1.0
+            //};
 
-            gpu.pos.w = base_size * extra_scale;
+            //gpu.pos.w = base_size * extra_scale;
+            gpu.pos.w = base_size;
 
             gpu.data.y = life_ratio;
 
