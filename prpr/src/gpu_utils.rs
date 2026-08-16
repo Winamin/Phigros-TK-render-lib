@@ -185,7 +185,6 @@ impl GpuNetworkExecutor {
             ],
             label: Some("Common Bind Group Layout"),
         });
-        )
         let lstm_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
